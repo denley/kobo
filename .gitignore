@@ -1,0 +1,5 @@
+/target
+# Never commit ROM data.
+*.smc
+*.sfc
+*.srm

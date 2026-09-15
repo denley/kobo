@@ -2,7 +2,7 @@
 
 An open-source Super Mario World ROM editor and build system.
 Desktop app for Windows, Linux, and macOS.
-Early scoping stage; nothing is built yet.
+Early stage: roadmap step 1 is in progress.
 
 ## Principles
 
@@ -58,12 +58,61 @@ Early scoping stage; nothing is built yet.
 4. Overworld, Layer 3, graphics and palette editing, emulator integration
    (play-from-level, Mesen-S / bsnes-plus debugging).
 
+## Stack and layout
+
+- **Rust** (pinned in `rust-toolchain.toml` and `mise.toml`), edition 2024, cargo workspace.
+  - `crates/kobo-core`: the library. All logic lives here.
+  - `crates/kobo-cli`: the `kobo` binary. Thin shell over the core; no logic of its own.
+- `kobo_core::addr` is the only place that knows how SNES addresses map to file offsets.
+  Every ROM read takes a `SnesAddr` and goes through the ROM's `Mapping` (LoROM or SA-1).
+  Conversions mirror Asar's conventions so addresses agree with the rest of the toolchain.
+- `kobo_core::rom::Rom` strips and remembers the 512-byte copier header; `data()` is always
+  headerless. Identity is by SHA-1 of the headerless image.
+
+## Commands
+
+```
+cargo build --workspace
+cargo test --workspace                       # ROM-backed tests skip if no ROM is configured
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all
+cargo run -- rom info [path]                 # header, checksum, hash, identity
+cargo run -- addr '$05E000' [--sa1]          # SNES <-> file offset
+```
+
+CI (`.github/workflows/ci.yml`) runs fmt, clippy with warnings denied, and tests on Linux,
+Windows, and macOS. Keep all three green.
+
+## Test tiers and ROM configuration
+
+- **Unit tests** use synthetic data and always run.
+- **ROM-backed tests** (`crates/kobo-core/tests/`) load the vanilla ROM through
+  `kobo_core::config::vanilla_rom_path()`: the `KOBO_SMW_ROM` env var, else `roms.smw` in
+  `$XDG_CONFIG_HOME/kobo/config.toml`. They print `skipping: ...` and pass when no ROM is
+  configured, so CI never needs ROM data. Run them locally before pushing.
+- The vanilla reference is No-Intro "Super Mario World (USA)", headerless SHA-1
+  `6b47bb75d16514b6a476aa0c73a683a2a4c18765`, checksum `$A0DA`.
+- Planned oracles for the renderer: emulator RAM dumps of the expanded tile grid (`$7EC800` /
+  `$7FC800`) for level decoding, and Lunar Magic exports for GFX, palette, and Map16 formats.
+
+## SMW facts worth remembering
+
+- Level pointer tables: layer 1 at `$05E000` and layer 2 at `$05E600` hold 3-byte pointers,
+  0x200 levels each. Sprite pointers at `$05EC00` are 2 bytes each, implicitly bank `$07`.
+- A layer 2 pointer with bank `$FF` marks a background tilemap; the game substitutes bank `$0C`.
+- Level 105 (Yoshi's Island 1) layer 1 data starts at `$0688DD` in vanilla.
+
+## Decisions
+
+- **Rust core.** Chosen for single-binary distribution, compile-time address typing, C FFI to
+  Asar, and the ability to expose the core to Python, Lua, JS, and WebAssembly later.
+- **Headless 65816 core is the preferred route for object rendering.** Execute the ROM's own
+  level-loading routines rather than re-implementing every object. Small formats (LC_LZ2, GFX,
+  palettes) are hand-written because the build must also encode them. Still to be prototyped.
+
 ## Open decisions
 
-- Core language and GUI toolkit. Leaning Rust for the core (Asar has a C library API). GUI choice
-  deferred until the library exists.
-- Level rendering: hand-written object rendering vs executing the ROM's own routines in a
-  headless 65816 core. Prototype before committing.
+- GUI toolkit. Deferred until the library exists.
 - At what level can/will baseroms be supported?
 
 ## Prior art to know
