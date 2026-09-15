@@ -6,6 +6,8 @@
 pub mod addr;
 pub mod compress;
 pub mod config;
+pub mod cpu;
+pub mod expand;
 pub mod gfx;
 pub mod image;
 pub mod level;

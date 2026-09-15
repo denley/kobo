@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
+use kobo_core::expand;
 use kobo_core::gfx::{self, Bpp, GFX_FILE_COUNT};
 use kobo_core::image::{grayscale, tile_sheet};
 use kobo_core::level::{self, Layer2Data};
@@ -107,6 +108,22 @@ enum GfxCommand {
 enum LevelCommand {
     /// Print a level's header and data pointers.
     Info {
+        #[command(flatten)]
+        rom: RomArg,
+        /// Level number in hex, for example `105`.
+        level: String,
+    },
+    /// Render a level's layer 1 to PNG by running the ROM's own loader.
+    Png {
+        #[command(flatten)]
+        rom: RomArg,
+        /// Level number in hex, for example `105`.
+        level: String,
+        /// Output PNG path.
+        out: PathBuf,
+    },
+    /// Print a level's expanded tile grid as hex, one screen row per line.
+    Tiles {
         #[command(flatten)]
         rom: RomArg,
         /// Level number in hex, for example `105`.
@@ -218,9 +235,11 @@ fn main() -> Result<()> {
                 bpp,
             } => gfx_png(&rom.load()?, &index, &out, columns, bpp),
         },
-        Command::Level {
-            command: LevelCommand::Info { rom, level },
-        } => level_info(&rom.load()?, &level),
+        Command::Level { command } => match command {
+            LevelCommand::Info { rom, level } => level_info(&rom.load()?, &level),
+            LevelCommand::Png { rom, level, out } => level_png(&rom.load()?, &level, &out),
+            LevelCommand::Tiles { rom, level } => level_tiles(&rom.load()?, &level),
+        },
         Command::Palette {
             command: PaletteCommand::Png { rom, sel, out },
         } => palette_png(&rom.load()?, &sel, &out),
@@ -272,6 +291,50 @@ fn level_info(rom: &Rom, level: &str) -> Result<()> {
     println!("layer 3 priority: {}", h.layer3_priority);
     println!("item memory:      {}", h.item_memory);
     println!("vertical scroll:  {}", h.vertical_scroll);
+    Ok(())
+}
+
+fn level_png(rom: &Rom, level: &str, out: &PathBuf) -> Result<()> {
+    let level = parse_level(level)?;
+    let tiles = expand::expand_level(rom, level)?;
+    if tiles.vertical {
+        bail!("level {level:03X} is vertical; vertical rendering is not implemented yet");
+    }
+    let sel = tiles.header.palette_select();
+    let pal = palette::vanilla_level_palette(rom, sel)?;
+    let back = palette::vanilla_back_area_color(rom, sel.back_area)?.to_rgb8();
+    let tileset = tiles.header.object_tileset;
+    let table = map16::vanilla_map16(rom, tileset, true)?;
+    let layer_tiles = LayerTiles::for_object_tileset(rom, tileset)?;
+    let img = render::level_image(&tiles, &table, &layer_tiles, &pal, back);
+    img.write_png(out)?;
+    println!(
+        "level {level:03X}: {} screens, mode ${:02X}, {}x{} -> {}",
+        tiles.screens,
+        tiles.level_mode,
+        img.width,
+        img.height,
+        out.display()
+    );
+    Ok(())
+}
+
+fn level_tiles(rom: &Rom, level: &str) -> Result<()> {
+    let level = parse_level(level)?;
+    let tiles = expand::expand_level(rom, level)?;
+    println!(
+        "level {level:03X}: {} screens, mode ${:02X}, vertical {}",
+        tiles.screens, tiles.level_mode, tiles.vertical
+    );
+    for screen in 0..tiles.screens {
+        println!("screen {screen:02X}:");
+        for y in 0..expand::SCREEN_ROWS {
+            let row: Vec<String> = (0..expand::SCREEN_COLS)
+                .map(|x| format!("{:03X}", tiles.tile(screen, x, y)))
+                .collect();
+            println!("  {}", row.join(" "));
+        }
+    }
     Ok(())
 }
 
