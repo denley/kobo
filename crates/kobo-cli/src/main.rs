@@ -122,6 +122,16 @@ enum LevelCommand {
         /// Output PNG path.
         out: PathBuf,
     },
+    /// Write a level's expanded tile grid planes as `level_XXX.l1lo.bin`
+    /// and `.l1hi.bin` in the oracle dump layout.
+    Dump {
+        #[command(flatten)]
+        rom: RomArg,
+        /// Level number in hex, for example `105`.
+        level: String,
+        /// Output directory.
+        dir: PathBuf,
+    },
     /// Print a level's expanded tile grid as hex, one screen row per line.
     Tiles {
         #[command(flatten)]
@@ -239,6 +249,7 @@ fn main() -> Result<()> {
             LevelCommand::Info { rom, level } => level_info(&rom.load()?, &level),
             LevelCommand::Png { rom, level, out } => level_png(&rom.load()?, &level, &out),
             LevelCommand::Tiles { rom, level } => level_tiles(&rom.load()?, &level),
+            LevelCommand::Dump { rom, level, dir } => level_dump(&rom.load()?, &level, &dir),
         },
         Command::Palette {
             command: PaletteCommand::Png { rom, sel, out },
@@ -297,9 +308,6 @@ fn level_info(rom: &Rom, level: &str) -> Result<()> {
 fn level_png(rom: &Rom, level: &str, out: &PathBuf) -> Result<()> {
     let level = parse_level(level)?;
     let tiles = expand::expand_level(rom, level)?;
-    if tiles.vertical {
-        bail!("level {level:03X} is vertical; vertical rendering is not implemented yet");
-    }
     let sel = tiles.header.palette_select();
     let pal = palette::vanilla_level_palette(rom, sel)?;
     let back = palette::vanilla_back_area_color(rom, sel.back_area)?.to_rgb8();
@@ -319,6 +327,16 @@ fn level_png(rom: &Rom, level: &str, out: &PathBuf) -> Result<()> {
     Ok(())
 }
 
+fn level_dump(rom: &Rom, level: &str, dir: &PathBuf) -> Result<()> {
+    let level = parse_level(level)?;
+    let tiles = expand::expand_level(rom, level)?;
+    fs::create_dir_all(dir)?;
+    fs::write(dir.join(format!("level_{level:03X}.l1lo.bin")), &tiles.low)?;
+    fs::write(dir.join(format!("level_{level:03X}.l1hi.bin")), &tiles.high)?;
+    println!("level {level:03X}: wrote planes to {}", dir.display());
+    Ok(())
+}
+
 fn level_tiles(rom: &Rom, level: &str) -> Result<()> {
     let level = parse_level(level)?;
     let tiles = expand::expand_level(rom, level)?;
@@ -326,14 +344,12 @@ fn level_tiles(rom: &Rom, level: &str) -> Result<()> {
         "level {level:03X}: {} screens, mode ${:02X}, vertical {}",
         tiles.screens, tiles.level_mode, tiles.vertical
     );
-    for screen in 0..tiles.screens {
-        println!("screen {screen:02X}:");
-        for y in 0..expand::SCREEN_ROWS {
-            let row: Vec<String> = (0..expand::SCREEN_COLS)
-                .map(|x| format!("{:03X}", tiles.tile(screen, x, y)))
-                .collect();
-            println!("  {}", row.join(" "));
-        }
+    let (w, h) = tiles.size();
+    for y in 0..h {
+        let row: Vec<String> = (0..w)
+            .map(|x| format!("{:03X}", tiles.tile_at(x, y)))
+            .collect();
+        println!("{}", row.join(" "));
     }
     Ok(())
 }

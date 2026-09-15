@@ -3,7 +3,9 @@
 //!
 //! The game keeps the grid in two byte planes: low bytes at `$7EC800` and
 //! high bytes at `$7FC800`, `0x3800` bytes each. Horizontal levels store
-//! each screen as 16 columns by 27 rows, screen after screen.
+//! each screen as 16 columns by 27 rows, screen after screen. Vertical
+//! levels are 32 tiles wide; each screen is 16 rows stored as a left
+//! half and a right half of 16 by 16 tiles.
 
 use thiserror::Error;
 
@@ -28,7 +30,12 @@ mod ram {
     pub const SCREENS: u32 = 0x7E_005D;
     pub const TILES_LOW: u32 = 0x7E_C800;
     pub const TILES_HIGH: u32 = 0x7F_C800;
+    pub const LAYER2_TILEMAP_LOW: u32 = 0x7E_B900;
+    pub const LAYER2_TILEMAP_HIGH: u32 = 0x7E_BD00;
 }
+
+/// Bytes per plane of the layer 2 background tilemap buffer.
+pub const LAYER2_TILEMAP_LEN: usize = 0x400;
 
 /// ROM routines the loader entry points call, from the vanilla layout.
 /// Lunar Magic keeps these entry points in place.
@@ -37,7 +44,20 @@ mod routines {
     pub const LOAD_HEADER_POINTERS: u32 = 0x05_D796;
     /// `CODE_05801E`: clears the buffers and runs `LoadLevel`.
     pub const LOAD_LEVEL_DATA: u32 = 0x05_801E;
+    /// `MakeMode7BossArenaMap16`: 16 tiles of `$3232` at X and X+`$1B0`,
+    /// plus lava when X ends at `$C0`. Ends with RTS.
+    pub const BOSS_ARENA_FLOOR: u32 = 0x00_9A1F;
+    /// `MakeASolidFloor`: 16 tiles of `$05` at X and X+`$1B0`. Ends with RTS.
+    pub const BOSS_SOLID_FLOOR: u32 = 0x00_9A3D;
+    /// `CODE_009FB8`: level preparation's layer 3 setup. For layer 3 tides
+    /// it zeroes rows 16-26 of every layer 2 screen (the tide tilemap lives
+    /// there) and sets the layer 2 interaction flag. Ends with RTS.
+    pub const PREPARE_LAYER3: u32 = 0x00_9FB8;
 }
+
+/// Level modes whose objects are not loaded; the boss code draws the
+/// arena instead during level preparation.
+pub const BOSS_MODES: [u8; 3] = [0x09, 0x0B, 0x10];
 
 const STEP_LIMIT: u64 = 200_000_000;
 
@@ -67,6 +87,10 @@ pub struct LevelTiles {
     pub screens: usize,
     pub low: Vec<u8>,
     pub high: Vec<u8>,
+    /// Layer 2 background tilemap planes, when the level uses a
+    /// pre-built background instead of layer 2 objects. Tile numbers
+    /// index the BG half of the Map16 table (`0x200` upwards).
+    pub layer2_tilemap: Option<(Vec<u8>, Vec<u8>)>,
 }
 
 impl LevelTiles {
@@ -76,18 +100,50 @@ impl LevelTiles {
         self.low[i] as u16 | ((self.high[i] as u16) << 8)
     }
 
-    /// Width and height in tiles for rendering a horizontal level.
+    /// Buffer offset of a level-wide tile position, for either orientation.
+    pub fn offset(&self, x: usize, y: usize) -> usize {
+        if self.vertical {
+            (y / 16) * 0x200 + (x / 16) * 0x100 + (y % 16) * 16 + (x % 16)
+        } else {
+            (x / SCREEN_COLS) * SCREEN_LEN + y * SCREEN_COLS + (x % SCREEN_COLS)
+        }
+    }
+
+    /// Map16 tile number at a level-wide position.
+    pub fn tile_at(&self, x: usize, y: usize) -> u16 {
+        let i = self.offset(x, y);
+        self.low[i] as u16 | ((self.high[i] as u16) << 8)
+    }
+
+    /// Width and height of the level in tiles.
     pub fn size(&self) -> (usize, usize) {
-        (self.screens * SCREEN_COLS, SCREEN_ROWS)
+        if self.vertical {
+            (32, self.screens * 16)
+        } else {
+            (self.screens * SCREEN_COLS, SCREEN_ROWS)
+        }
+    }
+
+    /// Map16 tile number (BG numbering, `0x200` upwards) at a position in
+    /// the layer 2 background tilemap, which is two screens of 16 by 27
+    /// tiles laid out like the main buffer. Returns `None` for levels
+    /// whose layer 2 is objects.
+    pub fn layer2_bg_tile(&self, screen: usize, x: usize, y: usize) -> Option<u16> {
+        let (lo, hi) = self.layer2_tilemap.as_ref()?;
+        let i = (screen % 2) * SCREEN_LEN + y * SCREEN_COLS + x;
+        Some(0x200 | lo[i] as u16 | ((hi[i] as u16) << 8))
     }
 }
 
 /// The `$0109` value that selects `level`, and the high-byte flag.
+///
+/// Zero means "no override", so levels `000` and `100` cannot be selected
+/// this way, nor can low bytes `$DC` and above.
 pub fn override_for(level: u16) -> Option<(u8, u8)> {
     let lo = level & 0xFF;
     let hi = (level >> 8) as u8;
     let v = if lo < 0x25 { lo } else { lo + 0x24 };
-    (v <= 0xFF).then_some((v as u8, hi))
+    (lo != 0 && v <= 0xFF).then_some((v as u8, hi))
 }
 
 /// Runs the ROM's level loader for `level` and returns the tile grid.
@@ -106,6 +162,34 @@ pub fn expand_level(rom: &Rom, level: u16) -> Result<LevelTiles, ExpandError> {
     // Game mode $11 sets the maximum screen count before loading.
     bus.set_wram_u8(ram::LAST_SCREEN_HORIZ, 0x20);
     run(&mut cpu, &mut bus, routines::LOAD_LEVEL_DATA)?;
+    // Boss arenas: level preparation draws the floor the boss code expects.
+    let (routine, x) = match bus.wram_u8(ram::LEVEL_MODE) {
+        0x09 => (Some(routines::BOSS_ARENA_FLOOR), 0xB0),
+        0x0B => (Some(routines::BOSS_SOLID_FLOOR), 0x50),
+        0x10 => (Some(routines::BOSS_ARENA_FLOOR), 0xC0),
+        _ => (None, 0),
+    };
+    if let Some(routine) = routine {
+        cpu.p |= crate::cpu::Flags::M | crate::cpu::Flags::X;
+        cpu.db = 0;
+        cpu.x = x;
+        cpu.call_jsr(&mut bus, routine, STEP_LIMIT)
+            .map_err(|source| ExpandError::Cpu { level, source })?;
+    }
+    // Level preparation's layer 3 setup also touches the tile grid.
+    cpu.p |= crate::cpu::Flags::M | crate::cpu::Flags::X;
+    cpu.db = 0;
+    cpu.call_jsr(&mut bus, routines::PREPARE_LAYER3, STEP_LIMIT)
+        .map_err(|source| ExpandError::Cpu { level, source })?;
+    let layer2_tilemap = match level::layer2_ptr(rom, level)? {
+        level::Layer2Data::Tilemap(_) => Some((
+            bus.wram_slice(ram::LAYER2_TILEMAP_LOW, LAYER2_TILEMAP_LEN)
+                .to_vec(),
+            bus.wram_slice(ram::LAYER2_TILEMAP_HIGH, LAYER2_TILEMAP_LEN)
+                .to_vec(),
+        )),
+        level::Layer2Data::Objects(_) => None,
+    };
     Ok(LevelTiles {
         level,
         header,
@@ -114,5 +198,6 @@ pub fn expand_level(rom: &Rom, level: u16) -> Result<LevelTiles, ExpandError> {
         screens: bus.wram_u8(ram::SCREENS) as usize,
         low: bus.wram_slice(ram::TILES_LOW, GRID_LEN).to_vec(),
         high: bus.wram_slice(ram::TILES_HIGH, GRID_LEN).to_vec(),
+        layer2_tilemap,
     })
 }

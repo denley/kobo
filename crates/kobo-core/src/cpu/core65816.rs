@@ -1813,6 +1813,41 @@ impl Cpu {
         self.push16(bus, RETURN_PC.wrapping_sub(1));
         self.pb = (addr >> 16) as u8;
         self.pc = addr as u16;
+        self.run_to_sentinel(bus, limit)
+    }
+
+    /// Calls a subroutine in the current program bank as if by `JSR` and
+    /// runs until it returns with `RTS`. The sentinel lives in bank `$FF`,
+    /// so the program bank is switched there for the duration.
+    pub fn call_jsr(&mut self, bus: &mut impl Bus, addr: u32, limit: u64) -> Result<(), CpuError> {
+        // Fake a JSL frame beneath so a stray RTL still lands on the sentinel.
+        self.push8(bus, RETURN_PB);
+        self.push16(bus, RETURN_PC.wrapping_sub(1));
+        self.pb = (addr >> 16) as u8;
+        self.pc = addr as u16;
+        // A JSR-style return needs the sentinel in the same bank; place a
+        // second frame that returns to the JSL sentinel via an RTL there.
+        // Simpler: run until the JSR-level RTS pops the address below.
+        let start = self.steps;
+        let return_sp = self.sp;
+        // Push the RTS return address (sentinel - 1) on top.
+        self.push16(bus, RETURN_PC.wrapping_sub(1));
+        while !((self.pc == RETURN_PC && self.sp == return_sp)
+            || (self.pb == RETURN_PB && self.pc == RETURN_PC))
+        {
+            if self.steps - start >= limit {
+                return Err(CpuError::Limit(limit));
+            }
+            self.step(bus)?;
+        }
+        // Drop the fake JSL frame if the routine returned with RTS.
+        if self.sp == return_sp {
+            self.sp = self.sp.wrapping_add(3);
+        }
+        Ok(())
+    }
+
+    fn run_to_sentinel(&mut self, bus: &mut impl Bus, limit: u64) -> Result<(), CpuError> {
         let start = self.steps;
         while !(self.pb == RETURN_PB && self.pc == RETURN_PC) {
             if self.steps - start >= limit {

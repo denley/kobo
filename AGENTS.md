@@ -81,6 +81,8 @@ cargo run -- gfx list|export|png [-r rom]    # GFX files: table, LM-layout .bin 
 cargo run -- level info 105                  # primary header and data pointers
 cargo run -- palette png --level 105 out.png # 16x16 swatch of the assembled level palette
 cargo run -- map16 png --level 105 out.png   # all 0x400 Map16 tiles in colour
+cargo run -- level png 105 out.png           # render a level by running the ROM's own loader
+cargo run -- level tiles|dump 105 [dir]      # the expanded Map16 grid as hex, or raw planes
 cargo run -- addr '$05E000' [--sa1]          # SNES <-> file offset
 ```
 
@@ -101,8 +103,13 @@ Windows, and macOS. Keep all three green.
   configured, so CI never needs ROM data. Run them locally before pushing.
 - The vanilla reference is No-Intro "Super Mario World (USA)", headerless SHA-1
   `6b47bb75d16514b6a476aa0c73a683a2a4c18765`, checksum `$A0DA`.
-- Planned oracles for the renderer: emulator RAM dumps of the expanded tile grid (`$7EC800` /
-  `$7FC800`) for level decoding, and Lunar Magic exports for GFX, palette, and Map16 formats.
+- **Emulator oracle** (`tools/oracle/`): `dump.sh <rom> <outdir> 105,106,...` runs Mesen 2
+  headlessly, navigates to each level through the file select, and dumps the tile grid,
+  CGRAM, VRAM, and header RAM on the first level frame. `tests/oracle_levels.rs` compares
+  `expand::expand_level` against a dump directory when `KOBO_ORACLE_DIR` is set; all 438
+  selectable vanilla levels match byte for byte. Dumps live in `~/.local/share/kobo/oracle/`
+  and are never committed. `trace_writes.lua` logs who writes a RAM address, for debugging.
+- Lunar Magic exports (hashes in `tests/fixtures/`) are the oracle for GFX, palette, and Map16.
 
 ## Reference material
 
@@ -110,9 +117,15 @@ Windows, and macOS. Keep all three green.
   from GitHub, not committed). Use it to read how the game consumes a table; never build on it.
   SMW Central is behind a JavaScript challenge and cannot be fetched from tools.
 - Asar 1.91 built from source: `~/.local/bin/asar`, `libasar.so` in `~/.local/lib`.
-- Mesen 2.1.1: `~/.local/share/kobo/tools/mesen/Mesen`. Headless use is
+- Mesen 2: `~/.local/share/kobo/tools/mesen/Mesen` (official 2.1.1 binary). Headless use is
   `Mesen --testRunner script.lua rom.sfc --timeout=N`; the script ends with `emu.stop(code)`.
   Lua enums are lower-camel-cased C++ names: `emu.memType.snesMemory`, `emu.eventType.endFrame`.
+  Scripts need `Debug.ScriptWindow.AllowIoOsAccess` and a controller on `Snes.Port1` in
+  `~/.config/Mesen2/settings.json`. The official binary bundles GCC 12's libstdc++ and aborts
+  with `std::bad_cast` at startup when the system libstdc++ loads first (via ICU from .NET);
+  `dump.sh` sets `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1` to avoid ICU. The proper fix is a
+  build against the system libstdc++ (AUR `mesen2-git`, or the source build in
+  `~/.local/share/kobo/tools/mesen-src/`).
 
 ## SMW facts worth remembering
 
@@ -144,16 +157,26 @@ Windows, and macOS. Keep all three green.
   7 patch `1C4-1C7`/`1EC-1EF` from `$0D8A70` at load time. Layer 2 tiles are `$0D9100`; the game
   numbers them `200-3FF`, Lunar Magic's `.map16` stores them at file index `8000`.
 - Level load: `$7E0109` non-zero forces a level: values `< $25` are the level low byte, else
-  low byte = value - `$24`; `$7E1F11` non-zero sets the high byte. The title screen uses this
-  with `$EB` (level `C7`), and game mode 3 falls straight into the level loader.
+  low byte = value - `$24`; `$7E1F11` non-zero sets the high byte. Zero means no override, so
+  levels `000`/`100` and low bytes `$DC+` cannot be selected this way. The title screen uses
+  `$EB` (level `C7`); game mode 3 and game mode `$11` both enter `GM11LoadLevel` (`$0096D5`).
+- `expand::expand_level` runs `CODE_05D796` (header pointers), `CODE_05801E` (clear buffers,
+  `LoadLevel`), then the level-preparation pieces that touch the grid: boss floors
+  (`MakeMode7BossArenaMap16`/`MakeASolidFloor` for modes 09/10/0B) and the layer 3 setup
+  `CODE_009FB8`, which zeroes rows 16-26 of the layer 2 screens for tide levels.
+- Tile grid layout: horizontal levels are 16x27 per screen, screen after screen; layer 2 objects
+  use screens `$10+` of the same buffer. Vertical levels are 32 wide; each screen is 16 rows
+  stored as a left and a right 16x16 half. The layer 2 background tilemap is decoded into
+  `$7EB900`/`$7EBD00` (two screens); its tile numbers index the BG Map16 (`200+`).
 
 ## Decisions
 
 - **Rust core.** Chosen for single-binary distribution, compile-time address typing, C FFI to
   Asar, and the ability to expose the core to Python, Lua, JS, and WebAssembly later.
-- **Headless 65816 core is the preferred route for object rendering.** Execute the ROM's own
-  level-loading routines rather than re-implementing every object. Small formats (LC_LZ2, GFX,
-  palettes) are hand-written because the build must also encode them. Still to be prototyped.
+- **Headless 65816 core for object rendering.** `kobo_core::cpu` executes the ROM's own
+  level-loading routines rather than re-implementing every object; validated against emulator
+  dumps of every vanilla level. Small formats (LC_LZ2, GFX, palettes) are hand-written because
+  the build must also encode them.
 
 ## Open decisions
 

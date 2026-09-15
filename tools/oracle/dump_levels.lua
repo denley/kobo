@@ -51,8 +51,8 @@ end
 local function override_for(level)
   local lo, hi = level & 0xFF, level >> 8
   local v = lo < 0x25 and lo or lo + 0x24
-  if v > 0xFF then
-    return nil
+  if lo == 0 or v > 0xFF then
+    return nil -- zero means "no override"; $DC+ overflows
   end
   return v, hi
 end

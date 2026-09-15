@@ -132,7 +132,8 @@ pub fn map16_sheet(
     img
 }
 
-/// Renders a horizontal level's layer 1 tile grid over the back area colour.
+/// Renders a level's layer 1 tile grid (and layer 2 background tilemap,
+/// if any) over the back area colour.
 pub fn level_image(
     tiles: &crate::expand::LevelTiles,
     map16: &Map16Table,
@@ -143,15 +144,33 @@ pub fn level_image(
     let (w, h) = tiles.size();
     let mut img = RgbImage::new(w as u32 * 16, h as u32 * 16);
     img.pixels.fill(background);
-    for screen in 0..tiles.screens {
-        for y in 0..crate::expand::SCREEN_ROWS {
-            for x in 0..crate::expand::SCREEN_COLS {
-                let n = tiles.tile(screen, x, y);
-                if let Some(tile) = map16.get(n) {
-                    let px = ((screen * crate::expand::SCREEN_COLS + x) * 16) as u32;
-                    let py = (y * 16) as u32;
-                    draw_map16_tile(&mut img, px, py, tile, layer_tiles, palette);
+    // Layer 2 background tilemap, repeated every two screens.
+    if tiles.layer2_tilemap.is_some() && !tiles.vertical {
+        for screen in 0..tiles.screens {
+            for y in 0..crate::expand::SCREEN_ROWS {
+                for x in 0..crate::expand::SCREEN_COLS {
+                    let n = tiles.layer2_bg_tile(screen, x, y).unwrap();
+                    if let Some(tile) = map16.get(n) {
+                        let px = ((screen * crate::expand::SCREEN_COLS + x) * 16) as u32;
+                        let py = (y * 16) as u32;
+                        draw_map16_tile(&mut img, px, py, tile, layer_tiles, palette);
+                    }
                 }
+            }
+        }
+    }
+    for y in 0..h {
+        for x in 0..w {
+            let n = tiles.tile_at(x, y);
+            if let Some(tile) = map16.get(n) {
+                draw_map16_tile(
+                    &mut img,
+                    (x * 16) as u32,
+                    (y * 16) as u32,
+                    tile,
+                    layer_tiles,
+                    palette,
+                );
             }
         }
     }
