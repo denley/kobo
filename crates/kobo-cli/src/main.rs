@@ -12,6 +12,7 @@ use kobo_core::level::{self, Layer2Data};
 use kobo_core::map16;
 use kobo_core::palette::{self, LevelPaletteSelect};
 use kobo_core::render::{self, LayerTiles};
+use kobo_core::sprites;
 use kobo_core::{Mapping, PcAddr, Rom, SnesAddr, config};
 
 #[derive(Parser)]
@@ -113,7 +114,7 @@ enum LevelCommand {
         /// Level number in hex, for example `105`.
         level: String,
     },
-    /// Render a level's layer 1 to PNG by running the ROM's own loader.
+    /// Render a level to PNG by running the ROM's own loader.
     Png {
         #[command(flatten)]
         rom: RomArg,
@@ -121,6 +122,16 @@ enum LevelCommand {
         level: String,
         /// Output PNG path.
         out: PathBuf,
+        /// Leave out the sprite markers.
+        #[arg(long)]
+        no_sprites: bool,
+    },
+    /// List a level's sprites.
+    Sprites {
+        #[command(flatten)]
+        rom: RomArg,
+        /// Level number in hex, for example `105`.
+        level: String,
     },
     /// Write a level's expanded tile grid planes as `level_XXX.l1lo.bin`
     /// and `.l1hi.bin` in the oracle dump layout.
@@ -263,6 +274,13 @@ impl RomArg {
 }
 
 fn main() -> Result<()> {
+    // Let a closed pipe (e.g. `| head`) end the process quietly.
+    #[cfg(unix)]
+    // SAFETY: resetting SIGPIPE to its default disposition has no
+    // preconditions and happens before any other thread exists.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let cli = Cli::parse();
     match cli.command {
         Command::Rom {
@@ -281,7 +299,13 @@ fn main() -> Result<()> {
         },
         Command::Level { command } => match command {
             LevelCommand::Info { rom, level } => level_info(&rom.load()?, &level),
-            LevelCommand::Png { rom, level, out } => level_png(&rom.load()?, &level, &out),
+            LevelCommand::Png {
+                rom,
+                level,
+                out,
+                no_sprites,
+            } => level_png(&rom.load()?, &level, &out, !no_sprites),
+            LevelCommand::Sprites { rom, level } => level_sprites(&rom.load()?, &level),
             LevelCommand::Tiles { rom, level } => level_tiles(&rom.load()?, &level),
             LevelCommand::Dump { rom, level, dir } => level_dump(&rom.load()?, &level, &dir),
             LevelCommand::Reads {
@@ -352,7 +376,7 @@ fn level_info(rom: &Rom, level: &str) -> Result<()> {
     Ok(())
 }
 
-fn level_png(rom: &Rom, level: &str, out: &PathBuf) -> Result<()> {
+fn level_png(rom: &Rom, level: &str, out: &PathBuf, with_sprites: bool) -> Result<()> {
     let level = parse_level(level)?;
     let tiles = expand::expand_level(rom, level)?;
     // Graphics and colours come from what the game uploaded to VRAM and
@@ -360,7 +384,18 @@ fn level_png(rom: &Rom, level: &str, out: &PathBuf) -> Result<()> {
     let pal = tiles.palette();
     let back = tiles.back_area_color().to_rgb8();
     let layer_tiles = LayerTiles::from_vram(&tiles.vram);
-    let img = render::level_image(&tiles, &layer_tiles, &pal, back);
+    let mut img = render::level_image(&tiles, &layer_tiles, &pal, back);
+    if with_sprites {
+        let list = sprites::read_sprites_at(rom, tiles.sprite_data_ptr())?;
+        for s in &list.sprites {
+            let (x, y) = if tiles.vertical {
+                (s.x as u32 * 16, (s.screen as u32 * 16 + s.y as u32) * 16)
+            } else {
+                (s.level_x() as u32 * 16, s.y as u32 * 16)
+            };
+            render::draw_sprite_marker(&mut img, x, y, s.id, &tiles.vram);
+        }
+    }
     img.write_png(out)?;
     println!(
         "level {level:03X}: {} screens, mode ${:02X}, {}x{} -> {}",
@@ -442,6 +477,31 @@ fn level_reads(rom: &Rom, level: &str, from: &str, near_bank: Option<&str>) -> R
         if pages.len() > 6 {
             println!("      ... {} more pages", pages.len() - 6);
         }
+    }
+    Ok(())
+}
+
+fn level_sprites(rom: &Rom, level: &str) -> Result<()> {
+    let level = parse_level(level)?;
+    let tiles = expand::expand_level(rom, level)?;
+    let start = tiles.sprite_data_ptr();
+    let list = sprites::read_sprites_at(rom, start)?;
+    println!(
+        "level {level:03X}: sprite data at {start}, {} bytes, memory {}, buoyancy {}, new system {}",
+        list.len, list.header.memory, list.header.buoyancy, list.header.new_sprite_system
+    );
+    println!("  id  xb screen  x  y  extension");
+    for s in &list.sprites {
+        let ext: Vec<String> = s.extension.iter().map(|b| format!("{b:02X}")).collect();
+        println!(
+            "  {:02X}  {}  {:02X}     {:X}  {:02X} {}",
+            s.id,
+            s.extra_bits,
+            s.screen,
+            s.x,
+            s.y,
+            ext.join(" ")
+        );
     }
     Ok(())
 }

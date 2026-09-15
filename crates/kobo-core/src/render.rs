@@ -190,6 +190,49 @@ pub fn level_image(
     img
 }
 
+/// VRAM byte offset of the layer 3 font (GFX28 at word `$4000`): tiles
+/// `0`-`9` then `A`-`Z`, 2bpp.
+const FONT_VRAM_OFFSET: usize = 0x8000;
+
+/// Draws a hex digit or letter from the layer 3 font in VRAM.
+pub fn draw_font_glyph(img: &mut RgbImage, x: u32, y: u32, vram: &[u8], glyph: char, rgb: [u8; 3]) {
+    let index = match glyph {
+        '0'..='9' => glyph as usize - '0' as usize,
+        'A'..='Z' => glyph as usize - 'A' as usize + 10,
+        _ => return,
+    };
+    let start = FONT_VRAM_OFFSET + index * 16;
+    if start + 16 > vram.len() {
+        return;
+    }
+    let tile = Tile8::decode(Bpp::Two, &vram[start..start + 16]);
+    let row = [[0, 0, 0], rgb, rgb, rgb];
+    let mut palette = [[0u8; 3]; 16];
+    palette[..4].copy_from_slice(&row);
+    draw_tile8(img, x, y, &tile, &palette, false, false);
+}
+
+/// Draws a sprite marker: a box outline with the sprite number inside.
+pub fn draw_sprite_marker(img: &mut RgbImage, x: u32, y: u32, id: u8, vram: &[u8]) {
+    let outline = [255, 255, 255];
+    let fill = [0, 0, 0];
+    for i in 0..16 {
+        img.put(x + i, y, outline);
+        img.put(x + i, y + 15, outline);
+        img.put(x, y + i, outline);
+        img.put(x + 15, y + i, outline);
+    }
+    for dy in 4..12 {
+        for dx in 0..16 {
+            img.put(x + dx, y + dy, fill);
+        }
+    }
+    let text = format!("{id:02X}");
+    let mut chars = text.chars();
+    draw_font_glyph(img, x, y + 4, vram, chars.next().unwrap(), outline);
+    draw_font_glyph(img, x + 8, y + 4, vram, chars.next().unwrap(), outline);
+}
+
 /// Renders a palette as a 16x16 grid of `cell`-pixel swatches.
 pub fn palette_swatch(palette: &Palette, cell: u32) -> RgbImage {
     let mut img = RgbImage::new(16 * cell, 16 * cell);

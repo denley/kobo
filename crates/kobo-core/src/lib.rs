@@ -15,6 +15,7 @@ pub mod map16;
 pub mod palette;
 pub mod render;
 pub mod rom;
+pub mod sprites;
 
 pub use addr::{MapError, Mapping, PcAddr, SnesAddr};
 pub use rom::{Rom, RomError, RomIdentity};

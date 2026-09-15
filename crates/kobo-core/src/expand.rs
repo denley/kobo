@@ -40,6 +40,8 @@ mod ram {
     pub const MAP16_POINTERS: u32 = 0x7E_0FBE;
     /// Direct page `$0C`: bank byte of the pointer Lunar Magic's routine returns.
     pub const LM_MAP16_BANK: u32 = 0x7E_000C;
+    /// Direct page `$CE`-`$D0`: the level's sprite data pointer.
+    pub const SPRITE_DATA_PTR: u32 = 0x7E_00CE;
 }
 
 /// Bytes per plane of the layer 2 background tilemap buffer.
@@ -162,6 +164,18 @@ impl LevelTiles {
         }
         let i = (x / SCREEN_COLS + 16) * SCREEN_LEN + y * SCREEN_COLS + (x % SCREEN_COLS);
         Some(0x200 | self.low[i] as u16 | ((self.high[i] as u16) << 8))
+    }
+
+    /// Where the game found the level's sprite data, honouring any Lunar
+    /// Magic relocation.
+    pub fn sprite_data_ptr(&self) -> crate::addr::SnesAddr {
+        let i = (ram::SPRITE_DATA_PTR - 0x7E_0000) as usize;
+        crate::addr::SnesAddr::new(u32::from_le_bytes([
+            self.wram[i],
+            self.wram[i + 1],
+            self.wram[i + 2],
+            0,
+        ]))
     }
 
     /// The back area colour the game settled on.

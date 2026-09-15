@@ -272,6 +272,7 @@ dependencies = [
  "anyhow",
  "clap",
  "kobo-core",
+ "libc",
 ]
 
 [[package]]

@@ -83,6 +83,7 @@ cargo run -- palette png --level 105 out.png # 16x16 swatch of the assembled lev
 cargo run -- map16 png --level 105 out.png   # all 0x400 Map16 tiles in colour
 cargo run -- level png 105 out.png           # render a level by running the ROM's own loader
 cargo run -- level tiles|dump 105 [dir]      # the expanded Map16 grid as hex, or raw planes
+cargo run -- level sprites|map16|wram|reads  # sprite list, resolved Map16, RAM dump, read trace
 cargo run -- addr '$05E000' [--sa1]          # SNES <-> file offset
 ```
 
@@ -184,6 +185,11 @@ Windows, and macOS. Keep all three green.
   colour, then 256 colours); `$000000`/`$FFFFFF` = none. Game mode `$12` loads them itself.
 - ExGFX and Lunar Magic's 4bpp re-inserted GFX are handled by the game's own upload code, so
   capturing VRAM during game mode `$12` covers them without knowing the tables.
+- Sprite data: header `SBNMMMMM`, entries `yyyyEESY XXXXssss NNNNNNNN`; vanilla ends with `$FF`,
+  Lunar Magic 3+ with `$FF $FE` (`$FF nn` below `$80` is a command). PIXI extension bytes: if
+  `$0EF30F` is `$42`, a `$400`-byte size table at `read3($0EF30C)` indexed by
+  `extra_bits*256 + id` gives the entry size. Lunar Magic relocates sprite data; take the
+  pointer the game resolved at `$7E00CE` after loading rather than the vanilla table.
 - SA-1 hacks do not run yet: the SA-1 registers and its CPU are not modelled.
 
 ## Decisions
