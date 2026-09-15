@@ -7,6 +7,10 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use kobo_core::gfx::{self, Bpp, GFX_FILE_COUNT};
 use kobo_core::image::{grayscale, tile_sheet};
+use kobo_core::level::{self, Layer2Data};
+use kobo_core::map16;
+use kobo_core::palette::{self, LevelPaletteSelect};
+use kobo_core::render::{self, LayerTiles};
 use kobo_core::{Mapping, PcAddr, Rom, SnesAddr, config};
 
 #[derive(Parser)]
@@ -31,6 +35,21 @@ enum Command {
     Gfx {
         #[command(subcommand)]
         command: GfxCommand,
+    },
+    /// Inspect levels.
+    Level {
+        #[command(subcommand)]
+        command: LevelCommand,
+    },
+    /// Render palettes.
+    Palette {
+        #[command(subcommand)]
+        command: PaletteCommand,
+    },
+    /// Render Map16 tiles.
+    Map16 {
+        #[command(subcommand)]
+        command: Map16Command,
     },
     /// Convert between SNES addresses and ROM file offsets.
     Addr {
@@ -84,6 +103,87 @@ enum GfxCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum LevelCommand {
+    /// Print a level's header and data pointers.
+    Info {
+        #[command(flatten)]
+        rom: RomArg,
+        /// Level number in hex, for example `105`.
+        level: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum PaletteCommand {
+    /// Render the level palette as a 16x16 swatch grid.
+    Png {
+        #[command(flatten)]
+        rom: RomArg,
+        #[command(flatten)]
+        sel: PaletteArgs,
+        /// Output PNG path.
+        out: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum Map16Command {
+    /// Render all 0x400 Map16 tiles of a tileset as a 16-column sheet.
+    Png {
+        #[command(flatten)]
+        rom: RomArg,
+        #[command(flatten)]
+        sel: PaletteArgs,
+        /// Object tileset (0 to 14). Overrides the level's tileset.
+        #[arg(long)]
+        tileset: Option<u8>,
+        /// Output PNG path.
+        out: PathBuf,
+    },
+}
+
+/// Palette selection, either from a level header or explicit fields.
+#[derive(Args)]
+struct PaletteArgs {
+    /// Take palette and tileset settings from this level's header (hex).
+    #[arg(long)]
+    level: Option<String>,
+    #[arg(long, default_value_t = 0)]
+    fg: u8,
+    #[arg(long, default_value_t = 0)]
+    bg: u8,
+    #[arg(long, default_value_t = 0)]
+    sprite: u8,
+    #[arg(long, default_value_t = 0)]
+    back_area: u8,
+}
+
+impl PaletteArgs {
+    /// Resolves to (palette selection, object tileset if a level was given).
+    fn resolve(&self, rom: &Rom) -> Result<(LevelPaletteSelect, Option<u8>)> {
+        if let Some(level) = &self.level {
+            let level = parse_level(level)?;
+            let h = level::read_primary_header(rom, level)?;
+            Ok((h.palette_select(), Some(h.object_tileset)))
+        } else {
+            Ok((
+                LevelPaletteSelect {
+                    fg: self.fg,
+                    bg: self.bg,
+                    sprite: self.sprite,
+                    back_area: self.back_area,
+                },
+                None,
+            ))
+        }
+    }
+}
+
+fn parse_level(text: &str) -> Result<u16> {
+    u16::from_str_radix(text, 16).context("level must be hex, e.g. 105")
+}
+
 #[derive(Args)]
 struct RomArg {
     /// ROM path. Defaults to the configured vanilla ROM.
@@ -118,8 +218,89 @@ fn main() -> Result<()> {
                 bpp,
             } => gfx_png(&rom.load()?, &index, &out, columns, bpp),
         },
+        Command::Level {
+            command: LevelCommand::Info { rom, level },
+        } => level_info(&rom.load()?, &level),
+        Command::Palette {
+            command: PaletteCommand::Png { rom, sel, out },
+        } => palette_png(&rom.load()?, &sel, &out),
+        Command::Map16 {
+            command:
+                Map16Command::Png {
+                    rom,
+                    sel,
+                    tileset,
+                    out,
+                },
+        } => map16_png(&rom.load()?, &sel, tileset, &out),
         Command::Addr { addr, sa1 } => convert_addr(&addr, sa1),
     }
+}
+
+fn level_info(rom: &Rom, level: &str) -> Result<()> {
+    let level = parse_level(level)?;
+    let h = level::read_primary_header(rom, level)?;
+    println!("level:            {level:03X}");
+    println!("layer 1 data:     {}", level::layer1_ptr(rom, level)?);
+    match level::layer2_ptr(rom, level)? {
+        Layer2Data::Objects(a) => println!("layer 2 data:     {a} (objects)"),
+        Layer2Data::Tilemap(a) => println!("layer 2 data:     {a} (background tilemap)"),
+    }
+    println!("sprite data:      {}", level::sprite_ptr(rom, level)?);
+    println!("screens:          {}", h.screens);
+    println!("level mode:       ${:02X}", h.level_mode);
+    println!(
+        "object tileset:   {} ({:?})",
+        h.object_tileset,
+        gfx::object_tileset_files(rom, h.object_tileset)
+            .map(|f| f.map(|x| format!("{x:02X}")))
+            .unwrap_or_default()
+    );
+    println!(
+        "sprite tileset:   {} ({:?})",
+        h.sprite_tileset,
+        gfx::sprite_tileset_files(rom, h.sprite_tileset)
+            .map(|f| f.map(|x| format!("{x:02X}")))
+            .unwrap_or_default()
+    );
+    println!("fg palette:       {}", h.fg_palette);
+    println!("bg palette:       {}", h.bg_palette);
+    println!("sprite palette:   {}", h.sprite_palette);
+    println!("back area colour: {}", h.back_area);
+    println!("music:            {}", h.music);
+    println!("time:             {}", h.time);
+    println!("layer 3 priority: {}", h.layer3_priority);
+    println!("item memory:      {}", h.item_memory);
+    println!("vertical scroll:  {}", h.vertical_scroll);
+    Ok(())
+}
+
+fn palette_png(rom: &Rom, sel: &PaletteArgs, out: &PathBuf) -> Result<()> {
+    let (sel, _) = sel.resolve(rom)?;
+    let pal = palette::vanilla_level_palette(rom, sel)?;
+    let img = render::palette_swatch(&pal, 16);
+    img.write_png(out)?;
+    println!("palette {sel:?} -> {}", out.display());
+    Ok(())
+}
+
+fn map16_png(rom: &Rom, sel: &PaletteArgs, tileset: Option<u8>, out: &PathBuf) -> Result<()> {
+    let (sel, level_tileset) = sel.resolve(rom)?;
+    let tileset = tileset.or(level_tileset).unwrap_or(0);
+    let pal = palette::vanilla_level_palette(rom, sel)?;
+    let back = palette::vanilla_back_area_color(rom, sel.back_area)?.to_rgb8();
+    let table = map16::vanilla_map16(rom, tileset, true)?;
+    let tiles = LayerTiles::for_object_tileset(rom, tileset)?;
+    let img = render::map16_sheet(&table, &tiles, &pal, back, 16);
+    img.write_png(out)?;
+    println!(
+        "tileset {tileset}, palette {sel:?}: {} tiles, {}x{} -> {}",
+        table.tiles.len(),
+        img.width,
+        img.height,
+        out.display()
+    );
+    Ok(())
 }
 
 fn rom_info(rom: &Rom) -> Result<()> {

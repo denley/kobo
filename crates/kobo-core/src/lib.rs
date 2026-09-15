@@ -8,6 +8,10 @@ pub mod compress;
 pub mod config;
 pub mod gfx;
 pub mod image;
+pub mod level;
+pub mod map16;
+pub mod palette;
+pub mod render;
 pub mod rom;
 
 pub use addr::{MapError, Mapping, PcAddr, SnesAddr};

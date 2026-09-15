@@ -78,6 +78,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 cargo run -- rom info [-r rom]               # header, checksum, hash, identity
 cargo run -- gfx list|export|png [-r rom]    # GFX files: table, LM-layout .bin export, tile sheet
+cargo run -- level info 105                  # primary header and data pointers
+cargo run -- palette png --level 105 out.png # 16x16 swatch of the assembled level palette
+cargo run -- map16 png --level 105 out.png   # all 0x400 Map16 tiles in colour
 cargo run -- addr '$05E000' [--sa1]          # SNES <-> file offset
 ```
 
@@ -101,6 +104,16 @@ Windows, and macOS. Keep all three green.
 - Planned oracles for the renderer: emulator RAM dumps of the expanded tile grid (`$7EC800` /
   `$7FC800`) for level decoding, and Lunar Magic exports for GFX, palette, and Map16 formats.
 
+## Reference material
+
+- `~/.local/share/kobo/docs/smwdisx/`: the SMWDisX disassembly banks and `SMW_U.sym` (downloaded
+  from GitHub, not committed). Use it to read how the game consumes a table; never build on it.
+  SMW Central is behind a JavaScript challenge and cannot be fetched from tools.
+- Asar 1.91 built from source: `~/.local/bin/asar`, `libasar.so` in `~/.local/lib`.
+- Mesen 2.1.1: `~/.local/share/kobo/tools/mesen/Mesen`. Headless use is
+  `Mesen --testRunner script.lua rom.sfc --timeout=N`; the script ends with `emu.stop(code)`.
+  Lua enums are lower-camel-cased C++ names: `emu.memType.snesMemory`, `emu.eventType.endFrame`.
+
 ## SMW facts worth remembering
 
 - Level pointer tables: layer 1 at `$05E000` and layer 2 at `$05E600` hold 3-byte pointers,
@@ -113,9 +126,26 @@ Windows, and macOS. Keep all three green.
   Magic re-inserts files as 4bpp, so bit depth is inferred from decompressed size and the
   file's fixed tile count (128, except `2F`-`31` = 64). `GFX27` is not planar tiles at any depth
   and is treated as raw bytes; its layout is unknown.
-- Lunar Magic exports 3bpp files converted to 4bpp, and for `GFX01`, `08`, `1E`, `31` sets
-  the fourth plane of some tiles to the tile silhouette (see `gfx::upper_palette_tiles`).
-  Observed, not yet explained. `GFX32`/`GFX33` are stored differently and are not handled.
+- The game's `UploadGFXFile` sets the fourth plane to the tile silhouette for the first 16x16
+  block of `GFX01`/`17`/`31` (the berry, drawn with colours 9-F) and for all of `GFX1E` (and
+  `GFX08` in tilesets `$11+`). Lunar Magic's export mirrors this except it skips `17` and flags a
+  fixed subset of `08`; see `gfx::upper_palette_tiles` vs `gfx::vram_upper_palette_tiles`.
+  `GFX32`/`GFX33` are stored differently and are not handled.
+- GFX lists: `$00A92B` object tilesets (FG1, FG2, BG1, FG3), `$00A8C3` sprite tilesets (SP1-4),
+  4 bytes per row, 26 rows. VRAM: FG1/FG2/BG1/FG3 at 8x8 tiles `$000`/`$080`/`$100`/`$180`;
+  SP1-4 at word `$6000`/`$6800`/`$7000`/`$7800`; layer 3 `GFX28`-`2B` at word `$4000`.
+- Palette: `LoadPalette` (`$00ABED`) fills CGRAM (`$7E0703`) from `$00B0A0` (back area),
+  `$00B0B0` (BG, rows 0-1 cols 2-7, `$18` bytes each), `$00B170` (rows 0-1 cols 8-F),
+  `$00B190` (FG, rows 2-3 cols 2-7), `$00B250` (rows 4-D cols 2-7), `$00B318` (sprite, rows E-F
+  cols 2-7), `$00B674` (berries, rows 2-4 and 9-B cols 9-F). Colour 1 is `$7FDD`/`$7FFF`.
+  Lunar Magic's `-ExportSharedPalette` is exactly the ROM bytes from `$00B0A0`.
+- Map16: layer 1 pointers are built from `$0D8000` (common) and per-tileset data (`$058000`
+  word table into bank `$0D`) using the bitmask at `$0581BB` (bit set = common). Tilesets 0 and
+  7 patch `1C4-1C7`/`1EC-1EF` from `$0D8A70` at load time. Layer 2 tiles are `$0D9100`; the game
+  numbers them `200-3FF`, Lunar Magic's `.map16` stores them at file index `8000`.
+- Level load: `$7E0109` non-zero forces a level: values `< $25` are the level low byte, else
+  low byte = value - `$24`; `$7E1F11` non-zero sets the high byte. The title screen uses this
+  with `$EB` (level `C7`), and game mode 3 falls straight into the level loader.
 
 ## Decisions
 

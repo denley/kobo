@@ -27,6 +27,32 @@ const GFX_PTR_LO: SnesAddr = SnesAddr::new(0x00B992);
 const GFX_PTR_HI: SnesAddr = SnesAddr::new(0x00B9C4);
 const GFX_PTR_BANK: SnesAddr = SnesAddr::new(0x00B9F6);
 
+/// GFX file lists per tileset, 4 files each: FG1, FG2, BG1, FG3 for
+/// objects and SP1 to SP4 for sprites.
+pub const OBJECT_GFX_LIST: SnesAddr = SnesAddr::new(0x00A92B);
+pub const SPRITE_GFX_LIST: SnesAddr = SnesAddr::new(0x00A8C3);
+/// Rows in each list.
+pub const GFX_LIST_ROWS: u8 = 26;
+
+fn gfx_list_row(rom: &Rom, table: SnesAddr, index: u8) -> Result<[u8; 4], GfxError> {
+    if index >= GFX_LIST_ROWS {
+        return Err(GfxError::BadTileset(index));
+    }
+    let b = rom.read(table.add(4 * index as u32), 4)?;
+    Ok([b[0], b[1], b[2], b[3]])
+}
+
+/// The layer GFX files (FG1, FG2, BG1, FG3) of an object tileset. Tilesets
+/// 0 to 14 are the level tilesets; higher rows are boss and special levels.
+pub fn object_tileset_files(rom: &Rom, tileset: u8) -> Result<[u8; 4], GfxError> {
+    gfx_list_row(rom, OBJECT_GFX_LIST, tileset)
+}
+
+/// The sprite GFX files (SP1 to SP4) of a sprite tileset.
+pub fn sprite_tileset_files(rom: &Rom, tileset: u8) -> Result<[u8; 4], GfxError> {
+    gfx_list_row(rom, SPRITE_GFX_LIST, tileset)
+}
+
 /// Bits per pixel of a tile format.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Bpp {
@@ -147,6 +173,8 @@ pub fn convert_4bpp_to_3bpp(data: &[u8]) -> Vec<u8> {
 pub enum GfxError {
     #[error("GFX file index {0:02X} is out of range (00 to 31)")]
     BadIndex(u8),
+    #[error("tileset {0} has no GFX list entry (0 to 25)")]
+    BadTileset(u8),
     #[error(
         "GFX{index:02X} decompressed to {len} bytes, which is not 2, 3, or 4bpp for {tiles} tiles"
     )]
@@ -265,15 +293,18 @@ impl GfxFile {
     }
 }
 
-/// Tiles of a 3bpp file that are shown with the upper eight colours of
-/// their palette row, meaning the fourth bit plane is set wherever the tile
-/// is opaque.
+/// Tiles of a 3bpp file whose fourth bit plane Lunar Magic sets to the
+/// tile's silhouette on export, so they use colours 8 to 15 of their
+/// palette row.
 ///
-/// This list was observed by diffing Lunar Magic 3.21's `-ExportGFX` output
-/// against a plain 3bpp to 4bpp conversion of the vanilla ROM. Hacks saved
-/// by Lunar Magic store these files as 4bpp with the plane baked in, so the
-/// game itself reads them unchanged. The in-game mechanism behind the
-/// vanilla list has not been traced yet.
+/// The game does this itself when uploading to VRAM (`UploadGFXFile` in
+/// bank `$00`): for files `01`, `17`, and `31` the first 16x16 block
+/// (tiles 0, 1, 16, 17) is flagged, which is the berry using the colours
+/// loaded from `BerryColors`; `GFX1E` is flagged in full, as is `GFX08`
+/// when the object tileset is `$11` or above. Lunar Magic's export matches
+/// that for `01`, `31`, and `1E`, skips `17`, and flags a fixed subset of
+/// `GFX08`. This function reproduces Lunar Magic's export behaviour; use
+/// [`vram_upper_palette_tiles`] for what the game puts in VRAM.
 pub fn upper_palette_tiles(index: u8, tile_count: usize) -> Vec<usize> {
     const GFX08: [usize; 24] = [
         55, 56, 57, 58, 59, 71, 72, 73, 74, 75, 86, 87, 88, 89, 90, 91, 96, 110, 111, 112, 122,
@@ -283,6 +314,17 @@ pub fn upper_palette_tiles(index: u8, tile_count: usize) -> Vec<usize> {
         0x01 | 0x31 => vec![0, 1, 16, 17],
         0x08 => GFX08.to_vec(),
         0x1E => (0..tile_count).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Tiles the game uploads with the fourth plane set to the silhouette,
+/// per `UploadGFXFile`. `tileset` is the level's object tileset.
+pub fn vram_upper_palette_tiles(index: u8, tileset: u8, tile_count: usize) -> Vec<usize> {
+    match index {
+        0x01 | 0x17 | 0x31 => vec![0, 1, 16, 17],
+        0x1E => (0..tile_count).collect(),
+        0x08 if tileset >= 0x11 => (0..tile_count).collect(),
         _ => Vec::new(),
     }
 }
