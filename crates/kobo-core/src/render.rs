@@ -54,6 +54,19 @@ impl LayerTiles {
         Ok(out)
     }
 
+    /// Decodes the layer tile area of VRAM (4bpp tiles from byte 0) as
+    /// the game uploaded it, including animated tiles and ExGFX.
+    pub fn from_vram(vram: &[u8]) -> Self {
+        let mut out = Self::blank();
+        for (i, tile) in out.tiles.iter_mut().enumerate() {
+            let start = i * 32;
+            if start + 32 <= vram.len() {
+                *tile = Tile8::decode(Bpp::Four, &vram[start..start + 32]);
+            }
+        }
+        out
+    }
+
     pub fn get(&self, index: u16) -> &Tile8 {
         &self.tiles[index as usize % LAYER_TILE_COUNT]
     }
@@ -136,11 +149,11 @@ pub fn map16_sheet(
 /// if any) over the back area colour.
 pub fn level_image(
     tiles: &crate::expand::LevelTiles,
-    map16: &Map16Table,
     layer_tiles: &LayerTiles,
     palette: &Palette,
     background: [u8; 3],
 ) -> RgbImage {
+    let map16 = &tiles.map16;
     let (w, h) = tiles.size();
     let mut img = RgbImage::new(w as u32 * 16, h as u32 * 16);
     img.pixels.fill(background);
@@ -150,7 +163,7 @@ pub fn level_image(
             for y in 0..crate::expand::SCREEN_ROWS {
                 for x in 0..crate::expand::SCREEN_COLS {
                     let n = tiles.layer2_bg_tile(screen, x, y).unwrap();
-                    if let Some(tile) = map16.get(n) {
+                    if let Some(tile) = map16.get(&n) {
                         let px = ((screen * crate::expand::SCREEN_COLS + x) * 16) as u32;
                         let py = (y * 16) as u32;
                         draw_map16_tile(&mut img, px, py, tile, layer_tiles, palette);
@@ -162,7 +175,7 @@ pub fn level_image(
     for y in 0..h {
         for x in 0..w {
             let n = tiles.tile_at(x, y);
-            if let Some(tile) = map16.get(n) {
+            if let Some(tile) = map16.get(&n) {
                 draw_map16_tile(
                     &mut img,
                     (x * 16) as u32,

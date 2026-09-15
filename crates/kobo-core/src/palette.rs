@@ -75,6 +75,17 @@ impl Palette {
     pub fn to_cgram_bytes(&self) -> Vec<u8> {
         self.colors.iter().flat_map(|c| c.to_le_bytes()).collect()
     }
+
+    /// A palette from 512 bytes of CGRAM.
+    pub fn from_cgram(bytes: &[u8]) -> Self {
+        let mut pal = Self::default();
+        for (i, c) in pal.colors.iter_mut().enumerate() {
+            if 2 * i + 1 < bytes.len() {
+                *c = Color15(u16::from_le_bytes([bytes[2 * i], bytes[2 * i + 1]]));
+            }
+        }
+        pal
+    }
 }
 
 /// The header fields that select a level's palette.
@@ -187,6 +198,41 @@ pub fn vanilla_level_palette(rom: &Rom, sel: LevelPaletteSelect) -> Result<Palet
     load_colors(rom, &mut pal, BERRY_COLORS, 2, 9, 7, 3)?;
     load_colors(rom, &mut pal, BERRY_COLORS, 9, 9, 7, 3)?;
     Ok(pal)
+}
+
+/// Lunar Magic's per-level custom palette table: 3-byte pointers at
+/// `$0EF600`, one per level. A pointer of `$000000` or `$FFFFFF` means the
+/// level uses the vanilla palette assembly. The data is `$202` bytes: the
+/// back area colour followed by all 256 CGRAM colours.
+pub const LM_LEVEL_PALETTE_PTRS: SnesAddr = SnesAddr::new(0x0EF600);
+
+/// A custom level palette as Lunar Magic stores it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct CustomPalette {
+    pub back_area: Color15,
+    pub palette: Palette,
+}
+
+/// Reads a level's Lunar Magic custom palette, if the ROM has one.
+pub fn lm_level_palette(rom: &Rom, level: u16) -> Result<Option<CustomPalette>, RomError> {
+    let entry = LM_LEVEL_PALETTE_PTRS.add(3 * level as u32);
+    // Vanilla ROMs have unrelated data here; treat unreadable pointers as none.
+    let Ok(ptr) = rom.read_u24(entry) else {
+        return Ok(None);
+    };
+    if ptr == 0 || ptr == 0xFF_FFFF {
+        return Ok(None);
+    }
+    let addr = SnesAddr::new(ptr);
+    let Ok(bytes) = rom.read(addr, 0x202) else {
+        return Ok(None);
+    };
+    let back_area = Color15(u16::from_le_bytes([bytes[0], bytes[1]]));
+    let mut palette = Palette::default();
+    for i in 0..256 {
+        palette.colors[i] = Color15(u16::from_le_bytes([bytes[2 + 2 * i], bytes[3 + 2 * i]]));
+    }
+    Ok(Some(CustomPalette { back_area, palette }))
 }
 
 #[cfg(test)]

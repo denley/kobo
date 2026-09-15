@@ -117,15 +117,14 @@ Windows, and macOS. Keep all three green.
   from GitHub, not committed). Use it to read how the game consumes a table; never build on it.
   SMW Central is behind a JavaScript challenge and cannot be fetched from tools.
 - Asar 1.91 built from source: `~/.local/bin/asar`, `libasar.so` in `~/.local/lib`.
-- Mesen 2: `~/.local/share/kobo/tools/mesen/Mesen` (official 2.1.1 binary). Headless use is
-  `Mesen --testRunner script.lua rom.sfc --timeout=N`; the script ends with `emu.stop(code)`.
-  Lua enums are lower-camel-cased C++ names: `emu.memType.snesMemory`, `emu.eventType.endFrame`.
-  Scripts need `Debug.ScriptWindow.AllowIoOsAccess` and a controller on `Snes.Port1` in
-  `~/.config/Mesen2/settings.json`. The official binary bundles GCC 12's libstdc++ and aborts
-  with `std::bad_cast` at startup when the system libstdc++ loads first (via ICU from .NET);
-  `dump.sh` sets `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1` to avoid ICU. The proper fix is a
-  build against the system libstdc++ (AUR `mesen2-git`, or the source build in
-  `~/.local/share/kobo/tools/mesen-src/`).
+- Mesen 2: `~/.local/share/kobo/tools/mesen2/Mesen`, built from source against the system
+  libstdc++ (`tools/mesen-src/`; .NET SDK in `~/.dotnet`). The official 2.1.1 binary in
+  `tools/mesen/` bundles GCC 12's libstdc++ and aborts with `std::bad_cast` at startup about
+  half the time; do not use it. Headless use is `Mesen --testRunner script.lua rom.sfc
+  --timeout=N`; the script ends with `emu.stop(code)`. Lua enums are lower-camel-cased C++
+  names: `emu.memType.snesMemory`, `emu.eventType.endFrame`. Scripts need
+  `Debug.ScriptWindow.AllowIoOsAccess` and a controller on `Snes.Port1` in
+  `~/.config/Mesen2/settings.json`.
 
 ## SMW facts worth remembering
 
@@ -160,10 +159,15 @@ Windows, and macOS. Keep all three green.
   low byte = value - `$24`; `$7E1F11` non-zero sets the high byte. Zero means no override, so
   levels `000`/`100` and low bytes `$DC+` cannot be selected this way. The title screen uses
   `$EB` (level `C7`); game mode 3 and game mode `$11` both enter `GM11LoadLevel` (`$0096D5`).
-- `expand::expand_level` runs `CODE_05D796` (header pointers), `CODE_05801E` (clear buffers,
-  `LoadLevel`), then the level-preparation pieces that touch the grid: boss floors
-  (`MakeMode7BossArenaMap16`/`MakeASolidFloor` for modes 09/10/0B) and the layer 3 setup
-  `CODE_009FB8`, which zeroes rows 16-26 of the layer 2 screens for tide levels.
+- `expand::expand_level` seeds the RAM-resident OAM routine by running the reset code, then
+  runs `CODE_05D796` (header pointers), `CODE_05801E` (clear buffers, `LoadLevel`), the rest
+  of game mode `$11` (`CODE_00B888` GFX32/33 to RAM, `CODE_00A635`, `CODE_00A796`), and all of
+  game mode `$12` (`GM12PrepLevel`, `$00A59C`), which draws boss floors, sets up layer 3 (tides
+  zero rows 16-26 of the layer 2 screens), and uploads GFX, palettes, and initial tilemaps.
+  The bus captures VRAM/CGRAM port and DMA writes, so rendering uses what the game uploaded:
+  ExGFX, custom palettes, and animated tiles come for free. VRAM matches the emulator except
+  animated slots (frame-dependent) and tilemap areas filled on later frames; CGRAM matches
+  except Mario's row 8 and one per-frame colour.
 - Tile grid layout: horizontal levels are 16x27 per screen, screen after screen; layer 2 objects
   use screens `$10+` of the same buffer. Vertical levels are 32 wide; each screen is 16 rows
   stored as a left and a right 16x16 half. The layer 2 background tilemap is decoded into

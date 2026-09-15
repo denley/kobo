@@ -132,6 +132,28 @@ enum LevelCommand {
         /// Output directory.
         dir: PathBuf,
     },
+    /// Summarise which ROM pages the loader reads, for finding tables.
+    Reads {
+        #[command(flatten)]
+        rom: RomArg,
+        /// Level number in hex, for example `105`.
+        level: String,
+        /// Only report addresses at or above this SNES address (hex).
+        #[arg(long, default_value = "0F8000")]
+        from: String,
+        /// Only report instructions that also read inside this 64 KiB bank
+        /// (hex bank number), plus instructions within 256 bytes of them.
+        #[arg(long)]
+        near_bank: Option<String>,
+    },
+    /// Print the Map16 definition of every tile number the level uses,
+    /// as `NNNN: 16 hex bytes` lines.
+    Map16 {
+        #[command(flatten)]
+        rom: RomArg,
+        /// Level number in hex, for example `105`.
+        level: String,
+    },
     /// Hex-dump a work RAM range after the level loader has run.
     Wram {
         #[command(flatten)]
@@ -262,6 +284,13 @@ fn main() -> Result<()> {
             LevelCommand::Png { rom, level, out } => level_png(&rom.load()?, &level, &out),
             LevelCommand::Tiles { rom, level } => level_tiles(&rom.load()?, &level),
             LevelCommand::Dump { rom, level, dir } => level_dump(&rom.load()?, &level, &dir),
+            LevelCommand::Reads {
+                rom,
+                level,
+                from,
+                near_bank,
+            } => level_reads(&rom.load()?, &level, &from, near_bank.as_deref()),
+            LevelCommand::Map16 { rom, level } => level_map16(&rom.load()?, &level),
             LevelCommand::Wram {
                 rom,
                 level,
@@ -326,13 +355,12 @@ fn level_info(rom: &Rom, level: &str) -> Result<()> {
 fn level_png(rom: &Rom, level: &str, out: &PathBuf) -> Result<()> {
     let level = parse_level(level)?;
     let tiles = expand::expand_level(rom, level)?;
-    let sel = tiles.header.palette_select();
-    let pal = palette::vanilla_level_palette(rom, sel)?;
-    let back = palette::vanilla_back_area_color(rom, sel.back_area)?.to_rgb8();
-    let tileset = tiles.header.object_tileset;
-    let table = map16::vanilla_map16(rom, tileset, true)?;
-    let layer_tiles = LayerTiles::for_object_tileset(rom, tileset)?;
-    let img = render::level_image(&tiles, &table, &layer_tiles, &pal, back);
+    // Graphics and colours come from what the game uploaded to VRAM and
+    // CGRAM, so ExGFX, custom palettes, and animated tiles are covered.
+    let pal = tiles.palette();
+    let back = tiles.back_area_color().to_rgb8();
+    let layer_tiles = LayerTiles::from_vram(&tiles.vram);
+    let img = render::level_image(&tiles, &layer_tiles, &pal, back);
     img.write_png(out)?;
     println!(
         "level {level:03X}: {} screens, mode ${:02X}, {}x{} -> {}",
@@ -351,7 +379,83 @@ fn level_dump(rom: &Rom, level: &str, dir: &PathBuf) -> Result<()> {
     fs::create_dir_all(dir)?;
     fs::write(dir.join(format!("level_{level:03X}.l1lo.bin")), &tiles.low)?;
     fs::write(dir.join(format!("level_{level:03X}.l1hi.bin")), &tiles.high)?;
+    fs::write(dir.join(format!("level_{level:03X}.vram.bin")), &tiles.vram)?;
+    fs::write(
+        dir.join(format!("level_{level:03X}.cgram.bin")),
+        &tiles.cgram,
+    )?;
     println!("level {level:03X}: wrote planes to {}", dir.display());
+    Ok(())
+}
+
+fn level_reads(rom: &Rom, level: &str, from: &str, near_bank: Option<&str>) -> Result<()> {
+    let level = parse_level(level)?;
+    let from = u32::from_str_radix(from.trim_start_matches('$'), 16).context("bad address")?;
+    let bank = near_bank
+        .map(|b| u32::from_str_radix(b.trim_start_matches('$'), 16))
+        .transpose()
+        .context("bad bank")?;
+    let (_, trace) = expand::expand_level_traced(rom, level, true)?;
+    let trace = trace.unwrap_or_default();
+    // Instructions of interest: those reading in the given bank, and neighbours.
+    let mut hot: Vec<u32> = Vec::new();
+    if let Some(bank) = bank {
+        hot = trace
+            .iter()
+            .filter(|(_, a)| a >> 16 == bank)
+            .map(|(pc, _)| *pc)
+            .collect();
+        hot.sort_unstable();
+        hot.dedup();
+    }
+    let interesting = |pc: u32| bank.is_none() || hot.iter().any(|h| pc.abs_diff(*h) <= 0x100);
+    type Pages = std::collections::BTreeMap<u32, (u64, u32, u32)>;
+    let mut by_pc: std::collections::BTreeMap<u32, Pages> = Default::default();
+    for &(pc, a) in &trace {
+        let wram = (0x7E_0000..0x80_0000).contains(&a) || (a & 0xFFFF) < 0x2000;
+        if (a < from && !wram) || (wram && bank.is_none()) {
+            continue;
+        }
+        // Skip operand reads of the instruction itself.
+        if (a > pc && a - pc <= 3) || !interesting(pc) {
+            continue;
+        }
+        let e = by_pc
+            .entry(pc)
+            .or_default()
+            .entry(a & 0xFF_FF00)
+            .or_insert((0, a, a));
+        e.0 += 1;
+        e.1 = e.1.min(a);
+        e.2 = e.2.max(a);
+    }
+    println!(
+        "{} data reads; ROM data reads at or above ${from:06X} by instruction:",
+        trace.len()
+    );
+    for (pc, pages) in by_pc {
+        let total: u64 = pages.values().map(|p| p.0).sum();
+        println!("  instruction ${pc:06X}: {total} reads");
+        for (page, (count, lo, hi)) in pages.iter().take(6) {
+            println!("      ${page:06X}: {count:>6} reads, ${lo:06X}-${hi:06X}");
+        }
+        if pages.len() > 6 {
+            println!("      ... {} more pages", pages.len() - 6);
+        }
+    }
+    Ok(())
+}
+
+fn level_map16(rom: &Rom, level: &str) -> Result<()> {
+    let level = parse_level(level)?;
+    let tiles = expand::expand_level(rom, level)?;
+    let mut numbers: Vec<_> = tiles.map16.keys().copied().collect();
+    numbers.sort_unstable();
+    for n in numbers {
+        let b = tiles.map16[&n].to_bytes();
+        let hex: Vec<String> = b.iter().map(|x| format!("{x:02X}")).collect();
+        println!("{n:04X}: {}", hex.join(" "));
+    }
     Ok(())
 }
 
@@ -454,6 +558,9 @@ fn rom_info(rom: &Rom) -> Result<()> {
     );
     println!("sha1:            {}", rom.sha1_hex());
     println!("identity:        {:?}", rom.identify());
+    if let Some(v) = rom.lunar_magic_version() {
+        println!("lunar magic:     {v}");
+    }
     Ok(())
 }
 

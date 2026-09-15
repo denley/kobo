@@ -32,8 +32,8 @@ pub enum CpuError {
     Cop { pb: u8, pc: u16 },
     #[error("CPU halted (STP/WAI) at ${pb:02X}:{pc:04X}")]
     Halted { pb: u8, pc: u16 },
-    #[error("instruction limit of {0} exceeded")]
-    Limit(u64),
+    #[error("instruction limit of {limit} exceeded at ${pb:02X}:{pc:04X}")]
+    Limit { limit: u64, pb: u8, pc: u16 },
 }
 
 #[derive(Clone, Debug)]
@@ -50,6 +50,11 @@ pub struct Cpu {
     pub emulation: bool,
     /// Instructions executed so far.
     pub steps: u64,
+    /// When set, every data read (not instruction fetch) is recorded as
+    /// (address of the instruction, address read).
+    pub trace_data_reads: Option<Vec<(u32, u32)>>,
+    in_fetch: bool,
+    op_addr: u32,
 }
 
 impl Default for Cpu {
@@ -78,6 +83,9 @@ impl Cpu {
             p: Flags::M | Flags::X | Flags::I,
             emulation: false,
             steps: 0,
+            trace_data_reads: None,
+            in_fetch: false,
+            op_addr: 0,
         }
     }
 
@@ -128,24 +136,29 @@ impl Cpu {
 
     // --- Memory helpers -----------------------------------------------
 
-    fn read8(&self, bus: &mut impl Bus, addr: u32) -> u8 {
+    fn read8(&mut self, bus: &mut impl Bus, addr: u32) -> u8 {
+        if !self.in_fetch
+            && let Some(t) = &mut self.trace_data_reads
+        {
+            t.push((self.op_addr, addr & 0xFF_FFFF));
+        }
         bus.read(addr & 0xFF_FFFF)
     }
 
-    fn read16(&self, bus: &mut impl Bus, addr: u32) -> u16 {
+    fn read16(&mut self, bus: &mut impl Bus, addr: u32) -> u16 {
         let lo = self.read8(bus, addr) as u16;
         let hi = self.read8(bus, addr.wrapping_add(1)) as u16;
         lo | (hi << 8)
     }
 
     /// 16-bit read that wraps within bank 0, for direct page and stack.
-    fn read16_bank0(&self, bus: &mut impl Bus, addr: u16) -> u16 {
+    fn read16_bank0(&mut self, bus: &mut impl Bus, addr: u16) -> u16 {
         let lo = self.read8(bus, addr as u32) as u16;
         let hi = self.read8(bus, addr.wrapping_add(1) as u32) as u16;
         lo | (hi << 8)
     }
 
-    fn read24_bank0(&self, bus: &mut impl Bus, addr: u16) -> u32 {
+    fn read24_bank0(&mut self, bus: &mut impl Bus, addr: u16) -> u32 {
         let lo = self.read16_bank0(bus, addr) as u32;
         let bank = self.read8(bus, addr.wrapping_add(2) as u32) as u32;
         lo | (bank << 16)
@@ -161,7 +174,7 @@ impl Cpu {
     }
 
     /// Reads a value of the accumulator width.
-    fn read_m(&self, bus: &mut impl Bus, addr: u32) -> u16 {
+    fn read_m(&mut self, bus: &mut impl Bus, addr: u32) -> u16 {
         if self.m8() {
             self.read8(bus, addr) as u16
         } else {
@@ -177,7 +190,7 @@ impl Cpu {
         }
     }
 
-    fn read_x(&self, bus: &mut impl Bus, addr: u32) -> u16 {
+    fn read_x(&mut self, bus: &mut impl Bus, addr: u32) -> u16 {
         if self.x8() {
             self.read8(bus, addr) as u16
         } else {
@@ -198,7 +211,9 @@ impl Cpu {
     }
 
     fn fetch8(&mut self, bus: &mut impl Bus) -> u8 {
+        self.in_fetch = true;
         let v = self.read8(bus, self.pc_addr());
+        self.in_fetch = false;
         self.pc = self.pc.wrapping_add(1);
         v
     }
@@ -635,6 +650,7 @@ impl Cpu {
     pub fn step(&mut self, bus: &mut impl Bus) -> Result<(), CpuError> {
         let op_pb = self.pb;
         let op_pc = self.pc;
+        self.op_addr = self.pc_addr();
         let opcode = self.fetch8(bus);
         self.steps += 1;
         match opcode {
@@ -1836,7 +1852,11 @@ impl Cpu {
             || (self.pb == RETURN_PB && self.pc == RETURN_PC))
         {
             if self.steps - start >= limit {
-                return Err(CpuError::Limit(limit));
+                return Err(CpuError::Limit {
+                    limit,
+                    pb: self.pb,
+                    pc: self.pc,
+                });
             }
             self.step(bus)?;
         }
@@ -1847,11 +1867,40 @@ impl Cpu {
         Ok(())
     }
 
+    /// Starts executing at `start` and stops when the program counter
+    /// reaches `stop` (a 24-bit address), without executing it.
+    pub fn run_until(
+        &mut self,
+        bus: &mut impl Bus,
+        start: u32,
+        stop: u32,
+        limit: u64,
+    ) -> Result<(), CpuError> {
+        self.pb = (start >> 16) as u8;
+        self.pc = start as u16;
+        let begin = self.steps;
+        while !(self.pb == (stop >> 16) as u8 && self.pc == stop as u16) {
+            if self.steps - begin >= limit {
+                return Err(CpuError::Limit {
+                    limit,
+                    pb: self.pb,
+                    pc: self.pc,
+                });
+            }
+            self.step(bus)?;
+        }
+        Ok(())
+    }
+
     fn run_to_sentinel(&mut self, bus: &mut impl Bus, limit: u64) -> Result<(), CpuError> {
         let start = self.steps;
         while !(self.pb == RETURN_PB && self.pc == RETURN_PC) {
             if self.steps - start >= limit {
-                return Err(CpuError::Limit(limit));
+                return Err(CpuError::Limit {
+                    limit,
+                    pb: self.pb,
+                    pc: self.pc,
+                });
             }
             self.step(bus)?;
         }

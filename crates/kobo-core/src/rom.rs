@@ -242,6 +242,20 @@ impl Rom {
         }
     }
 
+    /// The Lunar Magic version that last saved this ROM, from the marker
+    /// Lunar Magic writes at `$0FF0A0` ("Lunar Magic Version 3.21 ...").
+    pub fn lunar_magic_version(&self) -> Option<String> {
+        const MARKER: SnesAddr = SnesAddr::new(0x0FF0A0);
+        const PREFIX: &[u8] = b"Lunar Magic Version ";
+        let bytes = self.read(MARKER, 40).ok()?;
+        let rest = bytes.strip_prefix(PREFIX)?;
+        let end = rest
+            .iter()
+            .position(|b| !(b.is_ascii_digit() || *b == b'.'))
+            .unwrap_or(rest.len());
+        (end > 0).then(|| String::from_utf8_lossy(&rest[..end]).into_owned())
+    }
+
     pub fn pc(&self, addr: SnesAddr) -> Result<PcAddr, MapError> {
         self.mapping.snes_to_pc(addr)
     }
