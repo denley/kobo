@@ -132,6 +132,18 @@ enum LevelCommand {
         /// Output directory.
         dir: PathBuf,
     },
+    /// Hex-dump a work RAM range after the level loader has run.
+    Wram {
+        #[command(flatten)]
+        rom: RomArg,
+        /// Level number in hex, for example `105`.
+        level: String,
+        /// Start address, `$7E0FBE` style.
+        addr: String,
+        /// Byte count (decimal).
+        #[arg(default_value_t = 64)]
+        len: usize,
+    },
     /// Print a level's expanded tile grid as hex, one screen row per line.
     Tiles {
         #[command(flatten)]
@@ -250,6 +262,12 @@ fn main() -> Result<()> {
             LevelCommand::Png { rom, level, out } => level_png(&rom.load()?, &level, &out),
             LevelCommand::Tiles { rom, level } => level_tiles(&rom.load()?, &level),
             LevelCommand::Dump { rom, level, dir } => level_dump(&rom.load()?, &level, &dir),
+            LevelCommand::Wram {
+                rom,
+                level,
+                addr,
+                len,
+            } => level_wram(&rom.load()?, &level, &addr, len),
         },
         Command::Palette {
             command: PaletteCommand::Png { rom, sel, out },
@@ -334,6 +352,24 @@ fn level_dump(rom: &Rom, level: &str, dir: &PathBuf) -> Result<()> {
     fs::write(dir.join(format!("level_{level:03X}.l1lo.bin")), &tiles.low)?;
     fs::write(dir.join(format!("level_{level:03X}.l1hi.bin")), &tiles.high)?;
     println!("level {level:03X}: wrote planes to {}", dir.display());
+    Ok(())
+}
+
+fn level_wram(rom: &Rom, level: &str, addr: &str, len: usize) -> Result<()> {
+    let level = parse_level(level)?;
+    let tiles = expand::expand_level(rom, level)?;
+    let start = u32::from_str_radix(addr.trim_start_matches('$'), 16).context("bad address")?;
+    if !(0x7E_0000..0x80_0000).contains(&start) {
+        bail!("address must be in $7E0000-$7FFFFF");
+    }
+    let off = (start - 0x7E_0000) as usize;
+    for (i, chunk) in tiles.wram[off..(off + len).min(tiles.wram.len())]
+        .chunks(16)
+        .enumerate()
+    {
+        let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02X}")).collect();
+        println!("${:06X}: {}", start as usize + i * 16, hex.join(" "));
+    }
     Ok(())
 }
 

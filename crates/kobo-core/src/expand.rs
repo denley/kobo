@@ -87,6 +87,8 @@ pub struct LevelTiles {
     pub screens: usize,
     pub low: Vec<u8>,
     pub high: Vec<u8>,
+    /// All of work RAM after the loader ran, for inspection.
+    pub wram: Vec<u8>,
     /// Layer 2 background tilemap planes, when the level uses a
     /// pre-built background instead of layer 2 objects. Tile numbers
     /// index the BG half of the Map16 table (`0x200` upwards).
@@ -113,6 +115,17 @@ impl LevelTiles {
     pub fn tile_at(&self, x: usize, y: usize) -> u16 {
         let i = self.offset(x, y);
         self.low[i] as u16 | ((self.high[i] as u16) << 8)
+    }
+
+    /// Map16 tile number (BG numbering, `0x200` upwards) of a layer 2
+    /// object at a horizontal-level position. Layer 2 objects occupy
+    /// screens `0x10` and up of the buffer, so at most 16 screens exist.
+    pub fn layer2_object_tile(&self, x: usize, y: usize) -> Option<u16> {
+        if self.vertical || self.layer2_tilemap.is_some() || x / SCREEN_COLS >= 16 {
+            return None;
+        }
+        let i = (x / SCREEN_COLS + 16) * SCREEN_LEN + y * SCREEN_COLS + (x % SCREEN_COLS);
+        Some(0x200 | self.low[i] as u16 | ((self.high[i] as u16) << 8))
     }
 
     /// Width and height of the level in tiles.
@@ -199,5 +212,6 @@ pub fn expand_level(rom: &Rom, level: u16) -> Result<LevelTiles, ExpandError> {
         low: bus.wram_slice(ram::TILES_LOW, GRID_LEN).to_vec(),
         high: bus.wram_slice(ram::TILES_HIGH, GRID_LEN).to_vec(),
         layer2_tilemap,
+        wram: bus.wram,
     })
 }
