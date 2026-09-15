@@ -173,6 +173,19 @@ Windows, and macOS. Keep all three green.
   stored as a left and a right 16x16 half. The layer 2 background tilemap is decoded into
   `$7EB900`/`$7EBD00` (two screens); its tile numbers index the BG Map16 (`200+`).
 
+## Lunar Magic ROM facts
+
+- Marker: `Lunar Magic Version X.YZ ...` as ASCII at `$0FF0A0` (`Rom::lunar_magic_version`).
+- Map16 pages 0-1 stay in the vanilla tables (rewritten in place). Higher pages live in
+  RATS-tagged blocks whose layout differs by Lunar Magic version; the routine at `$06F540`
+  (called with A = tile*2, 16-bit; returns the pointer's low word in A and bank in `$0C`)
+  resolves any tile number. Call it on the core instead of parsing the blocks.
+- Custom level palettes: 3-byte pointers at `$0EF600` per level to `$202` bytes (back area
+  colour, then 256 colours); `$000000`/`$FFFFFF` = none. Game mode `$12` loads them itself.
+- ExGFX and Lunar Magic's 4bpp re-inserted GFX are handled by the game's own upload code, so
+  capturing VRAM during game mode `$12` covers them without knowing the tables.
+- SA-1 hacks do not run yet: the SA-1 registers and its CPU are not modelled.
+
 ## Decisions
 
 - **Rust core.** Chosen for single-binary distribution, compile-time address typing, C FFI to
