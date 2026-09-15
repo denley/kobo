@@ -4,7 +4,10 @@
 //! shells on top of this crate are meant to be thin.
 
 pub mod addr;
+pub mod compress;
 pub mod config;
+pub mod gfx;
+pub mod image;
 pub mod rom;
 
 pub use addr::{MapError, Mapping, PcAddr, SnesAddr};

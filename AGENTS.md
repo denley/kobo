@@ -76,9 +76,15 @@ cargo build --workspace
 cargo test --workspace                       # ROM-backed tests skip if no ROM is configured
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
-cargo run -- rom info [path]                 # header, checksum, hash, identity
+cargo run -- rom info [-r rom]               # header, checksum, hash, identity
+cargo run -- gfx list|export|png [-r rom]    # GFX files: table, LM-layout .bin export, tile sheet
 cargo run -- addr '$05E000' [--sa1]          # SNES <-> file offset
 ```
+
+Lunar Magic runs headlessly under Wine for reference exports, e.g.
+`wine "Lunar Magic.exe" -ExportGFX rom.smc` (also `-ExportAllMap16`, `-ExportSharedPalette`,
+`-ExportLevel`). Always run it on a copy of the ROM. Export hashes, never the exported bytes,
+go in `crates/kobo-core/tests/fixtures/`.
 
 CI (`.github/workflows/ci.yml`) runs fmt, clippy with warnings denied, and tests on Linux,
 Windows, and macOS. Keep all three green.
@@ -101,6 +107,15 @@ Windows, and macOS. Keep all three green.
   0x200 levels each. Sprite pointers at `$05EC00` are 2 bytes each, implicitly bank `$07`.
 - A layer 2 pointer with bank `$FF` marks a background tilemap; the game substitutes bank `$0C`.
 - Level 105 (Yoshi's Island 1) layer 1 data starts at `$0688DD` in vanilla.
+- GFX file pointers for `GFX00`-`GFX31`: low bytes at `$00B992`, high at `$00B9C4`, bank at
+  `$00B9F6`. Lunar Magic keeps these tables and rewrites the entries (often into FastROM
+  banks `$80+`). Data is LC_LZ2. Vanilla files are 3bpp (2bpp for `27`-`2B`, `2F`); Lunar
+  Magic re-inserts files as 4bpp, so bit depth is inferred from decompressed size and the
+  file's fixed tile count (128, except `2F`-`31` = 64). `GFX27` is not planar tiles at any depth
+  and is treated as raw bytes; its layout is unknown.
+- Lunar Magic exports 3bpp files converted to 4bpp, and for `GFX01`, `08`, `1E`, `31` sets
+  the fourth plane of some tiles to the tile silhouette (see `gfx::upper_palette_tiles`).
+  Observed, not yet explained. `GFX32`/`GFX33` are stored differently and are not handled.
 
 ## Decisions
 

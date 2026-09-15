@@ -1,17 +1,10 @@
 //! Tests that need the real vanilla ROM. They skip when none is configured
 //! so CI without ROM data still passes.
 
-use kobo_core::{Mapping, PcAddr, Rom, RomIdentity, SnesAddr, config, rom::VANILLA_USA_SHA1};
+mod common;
 
-fn vanilla() -> Option<Rom> {
-    match config::vanilla_rom_path() {
-        Ok(path) => Some(Rom::load(&path).expect("configured vanilla ROM must load")),
-        Err(e) => {
-            eprintln!("skipping: {e}");
-            None
-        }
-    }
-}
+use common::vanilla;
+use kobo_core::{Mapping, PcAddr, RomIdentity, SnesAddr, rom::VANILLA_USA_SHA1};
 
 #[test]
 fn identifies_vanilla_usa() {
