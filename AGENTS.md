@@ -113,8 +113,10 @@ Windows, and macOS. Keep all three green.
   `KOBO_ORACLE_VIDEO=1 dump.sh ...` instead waits for visible video and also writes PPM,
   full WRAM, and PPU state. Keep these later-frame captures in a separate directory.
   `KOBO_BOSS_ORACLE_DIR` enables stable boss graphics comparisons for levels 096, 0CC,
-  0D9, and 1C7. The loader override must only run in game mode `$11`: overriding the
-  title-screen load in mode `$03` contaminates the graphics cache.
+  0D9, and 1C7 (Mode 7 characters, layer 3 GFX, arena tilemap, SP3); either capture mode
+  works. The loader override must only run in game mode `$11`: overriding the
+  title-screen load in mode `$03` contaminates the graphics cache, and dumps made before
+  that guard fail the boss comparison.
 - Lunar Magic exports (hashes in `tests/fixtures/`) are the oracle for GFX, palette, and Map16.
 - **Lunar Magic hacks**: `tests/layer2_background.rs` runs on every ROM listed in `KOBO_LM_ROMS`
   (`:`-separated paths) as well as the vanilla ROM. It rebuilds the layer 2 tilemap the game
@@ -251,6 +253,19 @@ Windows, and macOS. Keep all three green.
   level-loading routines rather than re-implementing every object; validated against emulator
   dumps of every vanilla level. Small formats (LC_LZ2, GFX, palettes) are hand-written because
   the build must also encode them.
+
+## Known gaps
+
+- Layer 3 is not rendered: no status bar, layer 3 backgrounds, or tides. The uploaded layer 3
+  font is only used for sprite ID markers.
+- Sprites in ordinary levels are drawn as ID markers, not graphics. Boss arenas show the
+  OAM of the first drawing pass instead.
+- Vertical levels skip the layer 2 background tilemap; `tests/layer2_background.rs` skips
+  them too.
+- Animated tiles show whatever the first frame uploaded to their VRAM slots.
+- Boss arena renders are an initial view, not a cycle-timed frame (see above).
+- SA-1 hacks do not run: the SA-1 registers and CPU are not modelled.
+- `GFX27`'s layout is unknown; `GFX32`/`GFX33` are not handled by the GFX tooling.
 
 ## Open decisions
 
