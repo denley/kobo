@@ -107,6 +107,46 @@ pub fn draw_tile_ref(
     draw_tile8(img, x, y, tiles.get(r.tile()), &row, r.flip_x(), r.flip_y());
 }
 
+/// One drawing pass over a layer: which priority bit it draws, and the
+/// palette bits the game's upload routine ORs into that layer's tilemap
+/// words.
+#[derive(Clone, Copy)]
+struct LayerPass {
+    priority: bool,
+    palette_mask: u8,
+}
+
+/// Draws the quadrants of a 16x16 tile that belong to `pass`.
+fn draw_map16_layer(
+    img: &mut RgbImage,
+    x: u32,
+    y: u32,
+    tile: &Map16Tile,
+    tiles: &LayerTiles,
+    palette: &Palette,
+    pass: LayerPass,
+) {
+    for qy in 0..2 {
+        for qx in 0..2 {
+            let r = tile.quadrant(qx, qy);
+            if r.priority() != pass.priority {
+                continue;
+            }
+            let row = palette.row_rgb8((r.palette() | pass.palette_mask) as usize & 7);
+            let (px, py) = (x + 8 * qx as u32, y + 8 * qy as u32);
+            draw_tile8(
+                img,
+                px,
+                py,
+                tiles.get(r.tile()),
+                &row,
+                r.flip_x(),
+                r.flip_y(),
+            );
+        }
+    }
+}
+
 /// Draws a 16x16 tile at pixel position (`x`, `y`).
 pub fn draw_map16_tile(
     img: &mut RgbImage,
@@ -145,8 +185,10 @@ pub fn map16_sheet(
     img
 }
 
-/// Renders a level's layer 1 tile grid (and layer 2 background tilemap,
-/// if any) over the back area colour.
+/// Renders a level's layer 1 tile grid and its layer 2 (background
+/// tilemap or objects) over the back area colour. Layers interleave the
+/// way Mode 1 stacks them: layer 2 low priority, layer 1 low priority,
+/// layer 2 high priority, layer 1 high priority.
 pub fn level_image(
     tiles: &crate::expand::LevelTiles,
     layer_tiles: &LayerTiles,
@@ -160,13 +202,41 @@ pub fn level_image(
     let (w, h) = tiles.size();
     let mut img = RgbImage::new(w as u32 * 16, h as u32 * 16);
     img.pixels.fill(background);
-    // Layer 2 background tilemap, repeated every two screens.
-    // Boss arenas and dark rooms sharing their tilemap do not display
-    // the decoded background buffer.
-    if tiles.layer2_tilemap.is_some()
-        && !tiles.vertical
-        && !matches!(tiles.level_mode, 0x09 | 0x0B | 0x0F | 0x10)
-    {
+    for priority in [false, true] {
+        draw_layer2(&mut img, tiles, layer_tiles, palette, priority);
+        for y in 0..h {
+            for x in 0..w {
+                if let Some(tile) = map16.get(&tiles.tile_at(x, y)) {
+                    let (px, py) = ((x * 16) as u32, (y * 16) as u32);
+                    let pass = LayerPass {
+                        priority,
+                        palette_mask: 0,
+                    };
+                    draw_map16_layer(&mut img, px, py, tile, layer_tiles, palette, pass);
+                }
+            }
+        }
+    }
+    img
+}
+
+/// Draws the quadrants of layer 2 with the given priority: the
+/// background tilemap repeated every two screens, or the layer 2 objects
+/// from their own region of the tile grid.
+fn draw_layer2(
+    img: &mut RgbImage,
+    tiles: &crate::expand::LevelTiles,
+    layer_tiles: &LayerTiles,
+    palette: &Palette,
+    priority: bool,
+) {
+    let (w, h) = tiles.size();
+    if tiles.layer2_tilemap.is_some() {
+        // Boss arenas and dark rooms sharing their tilemap do not display
+        // the decoded background buffer.
+        if tiles.vertical || matches!(tiles.level_mode, 0x09 | 0x0B | 0x0F | 0x10) {
+            return;
+        }
         for screen in 0..w / crate::expand::SCREEN_COLS {
             for y in 0..crate::expand::SCREEN_ROWS {
                 for x in 0..crate::expand::SCREEN_COLS {
@@ -174,28 +244,35 @@ pub fn level_image(
                     if let Some(tile) = tiles.bg_map16.get(n as usize - 0x200) {
                         let px = ((screen * crate::expand::SCREEN_COLS + x) * 16) as u32;
                         let py = (y * 16) as u32;
-                        draw_map16_tile(&mut img, px, py, tile, layer_tiles, palette);
+                        let pass = LayerPass {
+                            priority,
+                            palette_mask: 0,
+                        };
+                        draw_map16_layer(img, px, py, tile, layer_tiles, palette, pass);
                     }
                 }
             }
         }
+        return;
     }
+    if tiles.layer2_objects().is_none() {
+        return;
+    }
+    let pass = LayerPass {
+        priority,
+        palette_mask: tiles.layer2_palette_mask(),
+    };
     for y in 0..h {
         for x in 0..w {
-            let n = tiles.tile_at(x, y);
-            if let Some(tile) = map16.get(&n) {
-                draw_map16_tile(
-                    &mut img,
-                    (x * 16) as u32,
-                    (y * 16) as u32,
-                    tile,
-                    layer_tiles,
-                    palette,
-                );
+            let Some(n) = tiles.layer2_object_tile(x, y) else {
+                continue;
+            };
+            if let Some(tile) = tiles.map16.get(&n) {
+                let (px, py) = ((x * 16) as u32, (y * 16) as u32);
+                draw_map16_layer(img, px, py, tile, layer_tiles, palette, pass);
             }
         }
     }
-    img
 }
 
 /// Fixed-screen arenas use the ROM's video-mode bands, not its collision

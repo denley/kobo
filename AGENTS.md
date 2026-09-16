@@ -188,9 +188,17 @@ Windows, and macOS. Keep all three green.
   ExGFX, custom palettes, and animated tiles come for free. VRAM matches the emulator except
   animated slots (frame-dependent) and tilemap areas filled on later frames; CGRAM matches
   except Mario's row 8 and one per-frame colour.
-- Tile grid layout: horizontal levels are 16x27 per screen, screen after screen; layer 2 objects
-  use screens `$10+` of the same buffer. Vertical levels are 32 wide; each screen is 16 rows
-  stored as a left and a right 16x16 half. The layer 2 background tilemap is decoded into
+- Tile grid layout: horizontal levels are 16x27 per screen, screen after screen. Vertical
+  levels are 32 wide; each screen is 16 rows stored as a left and a right 16x16 half.
+- Layer 2 objects live in the upper part of the same grid planes, with a layout chosen by
+  level mode independently of layer 1 (`CODE_058883` dispatch, screen tables at `$00BB08`
+  and `$00BC16`): modes `01`-`04`, `0F`, and `1F` use 16 horizontal screens from plane offset
+  `$1B00`; modes `05`-`08` use 14 vertical screens from `$1C00`. Modes `03`/`04` pair a
+  vertical layer 1 with a horizontal layer 2. The upload resolves the tile numbers through
+  the layer 1 Map16 pointer table (`$0FBE`), not the BG table, and ORs `$1000` (palette
+  row + 4) into every word when the object tileset is 3. `expand::Layer2Objects` and
+  `LevelTiles::layer2_object_tile` encode this; the renderer stacks layers in Mode 1 order
+  (layer 2 low priority, layer 1 low, layer 2 high, layer 1 high). The layer 2 background tilemap is decoded into
   `$7EB900`/`$7EBD00` (two screens); its tile numbers index the BG Map16 (`200+`). The buffer
   is captured right after `LoadLevel`: game mode `$12` decompresses GFX into `$7EAD00`, and a
   4bpp file (Lunar Magic) overruns the 3bpp-sized buffer into `$7EB900`. The game has
@@ -262,6 +270,27 @@ Windows, and macOS. Keep all three green.
   OAM of the first drawing pass instead.
 - Vertical levels skip the layer 2 background tilemap; `tests/layer2_background.rs` skips
   them too.
+- Sprite lists in Lunar Magic 3.x ROMs parse garbage. `sprites::read_sprites_at` assumes
+  every list in an LM 3+ ROM ends with `$FF $FE`, but untouched vanilla levels keep the
+  plain `$FF` terminator and edited levels use an undocumented layout (level 105 of Kaizo
+  Kindergarten begins `00 FF "STAR" 0D 00 F2 FF ...`: a tag, a length, and its complement).
+  The parser walks off the end of the ROM, so `level png` fails unless `--no-sprites` is
+  given. 14 of the 43 corpus hacks are affected. Fix by documenting the LM 3 sprite format
+  or by running the game's own sprite loader on the core.
+- Castle and ghost house levels render as the "No Yoshi" entrance intro instead of the
+  level. `CODE_05DA24` swaps in one of the six intro rooms (`PtrsLong05D766`, data near
+  `$078000`, one screen, mode `$0E`/`$0F`) when the header's tileset is 1, 2, 5, 6, or 8 and
+  `$141A`, `$141D`, and `$141F` are all zero. 45 vanilla levels are affected (`004`, `007`,
+  `101`, `111`, `1CE`, ...), and the emulator oracle captured the same intro rooms, so
+  `tests/oracle_levels.rs` does not notice. The game itself sets `$141D` (`ShowMarioStart`)
+  when the intro ends and reloads; seeding it before `LOAD_HEADER_POINTERS` should give the
+  real level, at the cost of the "Mario Start!" text path and an overworld tilemap upload
+  during level preparation that must not leak into the captured VRAM.
+- Levels `000`, `100`, and low bytes `$DC`-`$FF` (74 per ROM) cannot be rendered because
+  the `$0109` overworld override cannot encode them. They are real levels: vanilla `0DC`
+  has 11 screens, and Invictus stores custom data in `000`, `100`, `0FF`, and `1FF`.
+  Writing the level number into RAM directly instead of going through the override would
+  recover them.
 - Animated tiles show whatever the first frame uploaded to their VRAM slots.
 - Boss arena renders are an initial view, not a cycle-timed frame (see above).
 - SA-1 hacks do not run: the SA-1 registers and CPU are not modelled.

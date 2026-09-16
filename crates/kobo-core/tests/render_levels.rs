@@ -26,6 +26,7 @@ fn scene() -> (LevelTiles, LayerTiles, Palette) {
         level: 0x105,
         header: PrimaryHeader::from_bytes([0; 5]),
         level_mode: 0,
+        object_tileset: 0,
         vertical: false,
         screens: 3,
         low: vec![0; GRID_LEN],
@@ -65,6 +66,93 @@ fn overlapping_map16_numbers_keep_foreground_and_background_art_separate() {
     assert_eq!(image.pixels[16], [0, 0, 255]);
     assert_eq!(image.pixels[512], [0, 0, 255]); // Background repeats.
     assert_eq!((image.width, image.height), (768, 432));
+}
+
+/// A level whose layer 2 is objects: tile 1 is solid blue and 2 is solid
+/// red, with map16 knowing both.
+fn object_scene(level_mode: u8) -> (LevelTiles, LayerTiles, Palette) {
+    let (mut tiles, gfx, palette) = scene();
+    tiles.level_mode = level_mode;
+    tiles.layer2_tilemap = None;
+    tiles.bg_map16.clear();
+    tiles.map16.insert(1, solid_tile(2)); // blue
+    tiles.map16.insert(2, solid_tile(1)); // red
+    (tiles, gfx, palette)
+}
+
+#[test]
+fn layer2_objects_draw_under_layer_1_from_their_own_screens() {
+    let (mut tiles, mut gfx, palette) = object_scene(0x01);
+    let back = [0, 255, 0];
+    // Screen 0 of the horizontal layer 2 buffer starts at plane offset $1B00.
+    tiles.low[0x1B00] = 1;
+    tiles.low[0x1B00 + SCREEN_COLS * SCREEN_ROWS + 5] = 1; // screen 1, x = 5
+    tiles.low[0] = 2;
+    gfx.tiles[1].pixels[0][0] = 0; // Layer 2 shows through layer 1's hole.
+    let image = render::level_image(&tiles, &gfx, &palette, back);
+    assert_eq!(image.pixels[0], [0, 0, 255]);
+    assert_eq!(image.pixels[1], [255, 0, 0]);
+    assert_eq!(image.pixels[16], back);
+    assert_eq!(image.pixels[(16 + 5) * 16], [0, 0, 255]);
+    // The same bytes are not layer 2 objects in a background tilemap mode.
+    tiles.level_mode = 0x00;
+    let image = render::level_image(&tiles, &gfx, &palette, back);
+    assert_eq!(image.pixels[0], back);
+}
+
+#[test]
+fn vertical_modes_read_layer2_objects_from_the_vertical_buffer() {
+    let (mut tiles, gfx, palette) = object_scene(0x07);
+    tiles.vertical = true;
+    tiles.screens = 2;
+    // Screen 1, right half, row 0, column 0: level position (16, 16).
+    tiles.low[0x1C00 + 0x200 + 0x100] = 1;
+    let image = render::level_image(&tiles, &gfx, &palette, [0; 3]);
+    assert_eq!((image.width, image.height), (512, 512));
+    let at = |x: usize, y: usize| image.pixels[y * 16 * 512 + x * 16];
+    assert_eq!(at(16, 16), [0, 0, 255]);
+    assert_eq!(at(0, 0), [0; 3]);
+    // Modes 3 and 4 pair a vertical layer 1 with a horizontal layer 2.
+    tiles.level_mode = 0x03;
+    tiles.low[0x1B00 + SCREEN_COLS] = 1; // row 1, column 0
+    let image = render::level_image(&tiles, &gfx, &palette, [0; 3]);
+    let at = |x: usize, y: usize| image.pixels[y * 16 * 512 + x * 16];
+    assert_eq!(at(16, 16), [0; 3]);
+    assert_eq!(at(0, 1), [0, 0, 255]);
+}
+
+#[test]
+fn object_tileset_three_moves_layer2_palettes_up_four_rows() {
+    let (mut tiles, gfx, mut palette) = object_scene(0x02);
+    tiles.object_tileset = 3;
+    palette.set(4, 2, Color15::from_rgb5(0, 31, 0));
+    tiles.low[0x1B00] = 1;
+    tiles.low[1] = 1; // Layer 1 keeps its own rows.
+    let image = render::level_image(&tiles, &gfx, &palette, [0; 3]);
+    assert_eq!(image.pixels[0], [0, 255, 0]);
+    assert_eq!(image.pixels[16], [0, 0, 255]);
+}
+
+#[test]
+fn priority_bits_interleave_layers_like_mode_1() {
+    let (mut tiles, gfx, palette) = object_scene(0x01);
+    let r = Tile8Ref::new(2, 0, true, false, false);
+    tiles.map16.insert(
+        3,
+        Map16Tile {
+            top_left: r,
+            bottom_left: r,
+            top_right: r,
+            bottom_right: r,
+        },
+    );
+    tiles.low[0x1B00] = 3; // High-priority blue layer 2 tile...
+    tiles.low[0] = 2; // ...over a low-priority red layer 1 tile.
+    let image = render::level_image(&tiles, &gfx, &palette, [0; 3]);
+    assert_eq!(image.pixels[0], [0, 0, 255]);
+    tiles.low[0x1B00] = 1; // Equal priorities put layer 1 in front.
+    let image = render::level_image(&tiles, &gfx, &palette, [0; 3]);
+    assert_eq!(image.pixels[0], [255, 0, 0]);
 }
 
 #[test]

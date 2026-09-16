@@ -31,6 +31,8 @@ mod ram {
     pub const SCREEN_MODE: u32 = 0x7E_005B;
     pub const LEVEL_MODE: u32 = 0x7E_1925;
     pub const SCREENS: u32 = 0x7E_005D;
+    /// `$1931`: the object tileset, as the loader stored it.
+    pub const OBJECT_TILESET: u32 = 0x7E_1931;
     pub const TILES_LOW: u32 = 0x7E_C800;
     pub const TILES_HIGH: u32 = 0x7F_C800;
     pub const LAYER2_TILEMAP_LOW: u32 = 0x7E_B900;
@@ -50,6 +52,43 @@ mod ram {
     pub const BG_SCREEN_LEN: u32 = 0x7E_0005;
     /// Direct page `$CE`-`$D0`: the level's sprite data pointer.
     pub const SPRITE_DATA_PTR: u32 = 0x7E_00CE;
+}
+
+/// Where a level mode keeps its layer 2 objects in the tile grid, per the
+/// game's layer 2 upload dispatch (`CODE_058883`) and the per-mode screen
+/// pointer tables at `$00BB08` and `$00BC16`. The layout is independent
+/// of layer 1's: modes 3 and 4 pair a vertical layer 1 with a horizontal
+/// layer 2, and modes 5 and 6 the reverse.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Layer2Objects {
+    /// 16 screens of 16x27 tiles from plane offset `0x1B00`.
+    Horizontal,
+    /// 14 screens of 32x16 tiles (left and right halves) from `0x1C00`.
+    Vertical,
+}
+
+impl Layer2Objects {
+    /// The layout for a level mode, or `None` when the mode uploads no
+    /// layer 2 objects (background tilemap modes and boss arenas).
+    pub fn for_level_mode(mode: u8) -> Option<Self> {
+        match mode {
+            0x01..=0x04 | 0x0F | 0x1F => Some(Self::Horizontal),
+            0x05..=0x08 => Some(Self::Vertical),
+            _ => None,
+        }
+    }
+
+    /// Plane offset of a level-wide tile position, or `None` outside the
+    /// buffer.
+    pub fn offset(self, x: usize, y: usize) -> Option<usize> {
+        match self {
+            Self::Horizontal => (x / SCREEN_COLS < 16 && y < SCREEN_ROWS).then(|| {
+                0x1B00 + (x / SCREEN_COLS) * SCREEN_LEN + y * SCREEN_COLS + x % SCREEN_COLS
+            }),
+            Self::Vertical => (x < 32 && y / 16 < 14)
+                .then(|| 0x1C00 + (y / 16) * 0x200 + (x / 16) * 0x100 + (y % 16) * 16 + x % 16),
+        }
+    }
 }
 
 /// Bytes per plane of the layer 2 background tilemap buffer.
@@ -160,6 +199,9 @@ pub struct LevelTiles {
     pub header: PrimaryHeader,
     /// Level mode as the game stored it.
     pub level_mode: u8,
+    /// Object tileset as the game stored it. Tileset 3 shifts layer 2
+    /// object palettes up by four rows on upload.
+    pub object_tileset: u8,
     /// True for vertical levels.
     pub vertical: bool,
     pub screens: usize,
@@ -222,15 +264,29 @@ impl LevelTiles {
         self.low[i] as u16 | ((self.high[i] as u16) << 8)
     }
 
-    /// Map16 tile number (BG numbering, `0x200` upwards) of a layer 2
-    /// object at a horizontal-level position. Layer 2 objects occupy
-    /// screens `0x10` and up of the buffer, so at most 16 screens exist.
-    pub fn layer2_object_tile(&self, x: usize, y: usize) -> Option<u16> {
-        if self.vertical || self.layer2_tilemap.is_some() || x / SCREEN_COLS >= 16 {
+    /// How this level's layer 2 objects are laid out, if it has any.
+    pub fn layer2_objects(&self) -> Option<Layer2Objects> {
+        if self.layer2_tilemap.is_some() {
             return None;
         }
-        let i = (x / SCREEN_COLS + 16) * SCREEN_LEN + y * SCREEN_COLS + (x % SCREEN_COLS);
-        Some(0x200 | self.low[i] as u16 | ((self.high[i] as u16) << 8))
+        Layer2Objects::for_level_mode(self.level_mode)
+    }
+
+    /// Map16 tile number of the layer 2 object at a level-wide position.
+    /// The game resolves these through the same Map16 pointer table as
+    /// layer 1, so they index `map16`, not `bg_map16`. `None` when the
+    /// level's layer 2 is not objects or the position is outside the
+    /// layer 2 buffer.
+    pub fn layer2_object_tile(&self, x: usize, y: usize) -> Option<u16> {
+        let i = self.layer2_objects()?.offset(x, y)?;
+        Some(self.low[i] as u16 | ((self.high[i] as u16) << 8))
+    }
+
+    /// Palette bits the layer 2 object upload ORs into every tile: bit 2
+    /// (rows 4-7) in object tileset 3, where `CODE_058B8D` ORs `$1000`
+    /// into the tilemap words; nothing otherwise.
+    pub fn layer2_palette_mask(&self) -> u8 {
+        if self.object_tileset == 3 { 4 } else { 0 }
     }
 
     /// Where the game found the level's sprite data, honouring any Lunar
@@ -382,6 +438,7 @@ pub fn expand_level_traced(
         level,
         header,
         level_mode: bus.wram_u8(ram::LEVEL_MODE),
+        object_tileset: bus.wram_u8(ram::OBJECT_TILESET),
         vertical: bus.wram_u8(ram::SCREEN_MODE) & 0x01 != 0,
         screens,
         low: bus.wram_slice(ram::TILES_LOW, GRID_LEN).to_vec(),
