@@ -94,12 +94,8 @@ fn check_rom(rom: &Rom) -> (usize, Vec<String>) {
     let mut failures = Vec::new();
     let gpw2 = rom.sha1_hex() == "390583d5faa0cc02e0c4f414f7638228661b2dc9";
     for level in 0..0x200u16 {
-        if expand::override_for(level).is_none() {
-            continue;
-        }
         let tiles = match expand::expand_level(rom, level) {
             Ok(t) => t,
-            Err(ExpandError::Unreachable(_)) => continue,
             Err(ExpandError::MissingBackgroundTable(0x09F)) if gpw2 => {
                 eprintln!("rejected level {level:03X}: null background Map16 table");
                 continue;

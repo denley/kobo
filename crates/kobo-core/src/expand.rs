@@ -25,7 +25,20 @@ const SCREEN_LEN: usize = SCREEN_ROWS * SCREEN_COLS;
 
 /// RAM addresses the loader reads.
 mod ram {
-    pub const OVERWORLD_OVERRIDE: u32 = 0x7E_0109;
+    /// `$141A`: non-zero while inside a level, so the header pointer
+    /// routine takes the screen-exit path instead of the overworld one.
+    pub const SUBLEVEL_COUNT: u32 = 0x7E_141A;
+    /// `$19B8`: screen exit table, level number low byte per screen.
+    pub const EXIT_TABLE_LOW: u32 = 0x7E_19B8;
+    /// `$19D8`: screen exit table, flags per screen. Vanilla stores the
+    /// exit's water bit here and never reads it back. Lunar Magic's
+    /// replacement for the high byte lookup (`JSL $05DC50` from
+    /// `CODE_05D796`) treats an entry with bit 2 set as its own format:
+    /// bit 0 is the level number's high byte, bit 1 selects a secondary
+    /// exit, and bit 3 is copied to `$192A`.
+    pub const EXIT_TABLE_HIGH: u32 = 0x7E_19D8;
+    /// `$1F11`: the player's submap, which vanilla turns into the level
+    /// number's high byte.
     pub const OW_PLAYER_SUBMAP: u32 = 0x7E_1F11;
     pub const LAST_SCREEN_HORIZ: u32 = 0x7E_005E;
     pub const SCREEN_MODE: u32 = 0x7E_005B;
@@ -163,8 +176,6 @@ const STEP_LIMIT: u64 = 200_000_000;
 pub enum ExpandError {
     #[error(transparent)]
     Level(#[from] LevelError),
-    #[error("level {0:03X} cannot be selected through the overworld override")]
-    Unreachable(u16),
     #[error("level {level:03X}: {source}")]
     Cpu {
         level: u16,
@@ -344,17 +355,6 @@ impl LevelTiles {
     }
 }
 
-/// The `$0109` value that selects `level`, and the high-byte flag.
-///
-/// Zero means "no override", so levels `000` and `100` cannot be selected
-/// this way, nor can low bytes `$DC` and above.
-pub fn override_for(level: u16) -> Option<(u8, u8)> {
-    let lo = level & 0xFF;
-    let hi = (level >> 8) as u8;
-    let v = if lo < 0x25 { lo } else { lo + 0x24 };
-    (lo != 0 && v <= 0xFF).then_some((v as u8, hi))
-}
-
 /// Runs the ROM's level loader for `level` and returns the tile grid.
 pub fn expand_level(rom: &Rom, level: u16) -> Result<LevelTiles, ExpandError> {
     expand_level_traced(rom, level, false).map(|(t, _)| t)
@@ -371,7 +371,6 @@ pub fn expand_level_traced(
     trace: bool,
 ) -> Result<(LevelTiles, Option<ReadTrace>), ExpandError> {
     let header = level::read_primary_header(rom, level)?;
-    let (ovr, hi) = override_for(level).ok_or(ExpandError::Unreachable(level))?;
     let mut bus = SmwBus::new(rom);
     let mut cpu = Cpu::new();
     run_reset(&mut cpu, &mut bus, level)?;
@@ -392,7 +391,16 @@ pub fn expand_level_traced(
         cpu.call(bus, addr, STEP_LIMIT)
             .map_err(|source| ExpandError::Cpu { level, source })
     };
-    bus.set_wram_u8(ram::OVERWORLD_OVERRIDE, ovr);
+    // Enter the level the way a screen exit on screen 0 would. The
+    // overworld path cannot express every level number through `$0109`,
+    // loads the "No Yoshi" entrance intro room for castle and ghost house
+    // tilesets, and is rerouted by some Lunar Magic versions. The high
+    // byte is given in both the vanilla form (the player's submap) and
+    // Lunar Magic's exit table form.
+    let (lo, hi) = (level as u8, (level >> 8) as u8);
+    bus.set_wram_u8(ram::SUBLEVEL_COUNT, 1);
+    bus.set_wram_u8(ram::EXIT_TABLE_LOW, lo);
+    bus.set_wram_u8(ram::EXIT_TABLE_HIGH, 0x04 | hi);
     bus.set_wram_u8(ram::OW_PLAYER_SUBMAP, hi);
     // Run each phase with the game mode the real machine would be in.
     bus.set_wram_u8(ram::GAME_MODE, 0x11);

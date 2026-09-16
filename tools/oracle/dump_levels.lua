@@ -18,9 +18,16 @@
 -- How it works: the script presses Start on the title screen and A twice
 -- on the file/player select, which makes the game load the intro level
 -- through $0109 (the "overworld override"). An exec callback at the level
--- loader entry replaces that value with the requested level. Everything
--- is dumped on the first frame of game mode $14 (level running), before
--- the player has moved.
+-- loader entry keeps that override set, and a second one at the header
+-- pointer lookup (CODE_05D8B7) replaces the resolved level number with the
+-- requested one, since $0109 cannot encode levels 000, 100, or low bytes
+-- $DC and above. Everything is dumped on the first frame of game mode $14
+-- (level running), before the player has moved.
+--
+-- Castle and ghost house tilesets first play the "No Yoshi" entrance intro
+-- (a separate one-screen room) and then reload the level. The script
+-- predicts that from the ROM's header and entrance tables, the same way
+-- CODE_05DA24 decides, and dumps the second level frame in that case.
 
 local mem = emu.memType.snesMemory
 local outdir = os.getenv("KOBO_ORACLE_OUT") or "."
@@ -31,6 +38,8 @@ for s in list:gmatch("[^,%s]+") do
 end
 
 local LOADER_ENTRY = 0x0096D5 -- GM11LoadLevel, right after $0109/$1F11 are written
+local POINTER_LOOKUP = 0x05D8B7 -- CODE_05D8B7: level number in $0E-$0F becomes pointers
+local rom = emu.memType.snesPrgRom
 local MAX_FRAMES_PER_STATE = 1800
 
 local idx = 1
@@ -51,13 +60,21 @@ local function fail(msg)
   emu.stop(2)
 end
 
-local function override_for(level)
-  local lo, hi = level & 0xFF, level >> 8
-  local v = lo < 0x25 and lo or lo + 0x24
-  if lo == 0 or v > 0xFF then
-    return nil -- zero means "no override"; $DC+ overflows
-  end
-  return v, hi
+-- LoROM file offset of a bank $00-$3F address, for reading ROM tables.
+local function pc(addr)
+  return ((addr >> 16) & 0x7F) * 0x8000 + (addr & 0x7FFF)
+end
+
+-- Whether the game shows the "No Yoshi" entrance intro before this level
+-- when entering from the overworld: castle, rope, ghost house, and
+-- similar tilesets, unless the level's entrance settings disable it.
+local function has_intro(level)
+  local ptr = pc(0x05E000 + 3 * level)
+  local data = emu.read(ptr, rom) | (emu.read(ptr + 1, rom) << 8) | (emu.read(ptr + 2, rom) << 16)
+  local tileset = emu.read(pc(data) + 4, rom) & 0x0F
+  local intro_tilesets = { [1] = true, [2] = true, [5] = true, [6] = true, [8] = true }
+  local disabled = emu.read(pc(0x05F600 + level), rom) & 0x80 ~= 0
+  return intro_tilesets[tileset] == true and not disabled
 end
 
 local function on_loader_entry()
@@ -66,13 +83,19 @@ local function on_loader_entry()
   if current == nil or emu.read(0x7E0100, mem) ~= 0x11 then
     return
   end
-  local v, hi = override_for(current)
-  if v == nil then
-    fail(string.format("level %03X cannot be expressed through $0109", current))
+  -- Any non-zero value takes the forced-level path; the number itself is
+  -- replaced at the pointer lookup.
+  emu.write(0x7E0109, 1, mem)
+  emu.write(0x7E1F11, 0, mem)
+end
+
+local function on_pointer_lookup()
+  if current == nil or emu.read(0x7E0100, mem) ~= 0x11 then
     return
   end
-  emu.write(0x7E0109, v, mem)
-  emu.write(0x7E1F11, hi, mem)
+  emu.write(0x7E000E, current & 0xFF, mem)
+  emu.write(0x7E000F, current >> 8, mem)
+  emu.write(0x7E17BB, current & 0xFF, mem)
 end
 
 local function read_range(base, len, memtype)
@@ -188,6 +211,16 @@ local function on_frame()
     if mode == 0x0A then
       tap("a")
     elseif mode > 0x0A then
+      stage, stage_frames = has_intro(current) and "intro" or "level", 0
+    end
+  elseif stage == "intro" then
+    -- The intro room runs in mode $14 and reloads through mode $0F.
+    if mode == 0x14 then
+      stage, stage_frames = "intro_running", 0
+    end
+  elseif stage == "intro_running" then
+    if mode ~= 0x14 then
+      logf("level %03X: intro ended at frame %d", current, stage_frames)
       stage, stage_frames = "level", 0
     end
   elseif stage == "level" then
@@ -218,6 +251,8 @@ end
 
 emu.addMemoryCallback(on_loader_entry, emu.callbackType.exec, LOADER_ENTRY, LOADER_ENTRY, mem)
 emu.addMemoryCallback(on_loader_entry, emu.callbackType.exec, LOADER_ENTRY | 0x800000, LOADER_ENTRY | 0x800000, mem)
+emu.addMemoryCallback(on_pointer_lookup, emu.callbackType.exec, POINTER_LOOKUP, POINTER_LOOKUP, mem)
+emu.addMemoryCallback(on_pointer_lookup, emu.callbackType.exec, POINTER_LOOKUP | 0x800000, POINTER_LOOKUP | 0x800000, mem)
 emu.addEventCallback(on_frame, emu.eventType.endFrame)
 emu.addEventCallback(on_input, emu.eventType.inputPolled)
 logf("oracle started: %d levels, out=%s", #levels, outdir)

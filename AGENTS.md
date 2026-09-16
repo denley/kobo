@@ -107,8 +107,8 @@ Windows, and macOS. Keep all three green.
 - **Emulator oracle** (`tools/oracle/`): `dump.sh <rom> <outdir> 105,106,...` runs Mesen 2
   headlessly, navigates to each level through the file select, and dumps the tile grid,
   CGRAM, VRAM, and header RAM on the first level frame. `tests/oracle_levels.rs` compares
-  `expand::expand_level` against a dump directory when `KOBO_ORACLE_DIR` is set; all 438
-  selectable vanilla levels match byte for byte. Dumps live in `~/.local/share/kobo/oracle/`
+  `expand::expand_level` against a dump directory when `KOBO_ORACLE_DIR` is set; all 512
+  vanilla levels match byte for byte. Dumps live in `~/.local/share/kobo/oracle/`
   and are never committed. `trace_writes.lua` logs who writes a RAM address, for debugging.
   `KOBO_ORACLE_VIDEO=1 dump.sh ...` instead waits for visible video and also writes PPM,
   full WRAM, and PPU state. Keep these later-frame captures in a separate directory.
@@ -176,6 +176,23 @@ Windows, and macOS. Keep all three green.
   low byte = value - `$24`; `$7E1F11` non-zero sets the high byte. Zero means no override, so
   levels `000`/`100` and low bytes `$DC+` cannot be selected this way. The title screen uses
   `$EB` (level `C7`); game mode 3 and game mode `$11` both enter `GM11LoadLevel` (`$0096D5`).
+  Lunar Magic 2.5x and 3.1x+ ROMs also reroute that path with a `JML` at `CODE_05D83E` and
+  resolve the pointers in their own code, so no fixed breakpoint inside `CODE_05D796` exists.
+  `expand` therefore enters every level as a screen exit on screen 0: `$141A` (sublevel
+  count) non-zero, the low byte in `$19B8`, and the high byte both as the player's submap
+  `$1F11` (vanilla) and as `$19D8 = $04 | hi` (Lunar Magic's exit table format, read by the
+  `JSL $05DC50` it installs in `CODE_05D796`: bit 2 marks its format, bit 0 is the high
+  byte, bit 1 a secondary exit, bit 3 is copied to `$192A`; vanilla only stores the water bit
+  there and never reads it). Every ROM in the corpus keeps the screen-exit path's `JMP
+  CODE_05D8B7`. The oracle script instead keeps the real overworld entry and patches
+  `$0E`-`$0F` at `CODE_05D8B7`, so the two sides reach a level by different routes.
+- "No Yoshi" entrance intro: when entering from the overworld with `$141A`, `$141D`, and
+  `$141F` all zero and the header tileset 1, 2, 5, 6, or 8, `CODE_05DA24` loads one of six
+  one-screen intro rooms (`PtrsLong05D766`, data at `$078000`, modes `$0E`/`$0F`) instead of
+  the level. `$141F` comes from bit 7 of the entrance table at `$05F600` (Lunar Magic's
+  "disable No-Yoshi intro" flag); the intro ends by setting `$141D` (`ShowMarioStart`) and
+  reloading. The screen-exit entry skips it; the oracle script predicts it from the ROM
+  tables and dumps the second level frame.
 - `expand::expand_level` seeds the RAM-resident OAM routine by running the reset code, then
   runs `CODE_05D796` (header pointers), `CODE_05801E` (clear buffers, `LoadLevel`), the rest
   of game mode `$11` (`CODE_00B888` GFX32/33 to RAM, `CODE_00A635`, `CODE_00A796`), and all of
@@ -277,23 +294,6 @@ Windows, and macOS. Keep all three green.
   The parser walks off the end of the ROM, so `level png` fails unless `--no-sprites` is
   given. 14 of the 43 corpus hacks are affected. Fix by documenting the LM 3 sprite format
   or by running the game's own sprite loader on the core.
-- Castle and ghost house levels render as the "No Yoshi" entrance intro instead of the
-  level. `CODE_05DA24` swaps in one of the six intro rooms (`PtrsLong05D766`, data near
-  `$078000`, one screen, mode `$0E`/`$0F`) when the header's tileset is 1, 2, 5, 6, or 8 and
-  `$141A`, `$141D`, and `$141F` are all zero. 45 vanilla levels are affected (`004`, `007`,
-  `101`, `111`, `1CE`, ...), and the emulator oracle captured the same intro rooms, so
-  `tests/oracle_levels.rs` does not notice. The game itself sets `$141D` (`ShowMarioStart`)
-  when the intro ends and reloads; seeding it before `LOAD_HEADER_POINTERS` should give the
-  real level, at the cost of the "Mario Start!" text path and an overworld tilemap upload
-  during level preparation that must not leak into the captured VRAM.
-- Levels `000`, `100`, and low bytes `$DC`-`$FF` (74 per ROM) cannot be rendered because
-  the `$0109` overworld override cannot encode them. They are real levels: vanilla `0DC`
-  has 11 screens, and Invictus stores custom data in `000`, `100`, `0FF`, and `1FF`.
-  Writing the level number into RAM directly instead of going through the override would
-  recover them.
-- Animated tiles show whatever the first frame uploaded to their VRAM slots.
-- Boss arena renders are an initial view, not a cycle-timed frame (see above).
-- SA-1 hacks do not run: the SA-1 registers and CPU are not modelled.
 - `GFX27`'s layout is unknown; `GFX32`/`GFX33` are not handled by the GFX tooling.
 
 ## Open decisions
