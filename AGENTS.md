@@ -111,6 +111,12 @@ Windows, and macOS. Keep all three green.
   selectable vanilla levels match byte for byte. Dumps live in `~/.local/share/kobo/oracle/`
   and are never committed. `trace_writes.lua` logs who writes a RAM address, for debugging.
 - Lunar Magic exports (hashes in `tests/fixtures/`) are the oracle for GFX, palette, and Map16.
+- **Lunar Magic hacks**: `tests/layer2_background.rs` runs on every ROM listed in `KOBO_LM_ROMS`
+  (`:`-separated paths) as well as the vanilla ROM. It rebuilds the layer 2 tilemap the game
+  uploaded to VRAM from the captured background buffer and BG Map16 table, which catches a
+  clobbered buffer or a table read from the wrong place without external data. Hacks whose
+  headerless SHA-1 is in `fixtures/lunar_magic_map16_bg_export.txt` also have their BG table
+  hashed against Lunar Magic's `-ExportAllMap16` output (file tile index `8000`-`81FF`).
 
 ## Reference material
 
@@ -165,6 +171,9 @@ Windows, and macOS. Keep all three green.
   of game mode `$11` (`CODE_00B888` GFX32/33 to RAM, `CODE_00A635`, `CODE_00A796`), and all of
   game mode `$12` (`GM12PrepLevel`, `$00A59C`), which draws boss floors, sets up layer 3 (tides
   zero rows 16-26 of the layer 2 screens), and uploads GFX, palettes, and initial tilemaps.
+  `$0100` is set to `$11` and then `$12` on the way: Lunar Magic's replacement for the initial
+  tilemap upload (`CODE_05809E` jumps to `$1FB1E8`) checks the game mode and uploads nothing
+  under a stale value.
   The bus captures VRAM/CGRAM port and DMA writes, so rendering uses what the game uploaded:
   ExGFX, custom palettes, and animated tiles come for free. VRAM matches the emulator except
   animated slots (frame-dependent) and tilemap areas filled on later frames; CGRAM matches
@@ -172,7 +181,19 @@ Windows, and macOS. Keep all three green.
 - Tile grid layout: horizontal levels are 16x27 per screen, screen after screen; layer 2 objects
   use screens `$10+` of the same buffer. Vertical levels are 32 wide; each screen is 16 rows
   stored as a left and a right 16x16 half. The layer 2 background tilemap is decoded into
-  `$7EB900`/`$7EBD00` (two screens); its tile numbers index the BG Map16 (`200+`).
+  `$7EB900`/`$7EBD00` (two screens); its tile numbers index the BG Map16 (`200+`). The buffer
+  is captured right after `LoadLevel`: game mode `$12` decompresses GFX into `$7EAD00`, and a
+  4bpp file (Lunar Magic) overruns the 3bpp-sized buffer into `$7EB900`. The game has
+  uploaded the tilemap to VRAM by then and does not notice.
+- Level modes `$09`, `$0B`, `$0F`, and `$10` (boss arenas and the dark rooms sharing their
+  tilemap) never upload the decoded background; the renderer skips it.
+- Capture the screen count (`$005D`) immediately after `LoadLevel`: boss preparation
+  overwrites it (level `$1C7` ends with `$FF`). `LevelTiles::size()` also bounds dimensions
+  to complete screens in the captured grid planes.
+- Tilemaps: `BG1SC`-`BG4SC` are captured in `LevelTiles::bg_sc`. Vanilla puts layer 1 at VRAM
+  word `$2000` and layer 2 at `$3000`, both 64x64 tiles, and uploads the whole two-screen
+  background. Lunar Magic uses `$3000`/`$3800`, 64x32, and uploads only the 15 or 16 rows
+  around the initial scroll position. `LevelTiles::vram_written` says which bytes were touched.
 
 ## Lunar Magic ROM facts
 
@@ -180,7 +201,21 @@ Windows, and macOS. Keep all three green.
 - Map16 pages 0-1 stay in the vanilla tables (rewritten in place). Higher pages live in
   RATS-tagged blocks whose layout differs by Lunar Magic version; the routine at `$06F540`
   (called with A = tile*2, 16-bit; returns the pointer's low word in A and bank in `$0C`)
-  resolves any tile number. Call it on the core instead of parsing the blocks.
+  resolves any layer 1 tile number. Call it on the core instead of parsing the blocks.
+- The BG Map16 pages (`200`-`3FF`, Lunar Magic's file index `8000+`) are a separate block from
+  layer 1 pages 2-3 and `$06F540` does not find them. Lunar Magic 2.3+ replaces `STA $0A` at
+  `$058DA4` in the layer 2 tilemap upload with a `JSL` (to `$0EFD00`) that leaves the level's BG
+  table pointer in `$0A`-`$0C`, chosen from a 3-byte pointer table at `$0EFD50` by the level's
+  flags in `$7FC00B`. `expand` calls whatever the hook targets; 1.6x ROMs keep `$0D9100`.
+  `LevelTiles::map16` holds foreground definitions (including pages 2-3 resolved through
+  `$06F540`); `bg_map16` holds background definitions. Keep these separate despite their
+  overlapping tile numbers.
+- Per-level flags at `$0EF310` (copied to `$7FC00B` by the hook at `$05803B`): bit 1 marks a
+  Lunar Magic background stored at the level's own layer 2 pointer, bit 2 a 32-row background
+  whose buffer uses `$200` bytes per screen. The hook leaves that stride in `$05`;
+  `LevelTiles::layer2_screen_len` carries it. 32-row backgrounds (Grand Poo World 2 uses them)
+  load, but `tests/layer2_background.rs` cannot yet reproduce their VRAM upload, so that ROM
+  fails the tilemap check; the vanilla-format levels in every other tested hack pass.
 - Custom level palettes: 3-byte pointers at `$0EF600` per level to `$202` bytes (back area
   colour, then 256 colours); `$000000`/`$FFFFFF` = none. Game mode `$12` loads them itself.
 - ExGFX and Lunar Magic's 4bpp re-inserted GFX are handled by the game's own upload code, so
@@ -211,4 +246,3 @@ Windows, and macOS. Keep all three green.
 - Lunar Helper / Callisto (build orchestration), Lunar Monitor (auto-export for git).
 - pokeemerald + Porymap (the source-first editor model for another game).
 - SMWCentral documentation of Lunar Magic's ROM formats and hijacks.
-

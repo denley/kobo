@@ -36,16 +36,26 @@ mod ram {
     pub const LAYER2_TILEMAP_LOW: u32 = 0x7E_B900;
     pub const LAYER2_TILEMAP_HIGH: u32 = 0x7E_BD00;
     pub const BACKGROUND_COLOR: u32 = 0x7E_0701;
+    /// `$0100`: the game mode. Lunar Magic's tilemap upload checks it.
+    pub const GAME_MODE: u32 = 0x7E_0100;
     /// 0x200 two-byte pointers into bank `$0D`, built by the level loader.
     pub const MAP16_POINTERS: u32 = 0x7E_0FBE;
     /// Direct page `$0C`: bank byte of the pointer Lunar Magic's routine returns.
     pub const LM_MAP16_BANK: u32 = 0x7E_000C;
+    /// Direct page `$0A`-`$0C`: the BG Map16 table pointer the initial
+    /// layer 2 tilemap upload reads tile definitions through.
+    pub const BG_MAP16_BASE: u32 = 0x7E_000A;
+    /// Direct page `$05`-`$06`: bytes per screen of the background buffer,
+    /// as set by Lunar Magic's hook (vanilla hard-codes `$1B0`).
+    pub const BG_SCREEN_LEN: u32 = 0x7E_0005;
     /// Direct page `$CE`-`$D0`: the level's sprite data pointer.
     pub const SPRITE_DATA_PTR: u32 = 0x7E_00CE;
 }
 
 /// Bytes per plane of the layer 2 background tilemap buffer.
 pub const LAYER2_TILEMAP_LEN: usize = 0x400;
+/// Bytes per screen of a Lunar Magic 32-row background (16x32 tiles).
+const LM_TALL_SCREEN_LEN: usize = 0x200;
 
 /// ROM routines the loader entry points call, from the vanilla layout.
 /// Lunar Magic keeps these entry points in place.
@@ -70,6 +80,13 @@ mod routines {
     /// low word in A and its bank in direct page `$0C`. Its body encodes
     /// the Map16 page layout, which differs between Lunar Magic versions.
     pub const LM_MAP16_POINTER: u32 = 0x06_F540;
+    /// Inside `CODE_058D7A` (initial layer 2 tilemap upload), where vanilla
+    /// stores `#Map16BGTiles` to `$0A`. Lunar Magic 2.3 and later replace
+    /// the store with a `JSL` to a routine that leaves the level's BG
+    /// Map16 table pointer in `$0A`-`$0C`; the BG pages live in a separate
+    /// block from the layer 1 pages, so `LM_MAP16_POINTER` cannot find
+    /// them. Older versions keep the vanilla table.
+    pub const BG_MAP16_BASE_HOOK: u32 = 0x05_8DA4;
 }
 
 /// `$0101`-`$0108`: the GFX files currently in VRAM. `$FF` forces uploads.
@@ -89,6 +106,8 @@ pub enum ExpandError {
         #[source]
         source: CpuError,
     },
+    #[error("level {level:03X}: unknown background layout, {len:#x} bytes per screen")]
+    BackgroundLayout { level: u16, len: usize },
 }
 
 /// The reset vector and the main game loop it ends in.
@@ -120,17 +139,33 @@ pub struct LevelTiles {
     pub high: Vec<u8>,
     /// All of work RAM after the loader ran, for inspection.
     pub wram: Vec<u8>,
-    /// Map16 definitions for every tile number the level uses.
+    /// Foreground Map16 definitions for tile numbers in the object grid.
+    /// Lunar Magic pages 2 and 3 are distinct from the same-numbered BG
+    /// tiles, which live in `bg_map16`.
     pub map16: HashMap<u16, Map16Tile>,
+    /// The 0x200 BG Map16 tiles (`0x200`-`0x3FF`) the game resolves the
+    /// layer 2 background through for this level.
+    pub bg_map16: Vec<Map16Tile>,
     /// VRAM as uploaded by level preparation: layer tiles at `$0000`,
     /// sprite tiles at `$C000`, tilemaps in between.
     pub vram: Vec<u8>,
+    /// Which VRAM bytes level preparation actually wrote.
+    pub vram_written: Vec<bool>,
     /// CGRAM as uploaded by level preparation.
     pub cgram: Vec<u8>,
+    /// `BG1SC`-`BG4SC` as level preparation set them: bits 7-2 are the
+    /// tilemap's VRAM word address divided by `$400`, bit 1 selects 64
+    /// tiles tall, bit 0 selects 64 tiles wide. Vanilla puts layer 1 at
+    /// `$2000` and layer 2 at `$3000`, both 64x64; Lunar Magic uses
+    /// `$3000` and `$3800`, 64x32.
+    pub bg_sc: [u8; 4],
     /// Layer 2 background tilemap planes, when the level uses a
     /// pre-built background instead of layer 2 objects. Tile numbers
     /// index the BG half of the Map16 table (`0x200` upwards).
     pub layer2_tilemap: Option<(Vec<u8>, Vec<u8>)>,
+    /// Bytes per screen of the background planes: `0x1B0` (16x27, vanilla)
+    /// or `0x200` (16x32, Lunar Magic's taller backgrounds).
+    pub layer2_screen_len: usize,
 }
 
 impl LevelTiles {
@@ -189,12 +224,18 @@ impl LevelTiles {
         crate::palette::Palette::from_cgram(&self.cgram)
     }
 
-    /// Width and height of the level in tiles.
+    /// Width and height of the captured level in tiles. Some headers
+    /// declare more screens than fit in the object buffer (notably
+    /// unused vertical levels); only complete captured screens count.
     pub fn size(&self) -> (usize, usize) {
+        let len = self.low.len().min(self.high.len());
         if self.vertical {
-            (32, self.screens * 16)
+            (32, self.screens.min(len / 0x200) * 16)
         } else {
-            (self.screens * SCREEN_COLS, SCREEN_ROWS)
+            (
+                self.screens.min(len / SCREEN_LEN) * SCREEN_COLS,
+                SCREEN_ROWS,
+            )
         }
     }
 
@@ -204,8 +245,14 @@ impl LevelTiles {
     /// whose layer 2 is objects.
     pub fn layer2_bg_tile(&self, screen: usize, x: usize, y: usize) -> Option<u16> {
         let (lo, hi) = self.layer2_tilemap.as_ref()?;
-        let i = (screen % 2) * SCREEN_LEN + y * SCREEN_COLS + x;
+        let i = (screen % 2) * self.layer2_screen_len + y * SCREEN_COLS + x;
         Some(0x200 | lo[i] as u16 | ((hi[i] as u16) << 8))
+    }
+
+    /// Rows in the layer 2 background: 27, or 32 for Lunar Magic's taller
+    /// backgrounds.
+    pub fn layer2_bg_rows(&self) -> usize {
+        self.layer2_screen_len / SCREEN_COLS
     }
 }
 
@@ -249,10 +296,28 @@ pub fn expand_level_traced(
     };
     bus.set_wram_u8(ram::OVERWORLD_OVERRIDE, ovr);
     bus.set_wram_u8(ram::OW_PLAYER_SUBMAP, hi);
+    // Run each phase with the game mode the real machine would be in.
+    bus.set_wram_u8(ram::GAME_MODE, 0x11);
     run(&mut cpu, &mut bus, routines::LOAD_HEADER_POINTERS)?;
     // Game mode $11 sets the maximum screen count before loading.
     bus.set_wram_u8(ram::LAST_SCREEN_HORIZ, 0x20);
     run(&mut cpu, &mut bus, routines::LOAD_LEVEL_DATA)?;
+    // Boss preparation reuses the screen-count byte (level $1C7 ends
+    // with $FF). Preserve the length while it still describes the grid.
+    let screens = bus.wram_u8(ram::SCREENS) as usize;
+    // Capture the background tilemap now: level preparation decompresses
+    // GFX files into `$7EAD00`, and Lunar Magic's 4bpp files overrun the
+    // vanilla 3bpp buffer into `$7EB900`. The game has already uploaded
+    // the tilemap to VRAM by then, so it does not care; we do.
+    let layer2_tilemap = match level::layer2_ptr(rom, level)? {
+        level::Layer2Data::Tilemap(_) => Some((
+            bus.wram_slice(ram::LAYER2_TILEMAP_LOW, LAYER2_TILEMAP_LEN)
+                .to_vec(),
+            bus.wram_slice(ram::LAYER2_TILEMAP_HIGH, LAYER2_TILEMAP_LEN)
+                .to_vec(),
+        )),
+        level::Layer2Data::Objects(_) => None,
+    };
     // The rest of game mode $11, then all of game mode $12: this is what
     // draws boss arenas, sets up layer 3, and uploads GFX and palettes.
     let run_jsr = |cpu: &mut Cpu, bus: &mut SmwBus, addr: u32| {
@@ -267,40 +332,88 @@ pub fn expand_level_traced(
     run_jsr(&mut cpu, &mut bus, routines::DECOMPRESS_PLAYER_GFX)?;
     run_jsr(&mut cpu, &mut bus, routines::INIT_LEVEL_RAM)?;
     run_jsr(&mut cpu, &mut bus, routines::INIT_LAYER2_SCROLL)?;
+    bus.set_wram_u8(ram::GAME_MODE, 0x12);
     run_jsr(&mut cpu, &mut bus, routines::PREPARE_LEVEL)?;
-    let layer2_tilemap = match level::layer2_ptr(rom, level)? {
-        level::Layer2Data::Tilemap(_) => Some((
-            bus.wram_slice(ram::LAYER2_TILEMAP_LOW, LAYER2_TILEMAP_LEN)
-                .to_vec(),
-            bus.wram_slice(ram::LAYER2_TILEMAP_HIGH, LAYER2_TILEMAP_LEN)
-                .to_vec(),
-        )),
-        level::Layer2Data::Objects(_) => None,
-    };
     let trace = cpu.trace_data_reads.take();
     let lunar_magic = rom.lunar_magic_version().is_some();
+    let (bg_map16, layer2_screen_len) = read_bg_map16(&mut cpu, &mut bus, level)?;
     let map16 = lookup_map16(&mut cpu, &mut bus, level, lunar_magic)?;
     let tiles = LevelTiles {
         level,
         header,
         level_mode: bus.wram_u8(ram::LEVEL_MODE),
         vertical: bus.wram_u8(ram::SCREEN_MODE) & 0x01 != 0,
-        screens: bus.wram_u8(ram::SCREENS) as usize,
+        screens,
         low: bus.wram_slice(ram::TILES_LOW, GRID_LEN).to_vec(),
         high: bus.wram_slice(ram::TILES_HIGH, GRID_LEN).to_vec(),
         layer2_tilemap,
+        layer2_screen_len,
         vram: bus.vram,
+        vram_written: bus.vram_written,
         cgram: bus.cgram,
+        bg_sc: bus.bg_sc,
         wram: bus.wram,
         map16,
+        bg_map16,
     };
     Ok((tiles, trace))
 }
 
+/// Where the game reads BG Map16 tile definitions from for the loaded
+/// level, and the background's bytes per screen: the vanilla table and
+/// `$1B0`, or whatever the routine Lunar Magic hooked into the layer 2
+/// tilemap upload leaves in `$0A`-`$0C` and `$05`-`$06`. Runs after the
+/// loader so the routine sees the level's Lunar Magic flags.
+fn bg_map16_base(cpu: &mut Cpu, bus: &mut SmwBus, level: u16) -> Result<(u32, usize), ExpandError> {
+    let hook: Vec<u8> = (0..4)
+        .map(|i| bus.read(routines::BG_MAP16_BASE_HOOK + i))
+        .collect();
+    let [0x22, lo, hi, bank] = hook[..] else {
+        return Ok((map16::tables::MAP16_BG_TILES.raw(), SCREEN_LEN));
+    };
+    let target = lo as u32 | ((hi as u32) << 8) | ((bank as u32) << 16);
+    // The caller has a 16-bit accumulator and 8-bit index registers.
+    cpu.p &= !crate::cpu::Flags::M;
+    cpu.p |= crate::cpu::Flags::X;
+    cpu.db = 0;
+    cpu.dp = 0;
+    cpu.call(bus, target, 100_000)
+        .map_err(|source| ExpandError::Cpu { level, source })?;
+    let base = bus.wram_slice(ram::BG_MAP16_BASE, 3);
+    let base = base[0] as u32 | ((base[1] as u32) << 8) | ((base[2] as u32) << 16);
+    let len = bus.wram_slice(ram::BG_SCREEN_LEN, 2);
+    let len = len[0] as usize | ((len[1] as usize) << 8);
+    if len != SCREEN_LEN && len != LM_TALL_SCREEN_LEN {
+        return Err(ExpandError::BackgroundLayout { level, len });
+    }
+    Ok((base, len))
+}
+
+/// The 0x200 BG Map16 tiles the loaded level resolves layer 2 through,
+/// and the background's bytes per screen.
+fn read_bg_map16(
+    cpu: &mut Cpu,
+    bus: &mut SmwBus,
+    level: u16,
+) -> Result<(Vec<Map16Tile>, usize), ExpandError> {
+    let (base, screen_len) = bg_map16_base(cpu, bus, level)?;
+    let tiles = (0..map16::BG_TILE_COUNT as u32)
+        .map(|n| {
+            let mut b = [0u8; 8];
+            for (i, byte) in b.iter_mut().enumerate() {
+                *byte = bus.read(base.wrapping_add(8 * n + i as u32));
+            }
+            Map16Tile::from_bytes(b)
+        })
+        .collect();
+    Ok((tiles, screen_len))
+}
+
 /// Resolves the Map16 definition of every tile number present in the
-/// loaded level's buffers. Pages 0 and 1 come from the pointer table the
-/// loader built in RAM, pages 2 and 3 from the vanilla BG table, and higher
-/// pages from Lunar Magic's pointer routine when the ROM was saved by it.
+/// loaded level's object grid. Pages 0 and 1 come from the pointer table
+/// the loader built in RAM, and all higher pages from Lunar Magic's
+/// foreground pointer routine. Background definitions stay separate:
+/// their tile numbers overlap foreground pages 2 and 3.
 fn lookup_map16(
     cpu: &mut Cpu,
     bus: &mut SmwBus,
@@ -313,17 +426,6 @@ fn lookup_map16(
                 | ((bus.wram[(ram::TILES_HIGH - 0x7E_0000) as usize + i] as u16) << 8)
         })
         .collect();
-    for i in 0..LAYER2_TILEMAP_LEN {
-        let lo = bus.wram[(ram::LAYER2_TILEMAP_LOW - 0x7E_0000) as usize + i] as u16;
-        let hi = bus.wram[(ram::LAYER2_TILEMAP_HIGH - 0x7E_0000) as usize + i] as u16;
-        numbers.push(0x200 | lo | (hi << 8));
-    }
-    // Layer 2 objects index the BG table.
-    numbers.extend((16 * SCREEN_LEN..GRID_LEN).map(|i| {
-        0x200
-            | bus.wram[(ram::TILES_LOW - 0x7E_0000) as usize + i] as u16
-            | ((bus.wram[(ram::TILES_HIGH - 0x7E_0000) as usize + i] as u16) << 8)
-    }));
     numbers.sort_unstable();
     numbers.dedup();
     let mut out = HashMap::with_capacity(numbers.len());
@@ -331,12 +433,6 @@ fn lookup_map16(
         let ptr: Option<u32> = if n < 0x200 {
             let i = (ram::MAP16_POINTERS - 0x7E_0000) as usize + 2 * n as usize;
             Some(0x0D_0000 | bus.wram[i] as u32 | ((bus.wram[i + 1] as u32) << 8))
-        } else if n < 0x400 && !lunar_magic {
-            Some(
-                map16::tables::MAP16_BG_TILES
-                    .add(8 * (n as u32 - 0x200))
-                    .raw(),
-            )
         } else if lunar_magic {
             cpu.p &= !(crate::cpu::Flags::M | crate::cpu::Flags::X);
             cpu.a = n.wrapping_mul(2);
@@ -358,4 +454,45 @@ fn lookup_map16(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::addr::{Mapping, SnesAddr};
+
+    #[test]
+    fn lunar_magic_foreground_pages_two_and_three_use_pointer_routine() {
+        let mut bytes = vec![0; 0x10_0000];
+        let mut put = |addr: u32, data: &[u8]| {
+            let at = Mapping::LoRom
+                .snes_to_pc(SnesAddr::new(addr))
+                .unwrap()
+                .as_usize();
+            bytes[at..at + data.len()].copy_from_slice(data);
+        };
+        put(0x00_FFD5, &[0x20]);
+        // Synthetic pointer routine: input A = tile * 2, return
+        // $10:(tile * 8 + $8000), with the bank in direct page $0C.
+        put(
+            routines::LM_MAP16_POINTER,
+            &[
+                0x0A, 0x0A, // ASL : ASL
+                0x18, 0x69, 0x00, 0x80, // CLC : ADC #$8000
+                0x48, 0xA9, 0x10, 0x00, // PHA : LDA #$0010
+                0x85, 0x0C, 0x68, 0x6B, // STA $0C : PLA : RTL
+            ],
+        );
+        let page_two = Map16Tile::from_bytes([1, 0, 2, 0, 3, 0, 4, 0]);
+        let page_three = Map16Tile::from_bytes([5, 0, 6, 0, 7, 0, 8, 0]);
+        put(0x10_9000, &page_two.to_bytes());
+        put(0x10_9800, &page_three.to_bytes());
+        let rom = Rom::from_bytes(bytes).unwrap();
+        let mut bus = SmwBus::new(&rom);
+        bus.set_wram_u8(ram::TILES_HIGH, 2);
+        bus.set_wram_u8(ram::TILES_HIGH + 1, 3);
+        let result = lookup_map16(&mut Cpu::new(), &mut bus, 0x105, true).unwrap();
+        assert_eq!(result[&0x200], page_two);
+        assert_eq!(result[&0x300], page_three);
+    }
 }

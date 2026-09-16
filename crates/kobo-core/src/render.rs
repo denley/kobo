@@ -2,8 +2,8 @@
 //!
 //! [`LayerTiles`] models the 8x8 tiles a level's layers can reference,
 //! laid out as the game uploads them to VRAM: FG1, FG2, BG1, FG3 at tiles
-//! `0x000`, `0x080`, `0x100`, `0x180`. Tiles `0x200` and up (animated
-//! tiles and other dynamic uploads) are blank for now.
+//! `0x000`, `0x080`, `0x100`, `0x180`. Decoding captured VRAM also
+//! includes animated tiles and other dynamic uploads.
 
 use crate::gfx::{self, Bpp, GfxError, Tile8};
 use crate::image::RgbImage;
@@ -158,12 +158,17 @@ pub fn level_image(
     let mut img = RgbImage::new(w as u32 * 16, h as u32 * 16);
     img.pixels.fill(background);
     // Layer 2 background tilemap, repeated every two screens.
-    if tiles.layer2_tilemap.is_some() && !tiles.vertical {
-        for screen in 0..tiles.screens {
+    // Boss arenas and dark rooms sharing their tilemap do not display
+    // the decoded background buffer.
+    if tiles.layer2_tilemap.is_some()
+        && !tiles.vertical
+        && !matches!(tiles.level_mode, 0x09 | 0x0B | 0x0F | 0x10)
+    {
+        for screen in 0..w / crate::expand::SCREEN_COLS {
             for y in 0..crate::expand::SCREEN_ROWS {
                 for x in 0..crate::expand::SCREEN_COLS {
                     let n = tiles.layer2_bg_tile(screen, x, y).unwrap();
-                    if let Some(tile) = map16.get(&n) {
+                    if let Some(tile) = tiles.bg_map16.get(n as usize - 0x200) {
                         let px = ((screen * crate::expand::SCREEN_COLS + x) * 16) as u32;
                         let py = (y * 16) as u32;
                         draw_map16_tile(&mut img, px, py, tile, layer_tiles, palette);

@@ -28,12 +28,19 @@ pub struct SmwBus<'a> {
     pub wram: Vec<u8>,
     pub sram: Vec<u8>,
     pub vram: Vec<u8>,
+    /// Which VRAM bytes have been written since reset, so callers can
+    /// tell uploaded data from the untouched zero fill.
+    pub vram_written: Vec<bool>,
     pub cgram: Vec<u8>,
     vmain: u8,
     /// VRAM word address.
     vmadd: u16,
     /// CGRAM byte address (colour index * 2 + half).
     cgadd: u16,
+    /// Last values written to `BG1SC`-`BG4SC` (`$2107`-`$210A`): tilemap
+    /// VRAM base and size per layer. Lunar Magic moves the layer 1 and 2
+    /// tilemaps, so these are how to find them.
+    pub bg_sc: [u8; 4],
     dma: [DmaChannel; 8],
     /// Last values written to the APU I/O ports `$2140`-`$2143`.
     apu_ports: [u8; 4],
@@ -64,10 +71,12 @@ impl<'a> SmwBus<'a> {
             wram: vec![0; WRAM_LEN],
             sram: vec![0; SRAM_LEN],
             vram: vec![0; VRAM_LEN],
+            vram_written: vec![false; VRAM_LEN],
             cgram: vec![0; CGRAM_LEN],
             vmain: 0,
             vmadd: 0,
             cgadd: 0,
+            bg_sc: [0; 4],
             dma: [DmaChannel::default(); 8],
             apu_ports: [0; 4],
             apu_in_transfer: false,
@@ -139,12 +148,14 @@ impl<'a> SmwBus<'a> {
 
     fn write_register(&mut self, reg: u16, value: u8) {
         match reg {
+            0x2107..=0x210A => self.bg_sc[(reg - 0x2107) as usize] = value,
             0x2115 => self.vmain = value,
             0x2116 => self.vmadd = (self.vmadd & 0xFF00) | value as u16,
             0x2117 => self.vmadd = (self.vmadd & 0x00FF) | ((value as u16) << 8),
             0x2118 => {
                 let a = (self.vram_remap(self.vmadd) as usize * 2) % VRAM_LEN;
                 self.vram[a] = value;
+                self.vram_written[a] = true;
                 if self.vmain & 0x80 == 0 {
                     self.vmadd = self.vmadd.wrapping_add(self.vram_step());
                 }
@@ -152,6 +163,7 @@ impl<'a> SmwBus<'a> {
             0x2119 => {
                 let a = (self.vram_remap(self.vmadd) as usize * 2 + 1) % VRAM_LEN;
                 self.vram[a] = value;
+                self.vram_written[a] = true;
                 if self.vmain & 0x80 != 0 {
                     self.vmadd = self.vmadd.wrapping_add(self.vram_step());
                 }

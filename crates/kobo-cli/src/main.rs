@@ -157,8 +157,8 @@ enum LevelCommand {
         #[arg(long)]
         near_bank: Option<String>,
     },
-    /// Print the Map16 definition of every tile number the level uses,
-    /// as `NNNN: 16 hex bytes` lines.
+    /// Print foreground Map16 definitions from the loaded object grid,
+    /// as `NNNN: 8 hex bytes` lines.
     Map16 {
         #[command(flatten)]
         rom: RomArg,
