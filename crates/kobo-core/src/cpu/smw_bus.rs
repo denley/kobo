@@ -41,6 +41,16 @@ pub struct SmwBus<'a> {
     /// VRAM base and size per layer. Lunar Magic moves the layer 1 and 2
     /// tilemaps, so these are how to find them.
     pub bg_sc: [u8; 4],
+    pub bg_character_base: [u16; 4],
+    pub bg_scroll: [[u16; 2]; 4],
+    pub bg_mode: u8,
+    pub object_select: u8,
+    pub mode7: crate::video::Mode7,
+    bg_scroll_latch: u8,
+    mode7_latch: u8,
+    pub irq_scanline: u16,
+    pub interrupt_enable: u8,
+    hblank: bool,
     dma: [DmaChannel; 8],
     /// Last values written to the APU I/O ports `$2140`-`$2143`.
     apu_ports: [u8; 4],
@@ -77,6 +87,16 @@ impl<'a> SmwBus<'a> {
             vmadd: 0,
             cgadd: 0,
             bg_sc: [0; 4],
+            bg_character_base: [0; 4],
+            bg_scroll: [[0; 2]; 4],
+            bg_mode: 0,
+            object_select: 0,
+            mode7: crate::video::Mode7::default(),
+            bg_scroll_latch: 0,
+            mode7_latch: 0,
+            irq_scanline: 0,
+            interrupt_enable: 0,
+            hblank: false,
             dma: [DmaChannel::default(); 8],
             apu_ports: [0; 4],
             apu_in_transfer: false,
@@ -148,7 +168,39 @@ impl<'a> SmwBus<'a> {
 
     fn write_register(&mut self, reg: u16, value: u8) {
         match reg {
+            0x2101 => self.object_select = value,
+            0x2105 => self.bg_mode = value,
             0x2107..=0x210A => self.bg_sc[(reg - 0x2107) as usize] = value,
+            0x210B..=0x210C => {
+                let layer = (reg - 0x210B) as usize * 2;
+                self.bg_character_base[layer] = ((value & 0x0F) as u16) << 13;
+                self.bg_character_base[layer + 1] = ((value >> 4) as u16) << 13;
+            }
+            0x210D..=0x2114 => {
+                let layer = (reg - 0x210D) as usize / 2;
+                let axis = (reg - 0x210D) as usize % 2;
+                let low = if axis == 0 {
+                    (self.bg_scroll_latch & 0xF8) | ((self.bg_scroll[layer][axis] >> 8) as u8 & 7)
+                } else {
+                    self.bg_scroll_latch
+                };
+                self.bg_scroll[layer][axis] = u16::from_le_bytes([low, value]);
+                self.bg_scroll_latch = value;
+                if layer == 0 {
+                    self.mode7.scroll[axis] = u16::from_le_bytes([self.mode7_latch, value]);
+                    self.mode7_latch = value;
+                }
+            }
+            0x211A => self.mode7.control = value,
+            0x211B..=0x2120 => {
+                let word = u16::from_le_bytes([self.mode7_latch, value]);
+                if reg <= 0x211E {
+                    self.mode7.matrix[(reg - 0x211B) as usize] = word as i16;
+                } else {
+                    self.mode7.center[(reg - 0x211F) as usize] = word;
+                }
+                self.mode7_latch = value;
+            }
             0x2115 => self.vmain = value,
             0x2116 => self.vmadd = (self.vmadd & 0xFF00) | value as u16,
             0x2117 => self.vmadd = (self.vmadd & 0x00FF) | ((value as u16) << 8),
@@ -200,6 +252,9 @@ impl<'a> SmwBus<'a> {
                 }
             }
             0x420B => self.run_dma(value),
+            0x4200 => self.interrupt_enable = value,
+            0x4209 => self.irq_scanline = (self.irq_scanline & 0x100) | value as u16,
+            0x420A => self.irq_scanline = (self.irq_scanline & 0xFF) | (((value & 1) as u16) << 8),
             0x4300..=0x437F => {
                 let ch = &mut self.dma[((reg >> 4) & 7) as usize];
                 match reg & 0x0F {
@@ -280,6 +335,13 @@ impl Bus for SmwBus<'_> {
                         [0xAA, 0xBB][i]
                     }
                 }
+                0x4212 => {
+                    // Let the ROM's wait-for-HBlank handshake finish.
+                    // This is a headless loader, not a cycle-timed PPU.
+                    let value = if self.hblank { 0x40 } else { 0 };
+                    self.hblank = !self.hblank;
+                    value
+                }
                 0x2000..=0x7FFF => {
                     self.unmapped_reads += 1;
                     0
@@ -316,6 +378,31 @@ mod tests {
             *b = i as u8;
         }
         Rom::from_bytes(data).unwrap()
+    }
+
+    #[test]
+    fn video_registers_keep_separate_shared_latches() {
+        let rom = rom();
+        let mut bus = SmwBus::new(&rom);
+        bus.write(0x210B, 0x73);
+        assert_eq!(&bus.bg_character_base[..2], &[0x6000, 0xE000]);
+        bus.write(0x210D, 0xAB);
+        bus.write(0x210D, 0x01);
+        assert_eq!(bus.bg_scroll[0][0], 0x01AB);
+        assert_eq!(bus.mode7.scroll[0], 0x01AB);
+        bus.write(0x211B, 0xFE);
+        bus.write(0x211C, 0xFF); // Matrix registers share a latch.
+        assert_eq!(bus.mode7.matrix[1], -2);
+        bus.write(0x210E, 0x02);
+        assert_eq!(bus.bg_scroll[0][1], 0x0201);
+        assert_eq!(bus.mode7.scroll[1], 0x02FF);
+        bus.write(0x4209, 0xAE);
+        bus.write(0x420A, 0xFF);
+        assert_eq!(bus.irq_scanline, 0x1AE);
+        assert_eq!(
+            [bus.read(0x4212), bus.read(0x4212), bus.read(0x4212)],
+            [0, 0x40, 0]
+        );
     }
 
     #[test]

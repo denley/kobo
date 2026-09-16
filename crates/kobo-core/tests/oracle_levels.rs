@@ -57,3 +57,35 @@ fn tile_grids_match_emulator_dumps() {
     eprintln!("checked {checked} levels");
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Capture with KOBO_ORACLE_VIDEO=1 after the title-screen loader guard.
+/// Compare stable arena graphics, excluding animated characters and tilemaps.
+#[test]
+fn boss_graphics_match_emulator_dumps() {
+    let Some(rom) = common::vanilla() else { return };
+    let Some(dir) = std::env::var_os("KOBO_BOSS_ORACLE_DIR").map(PathBuf::from) else {
+        eprintln!("skipping: KOBO_BOSS_ORACLE_DIR is not set");
+        return;
+    };
+    for level in [0x096, 0x0CC, 0x0D9, 0x1C7] {
+        let want = fs::read(dir.join(format!("level_{level:03X}.vram.bin"))).unwrap();
+        assert_eq!(want.len(), 0x10000);
+        let tiles = expand::expand_level(&rom, level).unwrap();
+        for (name, addresses) in [
+            (
+                "Mode 7 characters",
+                (1..0x8000).step_by(2).collect::<Vec<_>>(),
+            ),
+            ("layer 3 GFX", (0x8000..0xA000).collect()),
+            ("arena tilemap", (0xB000..0xC000).collect()),
+            ("SP3 characters", (0xE000..0xF000).collect()),
+        ] {
+            for address in addresses {
+                assert_eq!(
+                    tiles.vram[address], want[address],
+                    "level {level:03X} {name} at {address:04X}"
+                );
+            }
+        }
+    }
+}

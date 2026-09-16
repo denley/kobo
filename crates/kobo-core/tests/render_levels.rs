@@ -37,6 +37,7 @@ fn scene() -> (LevelTiles, LayerTiles, Palette) {
         vram_written: vec![],
         cgram: vec![],
         bg_sc: [0; 4],
+        boss_scene: None,
         layer2_tilemap: Some((vec![0; LAYER2_TILEMAP_LEN], vec![0; LAYER2_TILEMAP_LEN])),
         layer2_screen_len: SCREEN_COLS * SCREEN_ROWS,
     };
@@ -97,6 +98,20 @@ fn tall_background_uses_its_own_screen_stride() {
 }
 
 #[test]
+fn background_indices_above_511_do_not_alias_lower_tiles() {
+    let (mut tiles, gfx, palette) = scene();
+    tiles.bg_map16.resize(0x400, solid_tile(2));
+    tiles.bg_map16[0x201] = solid_tile(1);
+    let (lo, hi) = tiles.layer2_tilemap.as_mut().unwrap();
+    lo[0] = 1;
+    hi[0] = 2;
+    assert_eq!(tiles.layer2_bg_tile(0, 0, 0), Some(0x401));
+    let image = render::level_image(&tiles, &gfx, &palette, [0; 3]);
+    assert_eq!(image.pixels[0], [255, 0, 0]);
+    assert_eq!(image.pixels[16], [0, 0, 255]);
+}
+
+#[test]
 fn oversized_vertical_level_renders_only_the_captured_grid() {
     let (mut tiles, gfx, palette) = scene();
     tiles.vertical = true;
@@ -125,5 +140,56 @@ fn boss_preparation_does_not_replace_the_level_dimensions() {
         &tiles.palette(),
         tiles.back_area_color().to_rgb8(),
     );
-    assert_eq!((image.width, image.height), (256, 432));
+    assert_eq!((image.width, image.height), (256, 224));
+    assert_eq!(image.pixels[0], [0; 3]);
+    assert!(image.pixels[192 * 256..].iter().any(|&p| p != [0; 3]));
+}
+
+#[test]
+fn grand_poo_world_background_validation() {
+    for (_, rom) in common::lunar_magic_roms() {
+        if rom.sha1_hex() != "390583d5faa0cc02e0c4f414f7638228661b2dc9" {
+            continue;
+        }
+        assert!(matches!(
+            kobo_core::expand::expand_level(&rom, 0x09F),
+            Err(kobo_core::expand::ExpandError::MissingBackgroundTable(
+                0x09F
+            ))
+        ));
+        let objects = kobo_core::expand::expand_level(&rom, 0x00E).unwrap();
+        assert!(objects.layer2_tilemap.is_none());
+        let background = kobo_core::expand::expand_level(&rom, 0x046).unwrap();
+        assert_eq!(background.layer2_bg_rows(), 32);
+        assert!(background.bg_map16.len() > 0x350);
+    }
+}
+
+#[test]
+fn boss_arenas_capture_mode_switches_and_object_art() {
+    let Some(rom) = common::vanilla() else { return };
+    for (level, starts) in [
+        (0x096, vec![0, 36]),
+        (0x0CC, vec![0, 45, 174]),
+        (0x0D9, vec![0, 36, 174]),
+        (0x1C7, vec![0]),
+    ] {
+        let tiles = kobo_core::expand::expand_level(&rom, level).unwrap();
+        let scene = tiles.boss_scene.as_ref().unwrap();
+        assert_eq!(
+            scene.bands.iter().map(|b| b.start).collect::<Vec<_>>(),
+            starts,
+            "level {level:03X}"
+        );
+        assert!(scene.bands.iter().any(|b| b.layer.mode & 7 == 7));
+        assert_eq!(scene.oam.len(), 544);
+        assert!(
+            scene.oam[..512]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|o| o[1] < 224)
+        );
+        assert_eq!(tiles.wram[0x13], 0); // Keep the frame counter from before the drawing pass.
+    }
 }

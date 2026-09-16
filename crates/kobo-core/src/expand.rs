@@ -68,6 +68,15 @@ mod routines {
     /// once during the "Nintendo Presents" screen; the animated tile
     /// uploads read from that RAM.
     pub const DECOMPRESS_PLAYER_GFX: u32 = 0x00_B888;
+    /// `ClearOutLayer3`: DMA-fills the layer 3 tilemap. Its side effect of
+    /// leaving the VRAM port in two-byte mode is what the upload below
+    /// relies on.
+    pub const CLEAR_LAYER3: u32 = 0x00_85FA;
+    /// `CODE_00A993`: uploads GFX28-GFX2B (layer 3 tiles and the status bar
+    /// font) to VRAM word `$4000` through the port. The game runs it once
+    /// during the "Nintendo Presents" screen and level loads leave that
+    /// region alone.
+    pub const UPLOAD_LAYER3_GFX: u32 = 0x00_A993;
     /// `CODE_00A635`: initialises level RAM and the player's entrance.
     pub const INIT_LEVEL_RAM: u32 = 0x00_A635;
     /// `CODE_00A796`: initial layer 2 scroll positions.
@@ -87,6 +96,23 @@ mod routines {
     /// block from the layer 1 pages, so `LM_MAP16_POINTER` cannot find
     /// them. Older versions keep the vanilla table.
     pub const BG_MAP16_BASE_HOOK: u32 = 0x05_8DA4;
+    /// Inside the NMI handler: writes the Mode 7 boss arena's video
+    /// registers (mode, tilemap, character base, scroll, matrix).
+    pub const MODE7_NMI_REGISTERS: u32 = 0x00_82F7;
+    /// Where the NMI handler arms the status bar IRQ; Y holds its scanline.
+    pub const SET_STATUS_BAR_IRQ: u32 = 0x00_8294;
+    /// The IRQ handler's boss-arena branch, which switches video modes at
+    /// the ceiling and floor lines.
+    pub const BOSS_IRQ: u32 = 0x00_83BA;
+    /// Common exit of the IRQ handler.
+    pub const EXIT_IRQ: u32 = 0x00_83B2;
+    /// `CODE_00A1DA`: one game-mode `$14` drawing pass, which fills OAM
+    /// with the player, boss, and sprite-based arena walls and floor.
+    pub const DRAW_LEVEL_FRAME: u32 = 0x00_A1DA;
+    /// `CODE_0098A9`: uploads the boss's graphics to VRAM.
+    pub const UPLOAD_BOSS_TILES: u32 = 0x00_98A9;
+    /// `CODE_00A300`: uploads the player's graphics to VRAM.
+    pub const UPLOAD_PLAYER_TILES: u32 = 0x00_A300;
 }
 
 /// `$0101`-`$0108`: the GFX files currently in VRAM. `$FF` forces uploads.
@@ -108,6 +134,8 @@ pub enum ExpandError {
     },
     #[error("level {level:03X}: unknown background layout, {len:#x} bytes per screen")]
     BackgroundLayout { level: u16, len: usize },
+    #[error("level {0:03X}: Lunar Magic background Map16 table pointer is null")]
+    MissingBackgroundTable(u16),
 }
 
 /// The reset vector and the main game loop it ends in.
@@ -143,11 +171,13 @@ pub struct LevelTiles {
     /// Lunar Magic pages 2 and 3 are distinct from the same-numbered BG
     /// tiles, which live in `bg_map16`.
     pub map16: HashMap<u16, Map16Tile>,
-    /// The 0x200 BG Map16 tiles (`0x200`-`0x3FF`) the game resolves the
-    /// layer 2 background through for this level.
+    /// BG Map16 definitions, indexed by the raw background tile number.
+    /// Vanilla has 0x200 definitions; Lunar Magic backgrounds can use
+    /// higher indices. Empty when the level has no decoded background.
     pub bg_map16: Vec<Map16Tile>,
     /// VRAM as uploaded by level preparation: layer tiles at `$0000`,
-    /// sprite tiles at `$C000`, tilemaps in between.
+    /// sprite tiles at `$C000`, tilemaps in between. Boss arenas also
+    /// include the first drawing pass's player and boss graphics uploads.
     pub vram: Vec<u8>,
     /// Which VRAM bytes level preparation actually wrote.
     pub vram_written: Vec<bool>,
@@ -159,9 +189,11 @@ pub struct LevelTiles {
     /// `$2000` and layer 2 at `$3000`, both 64x64; Lunar Magic uses
     /// `$3000` and `$3800`, 64x32.
     pub bg_sc: [u8; 4],
+    /// Video-mode bands installed by the ROM's boss NMI/IRQ handlers.
+    pub boss_scene: Option<crate::video::BossScene>,
     /// Layer 2 background tilemap planes, when the level uses a
-    /// pre-built background instead of layer 2 objects. Tile numbers
-    /// index the BG half of the Map16 table (`0x200` upwards).
+    /// pre-built background instead of layer 2 objects. Raw tile numbers
+    /// index `bg_map16`; `layer2_bg_tile` adds the legacy 0x200 display base.
     pub layer2_tilemap: Option<(Vec<u8>, Vec<u8>)>,
     /// Bytes per screen of the background planes: `0x1B0` (16x27, vanilla)
     /// or `0x200` (16x32, Lunar Magic's taller backgrounds).
@@ -246,7 +278,7 @@ impl LevelTiles {
     pub fn layer2_bg_tile(&self, screen: usize, x: usize, y: usize) -> Option<u16> {
         let (lo, hi) = self.layer2_tilemap.as_ref()?;
         let i = (screen % 2) * self.layer2_screen_len + y * SCREEN_COLS + x;
-        Some(0x200 | lo[i] as u16 | ((hi[i] as u16) << 8))
+        Some(0x200 + lo[i] as u16 + ((hi[i] as u16) << 8))
     }
 
     /// Rows in the layer 2 background: 27, or 32 for Lunar Magic's taller
@@ -287,6 +319,16 @@ pub fn expand_level_traced(
     let mut bus = SmwBus::new(rom);
     let mut cpu = Cpu::new();
     run_reset(&mut cpu, &mut bus, level)?;
+    let run_jsr = |cpu: &mut Cpu, bus: &mut SmwBus, addr: u32| {
+        cpu.p |= crate::cpu::Flags::M | crate::cpu::Flags::X;
+        cpu.db = 0;
+        cpu.call_jsr(bus, addr, STEP_LIMIT)
+            .map_err(|source| ExpandError::Cpu { level, source })
+    };
+    // Boot-time VRAM state: the layer 3 tiles survive from the
+    // "Nintendo Presents" screen through every level load.
+    run_jsr(&mut cpu, &mut bus, routines::CLEAR_LAYER3)?;
+    run_jsr(&mut cpu, &mut bus, routines::UPLOAD_LAYER3_GFX)?;
     if trace {
         cpu.trace_data_reads = Some(Vec::new());
     }
@@ -309,23 +351,17 @@ pub fn expand_level_traced(
     // GFX files into `$7EAD00`, and Lunar Magic's 4bpp files overrun the
     // vanilla 3bpp buffer into `$7EB900`. The game has already uploaded
     // the tilemap to VRAM by then, so it does not care; we do.
-    let layer2_tilemap = match level::layer2_ptr(rom, level)? {
-        level::Layer2Data::Tilemap(_) => Some((
+    let layer2_tilemap = match bus.wram_u8(ram::LEVEL_MODE) {
+        0x00 | 0x0A | 0x0C | 0x0D | 0x0E | 0x11 | 0x1E => Some((
             bus.wram_slice(ram::LAYER2_TILEMAP_LOW, LAYER2_TILEMAP_LEN)
                 .to_vec(),
             bus.wram_slice(ram::LAYER2_TILEMAP_HIGH, LAYER2_TILEMAP_LEN)
                 .to_vec(),
         )),
-        level::Layer2Data::Objects(_) => None,
+        _ => None,
     };
     // The rest of game mode $11, then all of game mode $12: this is what
     // draws boss arenas, sets up layer 3, and uploads GFX and palettes.
-    let run_jsr = |cpu: &mut Cpu, bus: &mut SmwBus, addr: u32| {
-        cpu.p |= crate::cpu::Flags::M | crate::cpu::Flags::X;
-        cpu.db = 0;
-        cpu.call_jsr(bus, addr, STEP_LIMIT)
-            .map_err(|source| ExpandError::Cpu { level, source })
-    };
     for i in 0..8 {
         bus.set_wram_u8(LOADED_GFX_FILES + i, 0xFF);
     }
@@ -334,9 +370,13 @@ pub fn expand_level_traced(
     run_jsr(&mut cpu, &mut bus, routines::INIT_LAYER2_SCROLL)?;
     bus.set_wram_u8(ram::GAME_MODE, 0x12);
     run_jsr(&mut cpu, &mut bus, routines::PREPARE_LEVEL)?;
+    let boss_scene = capture_boss_scene(&mut bus, level)?;
     let trace = cpu.trace_data_reads.take();
     let lunar_magic = rom.lunar_magic_version().is_some();
-    let (bg_map16, layer2_screen_len) = read_bg_map16(&mut cpu, &mut bus, level)?;
+    let (bg_map16, layer2_screen_len) = match &layer2_tilemap {
+        Some(planes) => read_bg_map16(&mut cpu, &mut bus, level, planes)?,
+        None => (Vec::new(), SCREEN_LEN),
+    };
     let map16 = lookup_map16(&mut cpu, &mut bus, level, lunar_magic)?;
     let tiles = LevelTiles {
         level,
@@ -352,11 +392,96 @@ pub fn expand_level_traced(
         vram_written: bus.vram_written,
         cgram: bus.cgram,
         bg_sc: bus.bg_sc,
+        boss_scene,
         wram: bus.wram,
         map16,
         bg_map16,
     };
     Ok((tiles, trace))
+}
+
+/// Run just the video-register portions of the boss interrupt handlers.
+/// The ROM chooses its tilemap, graphics base, Mode 7 transform, and IRQ
+/// scanlines. One drawing pass populates the sprite-based arena artwork;
+/// its RAM changes are isolated from the captured collision grid.
+fn capture_boss_scene(
+    bus: &mut SmwBus,
+    level: u16,
+) -> Result<Option<crate::video::BossScene>, ExpandError> {
+    use crate::video::{Band, BossScene, Layer1};
+    let command = bus.wram[0x0D9B];
+    if command & 0x80 == 0 {
+        return Ok(None);
+    }
+    let saved_ram = bus.wram.clone();
+    let state = |bus: &SmwBus| Layer1 {
+        mode: bus.bg_mode,
+        tilemap: bus.bg_sc[0],
+        character_base: bus.bg_character_base[0],
+        scroll: bus.bg_scroll[0],
+        mode7: bus.mode7,
+    };
+    let mut cpu = Cpu::new();
+    bus.wram[0x0100] = 0x14;
+    cpu.call_jsr(bus, routines::DRAW_LEVEL_FRAME, STEP_LIMIT)
+        .map_err(|source| ExpandError::Cpu { level, source })?;
+    let oam = bus.wram[0x0200..0x0420].to_vec();
+    let first_object = bus.wram[0x3F] as usize / 2;
+    for routine in [routines::UPLOAD_PLAYER_TILES, routines::UPLOAD_BOSS_TILES] {
+        if routine == routines::UPLOAD_BOSS_TILES && command & 0x40 == 0 {
+            continue;
+        }
+        cpu = Cpu::new();
+        cpu.call_jsr(bus, routine, STEP_LIMIT)
+            .map_err(|source| ExpandError::Cpu { level, source })?;
+    }
+    cpu = Cpu::new();
+    let run = |cpu: &mut Cpu, bus: &mut SmwBus, start, stop| {
+        cpu.run_until(bus, start, stop, 100_000)
+            .map_err(|source| ExpandError::Cpu { level, source })
+    };
+    let stop = if command & 1 != 0 {
+        routines::EXIT_IRQ
+    } else {
+        routines::SET_STATUS_BAR_IRQ
+    };
+    run(&mut cpu, bus, routines::MODE7_NMI_REGISTERS, stop)?;
+    let mut bands = vec![Band {
+        start: 0,
+        layer: state(bus),
+    }];
+    if command & 1 == 0 {
+        // At the first stop Y holds the status-bar/ceiling IRQ line.
+        let first_line = cpu.y as usize;
+        bus.wram[0x11] = 0;
+        cpu.a = 0x81;
+        run(&mut cpu, bus, routines::BOSS_IRQ, routines::EXIT_IRQ)?;
+        bands.push(Band {
+            start: first_line,
+            layer: state(bus),
+        });
+        if bus.interrupt_enable & 0x20 != 0 {
+            let floor_line = bus.irq_scanline as usize;
+            cpu.a = 0x81;
+            run(&mut cpu, bus, routines::BOSS_IRQ, routines::EXIT_IRQ)?;
+            bands.push(Band {
+                start: floor_line,
+                layer: state(bus),
+            });
+        }
+    }
+    let backdrop_window = bus.wram[0x04A0..0x04A0 + 224 * 2]
+        .as_chunks::<2>()
+        .0
+        .to_vec();
+    bus.wram = saved_ram;
+    Ok(Some(BossScene {
+        bands,
+        backdrop_window,
+        oam,
+        object_select: bus.object_select,
+        first_object,
+    }))
 }
 
 /// Where the game reads BG Map16 tile definitions from for the loaded
@@ -381,6 +506,9 @@ fn bg_map16_base(cpu: &mut Cpu, bus: &mut SmwBus, level: u16) -> Result<(u32, us
         .map_err(|source| ExpandError::Cpu { level, source })?;
     let base = bus.wram_slice(ram::BG_MAP16_BASE, 3);
     let base = base[0] as u32 | ((base[1] as u32) << 8) | ((base[2] as u32) << 16);
+    if base == 0 || base == 0xFF_FFFF {
+        return Err(ExpandError::MissingBackgroundTable(level));
+    }
     let len = bus.wram_slice(ram::BG_SCREEN_LEN, 2);
     let len = len[0] as usize | ((len[1] as usize) << 8);
     if len != SCREEN_LEN && len != LM_TALL_SCREEN_LEN {
@@ -389,15 +517,25 @@ fn bg_map16_base(cpu: &mut Cpu, bus: &mut SmwBus, level: u16) -> Result<(u32, us
     Ok((base, len))
 }
 
-/// The 0x200 BG Map16 tiles the loaded level resolves layer 2 through,
-/// and the background's bytes per screen.
+/// Background Map16 definitions, including any Lunar Magic indices above
+/// the vanilla 0x200 tiles, and the background's bytes per screen.
 fn read_bg_map16(
     cpu: &mut Cpu,
     bus: &mut SmwBus,
     level: u16,
+    planes: &(Vec<u8>, Vec<u8>),
 ) -> Result<(Vec<Map16Tile>, usize), ExpandError> {
     let (base, screen_len) = bg_map16_base(cpu, bus, level)?;
-    let tiles = (0..map16::BG_TILE_COUNT as u32)
+    let tile_count = planes
+        .0
+        .iter()
+        .zip(&planes.1)
+        .take(2 * screen_len)
+        .map(|(&lo, &hi)| lo as usize + ((hi as usize) << 8) + 1)
+        .max()
+        .unwrap_or(0)
+        .max(map16::BG_TILE_COUNT);
+    let tiles = (0..tile_count as u32)
         .map(|n| {
             let mut b = [0u8; 8];
             for (i, byte) in b.iter_mut().enumerate() {

@@ -1,4 +1,4 @@
--- Kobo level oracle: boots SMW in Mesen 2, forces the title screen to load
+-- Kobo level oracle: boots SMW in Mesen 2, uses the file select to load
 -- each requested level, and dumps what the game computed.
 --
 -- Usage (see dump.sh):
@@ -11,6 +11,9 @@
 --   level_XXX.cgram.bin 512 bytes of CGRAM on the first level frame
 --   level_XXX.vram.bin  64 KiB of VRAM on the first level frame
 --   level_XXX.txt       header-derived RAM values, one "key value" per line
+-- With KOBO_ORACLE_VIDEO=1, capture after the fade-in instead, also writing
+-- a PPM image, full WRAM, and PPU register state for visual diagnostics.
+-- Use a separate directory: moving actors and grids can differ by then.
 --
 -- How it works: the script presses Start on the title screen and A twice
 -- on the file/player select, which makes the game load the intro level
@@ -58,7 +61,9 @@ local function override_for(level)
 end
 
 local function on_loader_entry()
-  if current == nil then
+  -- The title screen also calls this entry in game mode $03. Replacing
+  -- it there changes the graphics cache before the actual level load.
+  if current == nil or emu.read(0x7E0100, mem) ~= 0x11 then
     return
   end
   local v, hi = override_for(current)
@@ -114,6 +119,28 @@ local function dump_video(level)
   local tag = string.format("level_%03X", level)
   write_file(tag .. ".cgram.bin", read_range(0, 512, emu.memType.snesCgRam))
   write_file(tag .. ".vram.bin", read_range(0, 0x10000, emu.memType.snesVideoRam))
+  if os.getenv("KOBO_ORACLE_VIDEO") then
+    -- Render the current PPU frame synchronously. takeScreenshot() can
+    -- lag behind in the test runner's asynchronous video decoder.
+    local pixels = {}
+    for _, rgb in ipairs(emu.getScreenBuffer()) do
+      pixels[#pixels + 1] = string.char((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255)
+    end
+    local size = emu.getScreenSize()
+    assert(#pixels == size.width * size.height, "unexpected screen buffer size")
+    write_file(tag .. ".ppm", string.format("P6\n%d %d\n255\n", size.width, size.height) .. table.concat(pixels))
+    write_file(tag .. ".wram.bin", read_range(0x7E0000, 0x20000, mem))
+    write_file(tag .. ".oam.bin", read_range(0, 544, emu.memType.snesSpriteRam))
+    local state = emu.getState()
+    local lines = {}
+    for key, value in pairs(state) do
+      if key:find("ppu") then
+        lines[#lines + 1] = key .. " " .. tostring(value)
+      end
+    end
+    table.sort(lines)
+    write_file(tag .. ".ppu.txt", table.concat(lines, "\n") .. "\n")
+  end
 end
 
 -- Press a button for one frame every 8 frames while in a stage, so the
@@ -165,9 +192,21 @@ local function on_frame()
     end
   elseif stage == "level" then
     if mode == 0x14 then
+      if os.getenv("KOBO_ORACLE_VIDEO") then
+        stage, stage_frames = "video", 0
+      else
+        dump_ram(current)
+        dump_video(current)
+        logf("level %03X: dumped at frame %d", current, stage_frames)
+        next_level()
+      end
+    end
+  elseif stage == "video" then
+    local state = emu.getState()
+    if stage_frames >= 3 and not state["ppu.forcedBlank"] and state["ppu.screenBrightness"] == 15 then
       dump_ram(current)
       dump_video(current)
-      logf("level %03X: dumped at frame %d", current, stage_frames)
+      logf("level %03X: visible video dumped at frame %d", current, stage_frames)
       next_level()
     end
   end

@@ -7,7 +7,6 @@
 mod common;
 
 use kobo_core::expand::{self, ExpandError, LevelTiles, SCREEN_COLS};
-use kobo_core::level::{self, Layer2Data};
 use kobo_core::{Rom, map16};
 use sha1::{Digest, Sha1};
 use std::collections::HashMap;
@@ -33,9 +32,9 @@ const LAYER2_Y: usize = 0x20;
 
 /// The background rows the game uploads. A 64-tall tilemap takes the whole
 /// two-screen background. Lunar Magic's 32-tall tilemap takes the 16 rows
-/// from one above the initial layer 2 position; rows outside the
-/// background (above the top, or below the bottom) upload whatever
-/// precedes or follows the buffer and are not checked.
+/// from one above the initial layer 2 position. The loader masks source
+/// rows to five bits, even for 27-row backgrounds; rows 27-31 in that
+/// format address data outside the background and are not checked.
 fn uploaded_rows(tiles: &LevelTiles) -> std::ops::Range<isize> {
     let rows = tiles.layer2_bg_rows() as isize;
     if tiles.bg_sc[1] & 0x02 != 0 {
@@ -43,20 +42,24 @@ fn uploaded_rows(tiles: &LevelTiles) -> std::ops::Range<isize> {
     }
     let y = u16::from_le_bytes([tiles.wram[LAYER2_Y], tiles.wram[LAYER2_Y + 1]]) as isize;
     let first = y / 16 - 1;
-    first.max(0)..(first + 16).min(rows)
+    first..first + 16
 }
 
 /// For each VRAM word of the layer 2 tilemap the game uploaded, the word
 /// the captured background and BG Map16 table say it should hold.
 fn candidates(tiles: &LevelTiles) -> HashMap<usize, Vec<[u8; 2]>> {
     let mut out: HashMap<usize, Vec<[u8; 2]>> = HashMap::new();
-    for y in uploaded_rows(tiles).map(|y| y as usize) {
+    for world_y in uploaded_rows(tiles) {
+        let y = world_y.rem_euclid(32) as usize;
+        if y >= tiles.layer2_bg_rows() {
+            continue;
+        }
         for screen in 0..2 {
             for x in 0..SCREEN_COLS {
                 let n = tiles.layer2_bg_tile(screen, x, y).unwrap();
                 let def = tiles.bg_map16[n as usize - 0x200].to_bytes();
                 let col8 = 2 * (screen * SCREEN_COLS + x);
-                let row8 = 2 * y;
+                let row8 = (2 * world_y).rem_euclid(64) as usize;
                 // Definition order is TL, BL, TR, BR.
                 for (q, (dx, dy)) in [(0, 0), (0, 1), (1, 0), (1, 1)].into_iter().enumerate() {
                     let at = vram_offset(tiles.bg_sc[1], col8 + dx, row8 + dy);
@@ -89,27 +92,33 @@ fn check_level(tiles: &LevelTiles) -> (usize, usize) {
 fn check_rom(rom: &Rom) -> (usize, Vec<String>) {
     let mut checked = 0;
     let mut failures = Vec::new();
+    let gpw2 = rom.sha1_hex() == "390583d5faa0cc02e0c4f414f7638228661b2dc9";
     for level in 0..0x200u16 {
         if expand::override_for(level).is_none() {
-            continue;
-        }
-        if !matches!(level::layer2_ptr(rom, level), Ok(Layer2Data::Tilemap(_))) {
             continue;
         }
         let tiles = match expand::expand_level(rom, level) {
             Ok(t) => t,
             Err(ExpandError::Unreachable(_)) => continue,
+            Err(ExpandError::MissingBackgroundTable(0x09F)) if gpw2 => {
+                eprintln!("rejected level {level:03X}: null background Map16 table");
+                continue;
+            }
             Err(e) => {
                 failures.push(format!("level {level:03X}: {e}"));
                 continue;
             }
         };
-        if tiles.vertical || MODES_WITHOUT_BACKGROUND.contains(&tiles.level_mode) {
+        if tiles.layer2_tilemap.is_none()
+            || tiles.vertical
+            || MODES_WITHOUT_BACKGROUND.contains(&tiles.level_mode)
+        {
             continue;
         }
         checked += 1;
         let (words, bad) = check_level(&tiles);
-        // At least 15 background rows (30 tilemap rows of 32 words).
+        // At least 960 words, including when scrolling through the five
+        // rows outside a 27-row buffer. Both background screens count.
         if words < 30 * 32 || bad != 0 {
             failures.push(format!(
                 "level {level:03X} (mode ${:02X}, BG2SC ${:02X}): {bad} of {words} tilemap words missing or different",
@@ -166,8 +175,15 @@ fn lunar_magic_bg_map16_matches_export() {
             continue;
         };
         let tiles = expand::expand_level(&rom, *level).unwrap();
-        assert_eq!(tiles.bg_map16.len(), map16::BG_TILE_COUNT);
-        let bytes: Vec<u8> = tiles.bg_map16.iter().flat_map(|t| t.to_bytes()).collect();
+        assert!(
+            tiles.bg_map16.len() >= map16::BG_TILE_COUNT,
+            "{} level {level:03X} has no BG table",
+            path.display()
+        );
+        let bytes: Vec<u8> = tiles.bg_map16[..map16::BG_TILE_COUNT]
+            .iter()
+            .flat_map(|t| t.to_bytes())
+            .collect();
         let got: String = Sha1::digest(&bytes)
             .iter()
             .map(|b| format!("{b:02x}"))

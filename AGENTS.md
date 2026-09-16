@@ -110,6 +110,11 @@ Windows, and macOS. Keep all three green.
   `expand::expand_level` against a dump directory when `KOBO_ORACLE_DIR` is set; all 438
   selectable vanilla levels match byte for byte. Dumps live in `~/.local/share/kobo/oracle/`
   and are never committed. `trace_writes.lua` logs who writes a RAM address, for debugging.
+  `KOBO_ORACLE_VIDEO=1 dump.sh ...` instead waits for visible video and also writes PPM,
+  full WRAM, and PPU state. Keep these later-frame captures in a separate directory.
+  `KOBO_BOSS_ORACLE_DIR` enables stable boss graphics comparisons for levels 096, 0CC,
+  0D9, and 1C7. The loader override must only run in game mode `$11`: overriding the
+  title-screen load in mode `$03` contaminates the graphics cache.
 - Lunar Magic exports (hashes in `tests/fixtures/`) are the oracle for GFX, palette, and Map16.
 - **Lunar Magic hacks**: `tests/layer2_background.rs` runs on every ROM listed in `KOBO_LM_ROMS`
   (`:`-separated paths) as well as the vanilla ROM. It rebuilds the layer 2 tilemap the game
@@ -153,6 +158,9 @@ Windows, and macOS. Keep all three green.
 - GFX lists: `$00A92B` object tilesets (FG1, FG2, BG1, FG3), `$00A8C3` sprite tilesets (SP1-4),
   4 bytes per row, 26 rows. VRAM: FG1/FG2/BG1/FG3 at 8x8 tiles `$000`/`$080`/`$100`/`$180`;
   SP1-4 at word `$6000`/`$6800`/`$7000`/`$7800`; layer 3 `GFX28`-`2B` at word `$4000`.
+  The layer 3 files are uploaded only by `CODE_00A993` on the "Nintendo Presents" screen
+  (and the ending) and survive every level load, so `expand` runs `ClearOutLayer3` and
+  that routine once after reset; the sprite marker font depends on it.
 - Palette: `LoadPalette` (`$00ABED`) fills CGRAM (`$7E0703`) from `$00B0A0` (back area),
   `$00B0B0` (BG, rows 0-1 cols 2-7, `$18` bytes each), `$00B170` (rows 0-1 cols 8-F),
   `$00B190` (FG, rows 2-3 cols 2-7), `$00B250` (rows 4-D cols 2-7), `$00B318` (sprite, rows E-F
@@ -187,6 +195,11 @@ Windows, and macOS. Keep all three green.
   uploaded the tilemap to VRAM by then and does not notice.
 - Level modes `$09`, `$0B`, `$0F`, and `$10` (boss arenas and the dark rooms sharing their
   tilemap) never upload the decoded background; the renderer skips it.
+- Mode 7 boss arenas render a 256x224 scene from captured video registers, with the ROM's
+  NMI/IRQ handlers selecting the Mode 1 ceiling/floor bands and Mode 7 transform. One
+  game drawing pass supplies packed OAM (including arena walls and Bowser's floor) and
+  player/boss VRAM uploads. Its RAM changes are restored so collision grids remain at
+  the loader state. This is an initial arena view, not a cycle-timed gameplay screenshot.
 - Capture the screen count (`$005D`) immediately after `LoadLevel`: boss preparation
   overwrites it (level `$1C7` ends with `$FF`). `LevelTiles::size()` also bounds dimensions
   to complete screens in the captured grid planes.
@@ -213,9 +226,12 @@ Windows, and macOS. Keep all three green.
 - Per-level flags at `$0EF310` (copied to `$7FC00B` by the hook at `$05803B`): bit 1 marks a
   Lunar Magic background stored at the level's own layer 2 pointer, bit 2 a 32-row background
   whose buffer uses `$200` bytes per screen. The hook leaves that stride in `$05`;
-  `LevelTiles::layer2_screen_len` carries it. 32-row backgrounds (Grand Poo World 2 uses them)
-  load, but `tests/layer2_background.rs` cannot yet reproduce their VRAM upload, so that ROM
-  fails the tilemap check; the vanilla-format levels in every other tested hack pass.
+  `LevelTiles::layer2_screen_len` carries it. Background indices can exceed `$1FF`; retain
+  the raw index and load enough BG definitions instead of OR-ing in `$200`. Background
+  presence follows the loaded level mode, since object levels can retain an `$FF` pointer
+  bank. Upload rows wrap with a five-bit mask, not modulo 27. Grand Poo World 2's 32-row
+  backgrounds pass the tilemap check; its unused level `$09F` has a null BG table pointer
+  and is explicitly rejected with `MissingBackgroundTable`.
 - Custom level palettes: 3-byte pointers at `$0EF600` per level to `$202` bytes (back area
   colour, then 256 colours); `$000000`/`$FFFFFF` = none. Game mode `$12` loads them itself.
 - ExGFX and Lunar Magic's 4bpp re-inserted GFX are handled by the game's own upload code, so
