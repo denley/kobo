@@ -38,6 +38,7 @@ fn scene() -> (LevelTiles, LayerTiles, Palette) {
         vram_written: vec![],
         cgram: vec![],
         bg_sc: [0; 4],
+        object_select: 0,
         boss_scene: None,
         layer2_tilemap: Some((vec![0; LAYER2_TILEMAP_LEN], vec![0; LAYER2_TILEMAP_LEN])),
         layer2_screen_len: SCREEN_COLS * SCREEN_ROWS,
@@ -248,6 +249,53 @@ fn expanded_height_lays_screens_out_with_a_taller_stride() {
     assert_eq!((image.width, image.height), (512, 640));
     assert_eq!(image.pixels[30 * 16 * 512 + 19 * 16], [255, 0, 0]);
     assert_eq!(image.pixels[30 * 16 * 512 + 3 * 16], back);
+}
+
+#[test]
+fn sprite_objects_respect_layer_priorities() {
+    use kobo_core::video::{SpriteObject, SpriteScene};
+    let (mut tiles, mut gfx, palette) = scene();
+    tiles.layer2_tilemap = None;
+    tiles.screens = 1;
+    // Layer 1: tile 1 (red) low priority at (0, 0), high priority at (1, 0).
+    tiles.map16.insert(3, solid_tile(1 | 0x2000)); // priority bit set
+    tiles.low[0] = 1;
+    tiles.low[1] = 3;
+    tiles.map16.insert(1, solid_tile(1));
+    let (mut img, priorities) = render::level_render(&tiles, &gfx, &palette, [0, 255, 0]);
+    // Sprite VRAM: object character 0 is solid colour 1 (16x16 in OBSEL 3).
+    let mut vram = vec![0u8; 0x10000];
+    for tile in [0usize, 1, 16, 17] {
+        for row in 0..8 {
+            vram[0xC000 + tile * 32 + row * 2] = 0xFF;
+        }
+    }
+    let mut pal = palette.clone();
+    pal.set(8, 1, kobo_core::palette::Color15::from_rgb5(0, 31, 0));
+    gfx.tiles[1].pixels[0][0] = 0;
+    let scene = SpriteScene {
+        objects: vec![
+            SpriteObject {
+                x: 0,
+                y: 0,
+                tile: 0,
+                attr: 0x20,
+                large: true,
+            },
+            SpriteObject {
+                x: 16,
+                y: 0,
+                tile: 0,
+                attr: 0x20,
+                large: true,
+            },
+        ],
+        object_select: 0x03,
+        undrawn: vec![],
+    };
+    render::draw_sprite_scene(&mut img, &priorities, &scene, &vram, &pal);
+    assert_eq!(img.pixels[0], [0, 255, 0]); // priority 2 beats low-priority layer 1
+    assert_eq!(img.pixels[16], [255, 0, 0]); // but not high-priority layer 1
 }
 
 #[test]

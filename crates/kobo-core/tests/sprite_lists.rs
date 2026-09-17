@@ -51,12 +51,14 @@ fn check_rom(name: &str, rom: &Rom) -> (usize, usize) {
             tiles.screens,
             tiles.rows
         );
+        // Lunar Magic lets sprites sit beyond the last screen, so only Y
+        // is checked: it is the coordinate the Y position jumps extend.
         if !tiles.vertical && tiles.rows != expand::SCREEN_ROWS {
             for s in &list.sprites {
                 let (x, y) = s.tile_position(false);
                 assert!(
-                    x < w && y < h,
-                    "{name} level {level:03X} ({} rows): sprite {:02X} at ({x}, {y}) lies outside {w}x{h}",
+                    y < h,
+                    "{name} level {level:03X} ({} rows): sprite {:02X} at ({x}, {y}) lies below {w}x{h}",
                     tiles.rows,
                     s.id
                 );

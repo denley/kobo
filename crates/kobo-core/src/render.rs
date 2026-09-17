@@ -82,6 +82,33 @@ pub fn draw_tile8(
     flip_x: bool,
     flip_y: bool,
 ) {
+    draw_tile8_prio(img, None, x, y, tile, row, flip_x, flip_y);
+}
+
+/// Per-pixel stacking order of what the level image holds, in Mode 1
+/// terms: layer 2 low priority (5), layer 1 low (6), layer 2 high (8),
+/// layer 1 high (9). Objects with priority 0-3 slot in at 2, 4, 7, and 10.
+pub type Priorities = Vec<u8>;
+pub const LAYER2_LOW: u8 = 5;
+pub const LAYER1_LOW: u8 = 6;
+pub const LAYER2_HIGH: u8 = 8;
+pub const LAYER1_HIGH: u8 = 9;
+pub const OBJECT_PRIORITIES: [u8; 4] = [2, 4, 7, 10];
+
+/// `draw_tile8`, also recording `value` in the priority buffer for every
+/// pixel drawn.
+#[allow(clippy::too_many_arguments)]
+fn draw_tile8_prio(
+    img: &mut RgbImage,
+    prio: Option<(&mut [u8], u8)>,
+    x: u32,
+    y: u32,
+    tile: &Tile8,
+    row: &[[u8; 3]; 16],
+    flip_x: bool,
+    flip_y: bool,
+) {
+    let mut prio = prio;
     for (ty, line) in tile.pixels.iter().enumerate() {
         for (tx, &px) in line.iter().enumerate() {
             if px == 0 {
@@ -89,7 +116,14 @@ pub fn draw_tile8(
             }
             let dx = if flip_x { 7 - tx } else { tx } as u32;
             let dy = if flip_y { 7 - ty } else { ty } as u32;
-            img.put(x + dx, y + dy, row[px as usize]);
+            let (px_x, px_y) = (x + dx, y + dy);
+            if px_x < img.width && px_y < img.height {
+                let at = (px_y * img.width + px_x) as usize;
+                img.pixels[at] = row[px as usize];
+                if let Some((buf, value)) = prio.as_mut() {
+                    buf[at] = *value;
+                }
+            }
         }
     }
 }
@@ -116,9 +150,13 @@ struct LayerPass {
     palette_mask: u8,
 }
 
-/// Draws the quadrants of a 16x16 tile that belong to `pass`.
+/// Draws the quadrants of a 16x16 tile that belong to `pass`, recording
+/// `prio` for their pixels.
+#[allow(clippy::too_many_arguments)]
 fn draw_map16_layer(
     img: &mut RgbImage,
+    priorities: &mut [u8],
+    prio: u8,
     x: u32,
     y: u32,
     tile: &Map16Tile,
@@ -134,8 +172,9 @@ fn draw_map16_layer(
             }
             let row = palette.row_rgb8((r.palette() | pass.palette_mask) as usize & 7);
             let (px, py) = (x + 8 * qx as u32, y + 8 * qy as u32);
-            draw_tile8(
+            draw_tile8_prio(
                 img,
+                Some((priorities, prio)),
                 px,
                 py,
                 tiles.get(r.tile()),
@@ -195,15 +234,39 @@ pub fn level_image(
     palette: &Palette,
     background: [u8; 3],
 ) -> RgbImage {
+    level_render(tiles, layer_tiles, palette, background).0
+}
+
+/// `level_image` plus the stacking priority of every pixel, for drawing
+/// sprites into the image afterwards. Boss arenas return no priorities:
+/// their objects are already part of the image.
+pub fn level_render(
+    tiles: &crate::expand::LevelTiles,
+    layer_tiles: &LayerTiles,
+    palette: &Palette,
+    background: [u8; 3],
+) -> (RgbImage, Priorities) {
     if let Some(scene) = &tiles.boss_scene {
-        return boss_image(scene, &tiles.vram, palette, background);
+        return (
+            boss_image(scene, &tiles.vram, palette, background),
+            Vec::new(),
+        );
     }
     let map16 = &tiles.map16;
     let (w, h) = tiles.size();
     let mut img = RgbImage::new(w as u32 * 16, h as u32 * 16);
     img.pixels.fill(background);
+    let mut priorities = vec![0u8; img.pixels.len()];
     for priority in [false, true] {
-        draw_layer2(&mut img, tiles, layer_tiles, palette, priority);
+        draw_layer2(
+            &mut img,
+            &mut priorities,
+            tiles,
+            layer_tiles,
+            palette,
+            priority,
+        );
+        let prio = if priority { LAYER1_HIGH } else { LAYER1_LOW };
         for y in 0..h {
             for x in 0..w {
                 if let Some(tile) = map16.get(&tiles.tile_at(x, y)) {
@@ -212,12 +275,104 @@ pub fn level_image(
                         priority,
                         palette_mask: 0,
                     };
-                    draw_map16_layer(&mut img, px, py, tile, layer_tiles, palette, pass);
+                    draw_map16_layer(
+                        &mut img,
+                        &mut priorities,
+                        prio,
+                        px,
+                        py,
+                        tile,
+                        layer_tiles,
+                        palette,
+                        pass,
+                    );
                 }
             }
         }
     }
-    img
+    (img, priorities)
+}
+
+/// Draws captured sprite objects into a level image, front to back,
+/// honouring their OAM priority against the layers and each other.
+pub fn draw_sprite_scene(
+    img: &mut RgbImage,
+    priorities: &[u8],
+    scene: &crate::video::SpriteScene,
+    vram: &[u8],
+    palette: &Palette,
+) {
+    let colors = palette.colors.map(|color| color.to_rgb8());
+    let sizes = crate::expand::object_sizes(scene.object_select);
+    let mut covered = vec![false; img.pixels.len()];
+    for object in &scene.objects {
+        let (width, height) = sizes[object.large as usize];
+        let priority = OBJECT_PRIORITIES[(object.attr >> 4 & 3) as usize];
+        for dy in 0..height {
+            for dx in 0..width {
+                let (x, y) = (object.x + dx, object.y + dy);
+                if x < 0 || y < 0 || x >= img.width as i32 || y >= img.height as i32 {
+                    continue;
+                }
+                let at = (y as u32 * img.width + x as u32) as usize;
+                if covered[at] {
+                    continue;
+                }
+                let Some(color) = object_pixel(
+                    vram,
+                    scene.object_select,
+                    object.tile,
+                    object.attr,
+                    dx,
+                    dy,
+                    width,
+                    height,
+                ) else {
+                    continue;
+                };
+                covered[at] = true;
+                if priority > priorities[at] {
+                    img.pixels[at] =
+                        colors[128 + (object.attr as usize >> 1 & 7) * 16 + color as usize];
+                }
+            }
+        }
+    }
+}
+
+/// Colour index (1-15) of a pixel of an OAM object, or `None` where it is
+/// transparent. `dx`/`dy` are unflipped offsets within the object.
+#[allow(clippy::too_many_arguments)]
+fn object_pixel(
+    vram: &[u8],
+    object_select: u8,
+    tile: u8,
+    attr: u8,
+    dx: i32,
+    dy: i32,
+    width: i32,
+    height: i32,
+) -> Option<u8> {
+    let tx = if attr & 0x40 != 0 { width - 1 - dx } else { dx } as usize;
+    let ty = if attr & 0x80 != 0 {
+        height - 1 - dy
+    } else {
+        dy
+    } as usize;
+    let number = (((tile as usize & 0xF0) + ty / 8 * 16) & 0xF0) | ((tile as usize + tx / 8) & 15);
+    let base = ((object_select as usize & 7) << 14)
+        + if attr & 1 != 0 {
+            (((object_select as usize >> 3) & 3) + 1) * 0x2000
+        } else {
+            0
+        };
+    let start = base + number * 32 + (ty % 8) * 2;
+    let mut color = 0;
+    for plane in 0..4 {
+        color |=
+            ((video_byte(vram, start + plane / 2 * 16 + plane % 2) >> (7 - tx % 8)) & 1) << plane;
+    }
+    (color != 0).then_some(color)
 }
 
 /// Draws the quadrants of layer 2 with the given priority: the
@@ -231,12 +386,14 @@ pub fn level_image(
 /// that parallax, so the background is tiled down the level instead.
 fn draw_layer2(
     img: &mut RgbImage,
+    priorities: &mut [u8],
     tiles: &crate::expand::LevelTiles,
     layer_tiles: &LayerTiles,
     palette: &Palette,
     priority: bool,
 ) {
     let (w, h) = tiles.size();
+    let prio = if priority { LAYER2_HIGH } else { LAYER2_LOW };
     if tiles.layer2_tilemap.is_some() {
         // Boss arenas and dark rooms sharing their tilemap do not display
         // the decoded background buffer.
@@ -257,7 +414,17 @@ fn draw_layer2(
                 let n = tiles.layer2_bg_tile(screen, col, y % rows).unwrap();
                 if let Some(tile) = tiles.bg_map16.get(n as usize - 0x200) {
                     let (px, py) = ((x * 16) as u32, (y * 16) as u32);
-                    draw_map16_layer(img, px, py, tile, layer_tiles, palette, pass);
+                    draw_map16_layer(
+                        img,
+                        priorities,
+                        prio,
+                        px,
+                        py,
+                        tile,
+                        layer_tiles,
+                        palette,
+                        pass,
+                    );
                 }
             }
         }
@@ -277,7 +444,17 @@ fn draw_layer2(
             };
             if let Some(tile) = tiles.map16.get(&n) {
                 let (px, py) = ((x * 16) as u32, (y * 16) as u32);
-                draw_map16_layer(img, px, py, tile, layer_tiles, palette, pass);
+                draw_map16_layer(
+                    img,
+                    priorities,
+                    prio,
+                    px,
+                    py,
+                    tile,
+                    layer_tiles,
+                    palette,
+                    pass,
+                );
             }
         }
     }
@@ -328,16 +505,7 @@ fn draw_boss_objects(
     vram: &[u8],
     colors: &[[u8; 3]; 256],
 ) {
-    let sizes = [
-        ((8, 8), (16, 16)),
-        ((8, 8), (32, 32)),
-        ((8, 8), (64, 64)),
-        ((16, 16), (32, 32)),
-        ((16, 16), (64, 64)),
-        ((32, 32), (64, 64)),
-        ((16, 32), (32, 64)),
-        ((16, 32), (32, 32)),
-    ];
+    let sizes = crate::expand::object_sizes(scene.object_select);
     let mut covered = vec![false; img.pixels.len()];
     for offset in 0..128 {
         let object = (scene.first_object + offset) % 128;
@@ -346,12 +514,11 @@ fn draw_boss_objects(
         };
         let high = scene.oam.get(512 + object / 4).copied().unwrap_or(0) >> (2 * (object % 4));
         let x = bytes[0] as i32 - if high & 1 != 0 { 256 } else { 0 };
-        let y = bytes[1] as usize;
+        let y = bytes[1] as i32;
         let attr = bytes[3];
-        let (small, large) = sizes[(scene.object_select >> 5) as usize];
-        let (width, height) = if high & 2 != 0 { large } else { small };
+        let (width, height) = sizes[(high & 2 != 0) as usize];
         for dy in 0..height {
-            let sy = (y + dy) & 255;
+            let sy = ((y + dy) & 255) as usize;
             if sy >= 224 {
                 continue;
             }
@@ -360,7 +527,7 @@ fn draw_boss_objects(
             };
             let [left, right] = scene.backdrop_window[sy];
             for dx in 0..width {
-                let sx = x + dx as i32;
+                let sx = x + dx;
                 if !(0..256).contains(&sx) || (sx >= left as i32 && sx <= right as i32) {
                     continue;
                 }
@@ -368,36 +535,23 @@ fn draw_boss_objects(
                 if covered[at] {
                     continue;
                 }
-                let tx = if attr & 0x40 != 0 { width - 1 - dx } else { dx };
-                let ty = if attr & 0x80 != 0 {
-                    height - 1 - dy
-                } else {
-                    dy
-                };
-                let tile = (((bytes[2] as usize & 0xF0) + ty / 8 * 16) & 0xF0)
-                    | ((bytes[2] as usize + tx / 8) & 15);
-                let base = ((scene.object_select as usize & 7) << 14)
-                    + if attr & 1 != 0 {
-                        (((scene.object_select as usize >> 3) & 3) + 1) * 0x2000
-                    } else {
-                        0
-                    };
-                let start = base + tile * 32 + (ty % 8) * 2;
-                let mut color = 0;
-                for plane in 0..4 {
-                    color |= ((video_byte(vram, start + plane / 2 * 16 + plane % 2)
-                        >> (7 - tx % 8))
-                        & 1)
-                        << plane;
-                }
-                if color == 0 {
+                let Some(color) = object_pixel(
+                    vram,
+                    scene.object_select,
+                    bytes[2],
+                    attr,
+                    dx,
+                    dy,
+                    width,
+                    height,
+                ) else {
                     continue;
-                }
+                };
                 covered[at] = true;
                 let priority = if band.layer.mode & 7 == 7 {
                     [2, 4, 6, 7]
                 } else {
-                    [2, 4, 7, 10]
+                    OBJECT_PRIORITIES
                 }[(attr >> 4 & 3) as usize];
                 if priority > bg_priorities[at] {
                     img.pixels[at] = colors[128 + (attr as usize >> 1 & 7) * 16 + color as usize];

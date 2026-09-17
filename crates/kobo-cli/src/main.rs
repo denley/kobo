@@ -122,9 +122,13 @@ enum LevelCommand {
         level: String,
         /// Output PNG path.
         out: PathBuf,
-        /// Leave out the sprite markers.
+        /// Leave out sprites entirely.
         #[arg(long)]
         no_sprites: bool,
+        /// Draw every sprite as an ID marker instead of running the game's
+        /// sprite engine for its graphics.
+        #[arg(long)]
+        markers: bool,
     },
     /// List a level's sprites.
     Sprites {
@@ -304,7 +308,8 @@ fn main() -> Result<()> {
                 level,
                 out,
                 no_sprites,
-            } => level_png(&rom.load()?, &level, &out, !no_sprites),
+                markers,
+            } => level_png(&rom.load()?, &level, &out, !no_sprites, markers),
             LevelCommand::Sprites { rom, level } => level_sprites(&rom.load()?, &level),
             LevelCommand::Tiles { rom, level } => level_tiles(&rom.load()?, &level),
             LevelCommand::Dump { rom, level, dir } => level_dump(&rom.load()?, &level, &dir),
@@ -376,7 +381,13 @@ fn level_info(rom: &Rom, level: &str) -> Result<()> {
     Ok(())
 }
 
-fn level_png(rom: &Rom, level: &str, out: &PathBuf, with_sprites: bool) -> Result<()> {
+fn level_png(
+    rom: &Rom,
+    level: &str,
+    out: &PathBuf,
+    with_sprites: bool,
+    markers: bool,
+) -> Result<()> {
     let level = parse_level(level)?;
     let tiles = expand::expand_level(rom, level)?;
     // Graphics and colours come from what the game uploaded to VRAM and
@@ -384,12 +395,22 @@ fn level_png(rom: &Rom, level: &str, out: &PathBuf, with_sprites: bool) -> Resul
     let pal = tiles.palette();
     let back = tiles.back_area_color().to_rgb8();
     let layer_tiles = LayerTiles::from_vram(&tiles.vram);
-    let mut img = render::level_image(&tiles, &layer_tiles, &pal, back);
-    if with_sprites {
+    let (mut img, priorities) = render::level_render(&tiles, &layer_tiles, &pal, back);
+    if with_sprites && tiles.boss_scene.is_none() {
         let list = sprites::read_sprites_at(rom, tiles.sprite_data_ptr())?;
-        for s in &list.sprites {
-            let (x, y) = s.tile_position(tiles.vertical);
-            render::draw_sprite_marker(&mut img, x as u32 * 16, y as u32 * 16, s.id, &tiles.vram);
+        let mut marked: Vec<(usize, usize, u8)> = Vec::new();
+        if markers {
+            marked.extend(list.sprites.iter().map(|s| {
+                let (x, y) = s.tile_position(tiles.vertical);
+                (x, y, s.id)
+            }));
+        } else {
+            let scene = expand::capture_sprites(rom, &tiles, &list)?;
+            render::draw_sprite_scene(&mut img, &priorities, &scene, &tiles.vram, &pal);
+            marked = scene.undrawn;
+        }
+        for (x, y, id) in marked {
+            render::draw_sprite_marker(&mut img, x as u32 * 16, y as u32 * 16, id, &tiles.vram);
         }
     }
     img.write_png(out)?;

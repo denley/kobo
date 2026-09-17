@@ -39,3 +39,30 @@ pub struct BossScene {
     pub object_select: u8,
     pub first_object: usize,
 }
+
+/// One OAM object captured from the game's sprite engine, in level pixel
+/// coordinates (which may be negative or extend past the level edge).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SpriteObject {
+    pub x: i32,
+    pub y: i32,
+    /// OAM character number.
+    pub tile: u8,
+    /// OAM attribute byte: `vhoopppN` (flips, priority, palette, name
+    /// table).
+    pub attr: u8,
+    /// Uses the larger of the two `OBSEL` sizes.
+    pub large: bool,
+}
+
+/// The sprites of an ordinary level as the game draws them on their first
+/// frame, front to back, plus the level sprite entries that produced no
+/// graphics at all (generators, scroll commands, and the like).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SpriteScene {
+    pub objects: Vec<SpriteObject>,
+    /// `OBSEL`: object sizes and character base.
+    pub object_select: u8,
+    /// Level tile positions and sprite numbers of entries with no graphics.
+    pub undrawn: Vec<(usize, usize, u8)>,
+}

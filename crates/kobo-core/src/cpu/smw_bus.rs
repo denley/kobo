@@ -51,6 +51,12 @@ pub struct SmwBus<'a> {
     pub irq_scanline: u16,
     pub interrupt_enable: u8,
     hblank: bool,
+    /// CPU multiply and divide registers (`$4202`-`$4206` in, `$4214`-`$4217`
+    /// out). Sprite code leans on them.
+    multiplicand: u8,
+    dividend: u16,
+    quotient: u16,
+    product: u16,
     dma: [DmaChannel; 8],
     /// Last values written to the APU I/O ports `$2140`-`$2143`.
     apu_ports: [u8; 4],
@@ -97,6 +103,10 @@ impl<'a> SmwBus<'a> {
             irq_scanline: 0,
             interrupt_enable: 0,
             hblank: false,
+            multiplicand: 0,
+            dividend: 0,
+            quotient: 0,
+            product: 0,
             dma: [DmaChannel::default(); 8],
             apu_ports: [0; 4],
             apu_in_transfer: false,
@@ -253,6 +263,18 @@ impl<'a> SmwBus<'a> {
             }
             0x420B => self.run_dma(value),
             0x4200 => self.interrupt_enable = value,
+            0x4202 => self.multiplicand = value,
+            0x4203 => self.product = self.multiplicand as u16 * value as u16,
+            0x4204 => self.dividend = (self.dividend & 0xFF00) | value as u16,
+            0x4205 => self.dividend = (self.dividend & 0x00FF) | ((value as u16) << 8),
+            0x4206 => {
+                // Division by zero yields $FFFF with the dividend as remainder.
+                (self.quotient, self.product) = if value == 0 {
+                    (0xFFFF, self.dividend)
+                } else {
+                    (self.dividend / value as u16, self.dividend % value as u16)
+                };
+            }
             0x4209 => self.irq_scanline = (self.irq_scanline & 0x100) | value as u16,
             0x420A => self.irq_scanline = (self.irq_scanline & 0xFF) | (((value & 1) as u16) << 8),
             0x4300..=0x437F => {
@@ -335,6 +357,10 @@ impl Bus for SmwBus<'_> {
                         [0xAA, 0xBB][i]
                     }
                 }
+                0x4214 => self.quotient as u8,
+                0x4215 => (self.quotient >> 8) as u8,
+                0x4216 => self.product as u8,
+                0x4217 => (self.product >> 8) as u8,
                 0x4212 => {
                     // Let the ROM's wait-for-HBlank handshake finish.
                     // This is a headless loader, not a cycle-timed PPU.

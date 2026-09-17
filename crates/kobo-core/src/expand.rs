@@ -69,7 +69,37 @@ mod ram {
     pub const BG_SCREEN_LEN: u32 = 0x7E_0005;
     /// Direct page `$CE`-`$D0`: the level's sprite data pointer.
     pub const SPRITE_DATA_PTR: u32 = 0x7E_00CE;
+    /// `$1A`/`$1C`: layer 1 position, and `$1462`/`$1464`: the position
+    /// the camera update copies from at the start of each frame.
+    pub const LAYER1_X: u32 = 0x7E_001A;
+    pub const LAYER1_Y: u32 = 0x7E_001C;
+    pub const NEXT_LAYER1_X: u32 = 0x7E_1462;
+    pub const NEXT_LAYER1_Y: u32 = 0x7E_1464;
+    /// `$55`: layer 1 scroll direction, which the sprite loader turns into
+    /// an offset from the camera to the column it loads (1: none).
+    pub const LAYER1_SCROLL_DIR: u32 = 0x7E_0055;
+    /// `$1411`/`$1412`: horizontal and vertical camera scroll settings;
+    /// zero freezes the camera.
+    pub const HORIZ_SCROLL_SETTING: u32 = 0x7E_1411;
+    pub const VERT_SCROLL_SETTING: u32 = 0x7E_1412;
+    /// `$94`/`$96`: the player's position for the next frame.
+    pub const PLAYER_X: u32 = 0x7E_0094;
+    pub const PLAYER_Y: u32 = 0x7E_0096;
+    /// `$0200`-`$041F` packed OAM, `$0420`-`$043F` the size/X-high bits,
+    /// and `$3F` the OAM address the first object was written at.
+    pub const OAM: u32 = 0x7E_0200;
+    pub const OAM_ADDRESS: u32 = 0x7E_003F;
+    /// `$14C8`: sprite slot status (0 = free), and `$1938`: per-entry
+    /// "already loaded" flags the level sprite loader keeps.
+    pub const SPRITE_STATUS: u32 = 0x7E_14C8;
+    pub const SPRITE_LOAD_STATUS: u32 = 0x7E_1938;
 }
+
+/// Vanilla sprite slots and level sprite entries the loader tracks.
+const SPRITE_SLOTS: u32 = 12;
+const SPRITE_LOAD_FLAGS: u32 = 0x80;
+/// Most frames a sprite pass runs waiting for the sprites to draw.
+const SPRITE_FRAMES: usize = 8;
 
 /// Where a level mode keeps its layer 2 objects in the tile grid, per the
 /// game's layer 2 upload dispatch (`CODE_058883`) and the per-mode screen
@@ -165,6 +195,11 @@ mod routines {
     /// `CODE_00A1DA`: one game-mode `$14` drawing pass, which fills OAM
     /// with the player, boss, and sprite-based arena walls and floor.
     pub const DRAW_LEVEL_FRAME: u32 = 0x00_A1DA;
+    /// `CODE_02A802`: the body of `LoadSprFromLevel`, after its
+    /// every-other-frame check. Spawns the level sprites at the column the
+    /// camera position and scroll direction select. Lunar Magic reroutes
+    /// its inner loop but keeps this entry.
+    pub const SPAWN_SPRITES: u32 = 0x02_A802;
     /// `CODE_0098A9`: uploads the boss's graphics to VRAM.
     pub const UPLOAD_BOSS_TILES: u32 = 0x00_98A9;
     /// `CODE_00A300`: uploads the player's graphics to VRAM.
@@ -251,6 +286,8 @@ pub struct LevelTiles {
     /// `$2000` and layer 2 at `$3000`, both 64x64; Lunar Magic uses
     /// `$3000` and `$3800`, 64x32.
     pub bg_sc: [u8; 4],
+    /// `OBSEL`: object sizes and character base as level preparation set it.
+    pub object_select: u8,
     /// Video-mode bands installed by the ROM's boss NMI/IRQ handlers.
     pub boss_scene: Option<crate::video::BossScene>,
     /// Layer 2 background tilemap planes, when the level uses a
@@ -481,6 +518,7 @@ pub fn expand_level_traced(
         vram_written: bus.vram_written,
         cgram: bus.cgram,
         bg_sc: bus.bg_sc,
+        object_select: bus.object_select,
         boss_scene,
         wram: bus.wram,
         map16,
@@ -503,6 +541,219 @@ fn level_rows(bus: &SmwBus, vertical: bool) -> usize {
         rows if height.is_multiple_of(16) && rows > 0 && rows * SCREEN_COLS <= GRID_LEN => rows,
         _ => SCREEN_ROWS,
     }
+}
+
+/// Screen size the sprite engine draws within.
+const SCREEN_W: i32 = 256;
+const SCREEN_H: i32 = 224;
+
+/// Draws the level's sprites the way the game does: for each camera
+/// position that puts a sprite entry's column at the screen edge, it
+/// restores the loaded level, runs the ROM's own sprite loader (so custom
+/// sprite tools' loaders and extension bytes apply), runs two frames of
+/// the level loop (sprite initialisation, then the first drawing frame),
+/// and reads OAM back in level coordinates. Mario is parked in the middle
+/// of the screen with scrolling disabled, and his objects (the same on
+/// every pass) are subtracted using a pass without sprites.
+///
+/// Boss arenas draw their sprites in `boss_scene` instead and get an empty
+/// scene here.
+pub fn capture_sprites(
+    rom: &Rom,
+    tiles: &LevelTiles,
+    list: &crate::sprites::SpriteList,
+) -> Result<crate::video::SpriteScene, ExpandError> {
+    use crate::video::SpriteScene;
+    use std::collections::{BTreeMap, HashSet};
+    let level = tiles.level;
+    if tiles.boss_scene.is_some() {
+        return Ok(SpriteScene {
+            object_select: tiles.object_select,
+            ..Default::default()
+        });
+    }
+    let mut bus = SmwBus::new(rom);
+    bus.wram = tiles.wram.clone();
+    bus.vram = tiles.vram.clone();
+    bus.cgram = tiles.cgram.clone();
+    bus.bg_sc = tiles.bg_sc;
+    bus.object_select = tiles.object_select;
+    // Start from an empty sprite table: the entrance screen's sprites were
+    // spawned during level preparation, and each pass respawns what it
+    // needs from the level data.
+    for slot in 0..SPRITE_SLOTS {
+        bus.set_wram_u8(ram::SPRITE_STATUS + slot, 0);
+    }
+    for i in 0..SPRITE_LOAD_FLAGS {
+        bus.set_wram_u8(ram::SPRITE_LOAD_STATUS + i, 0);
+    }
+    let saved = bus.wram.clone();
+    let (w, h) = tiles.size();
+    let (level_w, level_h) = (w as i32 * 16, h as i32 * 16);
+    // Camera position whose loading column is the entry's, keeping the
+    // sprite inside the screen on the other axis.
+    let camera = |e: &crate::sprites::SpriteEntry| -> (i32, i32) {
+        let (x, y) = e.tile_position(tiles.vertical);
+        let (x, y) = (x as i32 * 16, y as i32 * 16);
+        if tiles.vertical {
+            ((x - SCREEN_W / 2).clamp(0, (level_w - SCREEN_W).max(0)), y)
+        } else {
+            (x, (y - SCREEN_H / 2).clamp(0, (level_h - SCREEN_H).max(0)))
+        }
+    };
+    let mut groups: BTreeMap<(i32, i32), Vec<&crate::sprites::SpriteEntry>> = BTreeMap::new();
+    for e in &list.sprites {
+        groups.entry(camera(e)).or_default().push(e);
+    }
+    let sizes = object_sizes(tiles.object_select);
+    // Runs one pass: restore the level, place the camera and player, spawn
+    // the column's sprites (unless `frames` fixes the frame count for a
+    // player-only baseline), and run frames until every spawned slot has
+    // left its initialisation state and drawn once. Returns the final OAM
+    // and the number of frames run.
+    let run_pass = |bus: &mut SmwBus,
+                    cam: (i32, i32),
+                    frames: Option<usize>|
+     -> Result<(Vec<u8>, usize), ExpandError> {
+        bus.wram.copy_from_slice(&saved);
+        let set16 = |bus: &mut SmwBus, addr: u32, v: i32| {
+            bus.set_wram_u8(addr, v as u8);
+            bus.set_wram_u8(addr + 1, (v >> 8) as u8);
+        };
+        for addr in [ram::LAYER1_X, ram::NEXT_LAYER1_X] {
+            set16(bus, addr, cam.0);
+        }
+        for addr in [ram::LAYER1_Y, ram::NEXT_LAYER1_Y] {
+            set16(bus, addr, cam.1);
+        }
+        // Mario waits just off the left edge, where most sprites expect
+        // to meet him (a Banzai Bill erases itself if he is to its right)
+        // and where his own objects stay out of OAM.
+        set16(bus, ram::PLAYER_X, cam.0 - 64);
+        set16(bus, ram::PLAYER_Y, cam.1 + SCREEN_H / 2 - 16);
+        bus.set_wram_u8(ram::LAYER1_SCROLL_DIR, 1);
+        bus.set_wram_u8(ram::HORIZ_SCROLL_SETTING, 0);
+        bus.set_wram_u8(ram::VERT_SCROLL_SETTING, 0);
+        bus.set_wram_u8(ram::GAME_MODE, 0x14);
+        let status = |bus: &SmwBus| {
+            bus.wram_slice(ram::SPRITE_STATUS, SPRITE_SLOTS as usize)
+                .to_vec()
+        };
+        let mut spawned = Vec::new();
+        if frames.is_none() {
+            // The loader reads its slot tables through the data bank its
+            // bank 2 callers set.
+            let mut cpu = Cpu::new();
+            cpu.db = 0x02;
+            cpu.call_jsr(bus, routines::SPAWN_SPRITES, STEP_LIMIT)
+                .map_err(|source| ExpandError::Cpu { level, source })?;
+            spawned = status(bus)
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| **s != 0)
+                .map(|(slot, _)| slot)
+                .collect();
+        }
+        // Initialisation takes the first frame and drawing the second;
+        // some sprites wait a few more frames before they first appear.
+        let mut oam = Vec::new();
+        let mut run = 0;
+        for frame in 0..frames.unwrap_or(SPRITE_FRAMES) {
+            let mut cpu = Cpu::new();
+            cpu.call_jsr(bus, routines::DRAW_LEVEL_FRAME, STEP_LIMIT)
+                .map_err(|source| ExpandError::Cpu { level, source })?;
+            let first = bus.wram_u8(ram::OAM_ADDRESS) as usize / 2;
+            oam = bus.wram_slice(ram::OAM, 0x240).to_vec();
+            oam.push(first as u8);
+            run = frame + 1;
+            let status = status(bus);
+            if frames.is_none() && frame >= 1 && spawned.iter().all(|&slot| status[slot] != 1) {
+                break;
+            }
+        }
+        Ok((oam, run))
+    };
+    let mut seen = HashSet::new();
+    let mut scene = SpriteScene {
+        object_select: tiles.object_select,
+        ..Default::default()
+    };
+    for (cam, entries) in &groups {
+        let (oam, frames) = run_pass(&mut bus, *cam, None)?;
+        // The player's objects after the same frames from the same spot.
+        let (baseline, _) = run_pass(&mut bus, *cam, Some(frames))?;
+        let player: HashSet<_> = screen_objects(&baseline, sizes).into_iter().collect();
+        let mut drew = false;
+        for (sx, sy, tile, attr, large) in screen_objects(&oam, sizes) {
+            if player.contains(&(sx, sy, tile, attr, large)) {
+                continue;
+            }
+            drew = true;
+            let object = crate::video::SpriteObject {
+                x: cam.0 + sx,
+                y: cam.1 + sy,
+                tile,
+                attr,
+                large,
+            };
+            if seen.insert(object) {
+                scene.objects.push(object);
+            }
+        }
+        if !drew {
+            for e in entries {
+                let (x, y) = e.tile_position(tiles.vertical);
+                scene.undrawn.push((x, y, e.id));
+            }
+        }
+    }
+    Ok(scene)
+}
+
+/// Small and large object dimensions for an `OBSEL` value.
+pub fn object_sizes(object_select: u8) -> [(i32, i32); 2] {
+    [
+        [(8, 8), (16, 16)],
+        [(8, 8), (32, 32)],
+        [(8, 8), (64, 64)],
+        [(16, 16), (32, 32)],
+        [(16, 16), (64, 64)],
+        [(32, 32), (64, 64)],
+        [(16, 32), (32, 64)],
+        [(16, 32), (32, 32)],
+    ][(object_select >> 5) as usize]
+}
+
+/// Visible objects in a packed OAM image (512 bytes of objects, 32 bytes
+/// of size and X bits, then the index of the first object), front to
+/// back, as (x, y, tile, attribute, large) in screen coordinates. Y `$F0`
+/// is the game's hidden marker; objects entirely off the screen are
+/// dropped, and those wrapped past its bottom are read as negative.
+fn screen_objects(oam: &[u8], sizes: [(i32, i32); 2]) -> Vec<(i32, i32, u8, u8, bool)> {
+    let first = oam[0x240] as usize;
+    let mut out = Vec::new();
+    for offset in 0..128 {
+        let object = (first + offset) % 128;
+        let bytes = &oam[object * 4..object * 4 + 4];
+        let high = oam[512 + object / 4] >> (2 * (object % 4));
+        let large = high & 2 != 0;
+        let (width, height) = sizes[large as usize];
+        let x = bytes[0] as i32 - if high & 1 != 0 { 256 } else { 0 };
+        let y = bytes[1];
+        if y == 0xF0 {
+            continue;
+        }
+        let y = if y as i32 >= SCREEN_H {
+            y as i32 - 256
+        } else {
+            y as i32
+        };
+        if x + width <= 0 || x >= SCREEN_W || y + height <= 0 || y >= SCREEN_H {
+            continue;
+        }
+        out.push((x, y, bytes[2], bytes[3], large));
+    }
+    out
 }
 
 /// Run just the video-register portions of the boss interrupt handlers.
@@ -697,6 +948,73 @@ fn lookup_map16(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod sprite_capture_tests {
+    use super::*;
+
+    fn oam_with(objects: &[(usize, u8, u8, u8, u8, u8)], first: u8) -> Vec<u8> {
+        let mut oam = vec![0u8; 0x240];
+        for i in 0..128 {
+            oam[i * 4 + 1] = 0xF0;
+        }
+        for &(i, x, y, tile, attr, high) in objects {
+            oam[i * 4..i * 4 + 4].copy_from_slice(&[x, y, tile, attr]);
+            oam[512 + i / 4] |= high << (2 * (i % 4));
+        }
+        oam.push(first);
+        oam
+    }
+
+    #[test]
+    fn hidden_and_offscreen_objects_are_dropped() {
+        let sizes = object_sizes(0x60); // 16x16 and 32x32
+        let oam = oam_with(
+            &[
+                (0, 10, 20, 0x40, 0x30, 2),   // large, visible
+                (1, 10, 0xF0, 0x40, 0x30, 2), // hidden marker
+                (2, 0xF8, 30, 0x41, 0x00, 1), // x = -8, small: 8 px visible
+                (3, 0xF0, 30, 0x41, 0x00, 1), // x = -16, small: gone
+                (4, 0, 0xF8, 0x42, 0x00, 2),  // y = -8, large: visible
+                (5, 0, 0xE0, 0x42, 0x00, 0),  // y = 224: below the screen
+            ],
+            0,
+        );
+        let got = screen_objects(&oam, sizes);
+        assert_eq!(
+            got,
+            [
+                (10, 20, 0x40, 0x30, true),
+                (-8, 30, 0x41, 0x00, false),
+                (0, -8, 0x42, 0x00, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn objects_start_from_the_first_written_one() {
+        let sizes = object_sizes(0x03); // 8x8 and 16x16, what SMW uses
+        assert_eq!(sizes, [(8, 8), (16, 16)]);
+        let oam = oam_with(&[(0, 1, 1, 1, 0, 0), (100, 2, 2, 2, 0, 0)], 100);
+        let got: Vec<u8> = screen_objects(&oam, sizes).iter().map(|o| o.2).collect();
+        assert_eq!(got, [2, 1]);
+    }
+
+    #[test]
+    fn level_rows_come_from_the_reported_height() {
+        let mut bytes = vec![0; 0x8000];
+        bytes[0x7FD5] = 0x20; // LoROM
+        let rom = crate::Rom::from_bytes(bytes).unwrap();
+        let mut bus = SmwBus::new(&rom);
+        assert_eq!(level_rows(&bus, false), SCREEN_ROWS);
+        assert_eq!(level_rows(&bus, true), 16);
+        bus.set_wram_u8(ram::LEVEL_HEIGHT, 0x80);
+        bus.set_wram_u8(ram::LEVEL_HEIGHT + 1, 0x02);
+        assert_eq!(level_rows(&bus, false), 40);
+        bus.set_wram_u8(ram::LEVEL_HEIGHT, 0x88); // not whole rows
+        assert_eq!(level_rows(&bus, false), SCREEN_ROWS);
+    }
 }
 
 #[cfg(test)]

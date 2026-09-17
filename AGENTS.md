@@ -82,6 +82,7 @@ cargo run -- level info 105                  # primary header and data pointers
 cargo run -- palette png --level 105 out.png # 16x16 swatch of the assembled level palette
 cargo run -- map16 png --level 105 out.png   # all 0x400 Map16 tiles in colour
 cargo run -- level png 105 out.png           # render a level by running the ROM's own loader
+cargo run -- level png 105 out.png --markers # ID boxes instead of sprite graphics (--no-sprites: none)
 cargo run -- level tiles|dump 105 [dir]      # the expanded Map16 grid as hex, or raw planes
 cargo run -- level sprites|map16|wram|reads  # sprite list, resolved Map16, RAM dump, read trace
 cargo run -- addr '$05E000' [--sa1]          # SNES <-> file offset
@@ -124,6 +125,9 @@ Windows, and macOS. Keep all three green.
   clobbered buffer or a table read from the wrong place without external data. Hacks whose
   headerless SHA-1 is in `fixtures/lunar_magic_map16_bg_export.txt` also have their BG table
   hashed against Lunar Magic's `-ExportAllMap16` output (file tile index `8000`-`81FF`).
+  Known exceptions in the corpus: `Smb2dx` (LM 1.63; 134 levels fail, its mode `$00`
+  levels carry object layer 2 pointers) and `Super Hark Bros 2` level `00A` (mode `$0C`,
+  896 of 2048 words), both failing before the vertical-level checks were added.
 
 ## Reference material
 
@@ -220,6 +224,22 @@ Windows, and macOS. Keep all three green.
   is captured right after `LoadLevel`: game mode `$12` decompresses GFX into `$7EAD00`, and a
   4bpp file (Lunar Magic) overruns the 3bpp-sized buffer into `$7EB900`. The game has
   uploaded the tilemap to VRAM by then and does not notice.
+- Sprite graphics (`expand::capture_sprites`): for each camera position that puts a sprite
+  entry's column at the screen's left edge (horizontal: `$1A = column*16`; vertical: `$1C =
+  row*16`), restore the loaded level with the sprite tables (`$14C8`) and load flags (`$1938`)
+  cleared, park Mario at `$1A - 64` with `$1411`/`$1412` zero so the camera stays, set `$55`
+  to 1 so the loader's column offset is zero, and call `CODE_02A802` (the body of
+  `LoadSprFromLevel`) with the data bank at 2, since it reads its slot tables through the
+  bank its callers set. Then run `GM14Level` (`$00A1DA`) frames until every spawned slot has
+  left status 1 (init) and drawn once, at most 8, and read `$0200`-`$043F` starting from
+  `$3F`. A second pass without the spawn at the same camera and frame count gives Mario's
+  objects to subtract. Y `$F0` is the hidden marker; objects past the bottom wrap negative.
+  Mario must sit left of the sprites: a Banzai Bill erases itself in `InitBanzai` when he is
+  to its right. Sprites that leave OAM empty in their pass become ID markers; in vanilla those
+  are the invisible sprites (`8E`, `C7`, `DB`). Rendering stacks by Mode 1 priority: layer 2
+  low (5), layer 1 low (6), layer 2 high (8), layer 1 high (9), objects 2/4/7/10.
+- The bus models the CPU multiply/divide registers (`$4202`-`$4206`, `$4214`-`$4217`);
+  sprite code uses them constantly.
 - Level modes `$09`, `$0B`, `$0F`, and `$10` (boss arenas and the dark rooms sharing their
   tilemap) never upload the decoded background; the renderer skips it.
 - Vertical levels with a background (mode `$0A`) keep layer 2 horizontal (`$5B` bit 1
@@ -307,8 +327,11 @@ Windows, and macOS. Keep all three green.
 
 - Layer 3 is not rendered: no status bar, layer 3 backgrounds, or tides. The uploaded layer 3
   font is only used for sprite ID markers.
-- Sprites in ordinary levels are drawn as ID markers, not graphics. Boss arenas show the
-  OAM of the first drawing pass instead.
+- Sprites show their first drawn frame with Mario off the left screen edge and no scrolling,
+  so anything that waits for Mario, spawns over time, or moves before it appears (Bullet
+  Bill shooters, generators, Lakitu) is not what a player sees. Custom sprite loaders run
+  as ROM code, but nothing has checked PIXI or Lunar Magic 3 sprite output yet. Boss arenas
+  show the OAM of the first drawing pass instead.
 - Layer 2 objects in Lunar Magic 3 levels with an expanded height are not drawn: the taller
   layer 1 screens fill the planes, and where the expanded format keeps layer 2 is unknown.
   `LevelTiles::layer2_objects` returns `None` for them.
