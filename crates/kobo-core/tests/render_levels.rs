@@ -41,6 +41,7 @@ fn scene() -> (LevelTiles, LayerTiles, Palette) {
         boss_scene: None,
         layer2_tilemap: Some((vec![0; LAYER2_TILEMAP_LEN], vec![0; LAYER2_TILEMAP_LEN])),
         layer2_screen_len: SCREEN_COLS * SCREEN_ROWS,
+        rows: SCREEN_ROWS,
     };
     let mut gfx = LayerTiles::blank();
     gfx.tiles[1] = Tile8 {
@@ -203,6 +204,7 @@ fn background_indices_above_511_do_not_alias_lower_tiles() {
 fn oversized_vertical_level_renders_only_the_captured_grid() {
     let (mut tiles, gfx, palette) = scene();
     tiles.vertical = true;
+    tiles.layer2_tilemap = None; // Only the grid matters here.
     tiles.screens = 32; // 32 * $200 exceeds the $3800-byte grid planes.
     let last = GRID_LEN - 1;
     tiles.high[last] = 2;
@@ -212,6 +214,40 @@ fn oversized_vertical_level_renders_only_the_captured_grid() {
     assert_eq!(image.pixels[0], back);
     assert_eq!(image.pixels.last(), Some(&[255, 0, 0]));
     assert_eq!(tiles.screens, 32); // Retain the loader's value for inspection.
+}
+
+#[test]
+fn vertical_level_background_spans_the_width_and_tiles_downward() {
+    let (mut tiles, gfx, palette) = scene();
+    tiles.vertical = true;
+    tiles.screens = 4;
+    tiles.rows = 16;
+    let image = render::level_image(&tiles, &gfx, &palette, [0, 255, 0]);
+    assert_eq!((image.width, image.height), (512, 1024));
+    // Background tile $200 (blue) everywhere: both background screens sit
+    // side by side, and the 27 rows repeat below.
+    assert_eq!(image.pixels[0], [0, 0, 255]);
+    assert_eq!(image.pixels[511], [0, 0, 255]);
+    assert_eq!(image.pixels[27 * 16 * 512], [0, 0, 255]);
+    assert_eq!(image.pixels[1023 * 512 + 511], [0, 0, 255]);
+}
+
+#[test]
+fn expanded_height_lays_screens_out_with_a_taller_stride() {
+    let (mut tiles, gfx, palette) = scene();
+    tiles.rows = 40;
+    tiles.screens = 2;
+    tiles.layer2_tilemap = None;
+    tiles.high[40 * 16 + 30 * 16 + 3] = 2; // screen 1, x = 3, y = 30: tile $200 (red)
+    assert_eq!(tiles.size(), (32, 40));
+    assert_eq!(tiles.tile_at(19, 30), 0x200);
+    assert_eq!(tiles.tile(1, 3, 30), 0x200);
+    assert!(tiles.layer2_objects().is_none());
+    let back = [0, 255, 0];
+    let image = render::level_image(&tiles, &gfx, &palette, back);
+    assert_eq!((image.width, image.height), (512, 640));
+    assert_eq!(image.pixels[30 * 16 * 512 + 19 * 16], [255, 0, 0]);
+    assert_eq!(image.pixels[30 * 16 * 512 + 3 * 16], back);
 }
 
 #[test]

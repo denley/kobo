@@ -44,6 +44,10 @@ mod ram {
     pub const SCREEN_MODE: u32 = 0x7E_005B;
     pub const LEVEL_MODE: u32 = 0x7E_1925;
     pub const SCREENS: u32 = 0x7E_005D;
+    /// `$13D7`: the level height in pixels. Vanilla leaves it zero;
+    /// Lunar Magic 3's loader hook (`JSL` at `$05D9A1`) stores the
+    /// height of the level's horizontal level mode here.
+    pub const LEVEL_HEIGHT: u32 = 0x7E_13D7;
     /// `$1931`: the object tileset, as the loader stored it.
     pub const OBJECT_TILESET: u32 = 0x7E_1931;
     pub const TILES_LOW: u32 = 0x7E_C800;
@@ -216,6 +220,11 @@ pub struct LevelTiles {
     /// True for vertical levels.
     pub vertical: bool,
     pub screens: usize,
+    /// Rows per screen of the layer 1 grid: 27 for horizontal levels, 16
+    /// for vertical ones, or the height Lunar Magic 3's expanded level
+    /// format gave a horizontal level (`$13D7 / 16`, up to 448). Screens
+    /// follow one another in the planes with a stride of `rows * 16`.
+    pub rows: usize,
     pub low: Vec<u8>,
     pub high: Vec<u8>,
     /// All of work RAM after the loader ran, for inspection.
@@ -256,8 +265,17 @@ pub struct LevelTiles {
 impl LevelTiles {
     /// Map16 tile number at a horizontal-level position.
     pub fn tile(&self, screen: usize, x: usize, y: usize) -> u16 {
-        let i = screen * SCREEN_LEN + y * SCREEN_COLS + x;
+        let i = screen * self.screen_len() + y * SCREEN_COLS + x;
         self.low[i] as u16 | ((self.high[i] as u16) << 8)
+    }
+
+    /// Bytes per screen in the layer 1 planes.
+    pub fn screen_len(&self) -> usize {
+        if self.vertical {
+            0x200
+        } else {
+            self.rows * SCREEN_COLS
+        }
     }
 
     /// Buffer offset of a level-wide tile position, for either orientation.
@@ -265,7 +283,7 @@ impl LevelTiles {
         if self.vertical {
             (y / 16) * 0x200 + (x / 16) * 0x100 + (y % 16) * 16 + (x % 16)
         } else {
-            (x / SCREEN_COLS) * SCREEN_LEN + y * SCREEN_COLS + (x % SCREEN_COLS)
+            (x / SCREEN_COLS) * self.screen_len() + y * SCREEN_COLS + (x % SCREEN_COLS)
         }
     }
 
@@ -276,8 +294,11 @@ impl LevelTiles {
     }
 
     /// How this level's layer 2 objects are laid out, if it has any.
+    /// Unknown for horizontal levels with an expanded height: their
+    /// layer 1 screens fill the planes, so the layer 2 objects live
+    /// somewhere this crate does not know yet.
     pub fn layer2_objects(&self) -> Option<Layer2Objects> {
-        if self.layer2_tilemap.is_some() {
+        if self.layer2_tilemap.is_some() || (!self.vertical && self.rows != SCREEN_ROWS) {
             return None;
         }
         Layer2Objects::for_level_mode(self.level_mode)
@@ -332,8 +353,8 @@ impl LevelTiles {
             (32, self.screens.min(len / 0x200) * 16)
         } else {
             (
-                self.screens.min(len / SCREEN_LEN) * SCREEN_COLS,
-                SCREEN_ROWS,
+                self.screens.min(len / self.screen_len()) * SCREEN_COLS,
+                self.rows,
             )
         }
     }
@@ -411,6 +432,8 @@ pub fn expand_level_traced(
     // Boss preparation reuses the screen-count byte (level $1C7 ends
     // with $FF). Preserve the length while it still describes the grid.
     let screens = bus.wram_u8(ram::SCREENS) as usize;
+    let vertical = bus.wram_u8(ram::SCREEN_MODE) & 0x01 != 0;
+    let rows = level_rows(&bus, vertical);
     // Capture the background tilemap now: level preparation decompresses
     // GFX files into `$7EAD00`, and Lunar Magic's 4bpp files overrun the
     // vanilla 3bpp buffer into `$7EB900`. The game has already uploaded
@@ -447,8 +470,9 @@ pub fn expand_level_traced(
         header,
         level_mode: bus.wram_u8(ram::LEVEL_MODE),
         object_tileset: bus.wram_u8(ram::OBJECT_TILESET),
-        vertical: bus.wram_u8(ram::SCREEN_MODE) & 0x01 != 0,
+        vertical,
         screens,
+        rows,
         low: bus.wram_slice(ram::TILES_LOW, GRID_LEN).to_vec(),
         high: bus.wram_slice(ram::TILES_HIGH, GRID_LEN).to_vec(),
         layer2_tilemap,
@@ -463,6 +487,22 @@ pub fn expand_level_traced(
         bg_map16,
     };
     Ok((tiles, trace))
+}
+
+/// Rows per screen of the loaded level. Lunar Magic 3's expanded level
+/// format stores a horizontal level's height in `$13D7`; vanilla and
+/// older Lunar Magic ROMs leave it zero. Anything that does not describe
+/// whole rows fitting the planes is treated as the vanilla 27.
+fn level_rows(bus: &SmwBus, vertical: bool) -> usize {
+    if vertical {
+        return 16;
+    }
+    let height = bus.wram_slice(ram::LEVEL_HEIGHT, 2);
+    let height = height[0] as usize | ((height[1] as usize) << 8);
+    match height / 16 {
+        rows if height.is_multiple_of(16) && rows > 0 && rows * SCREEN_COLS <= GRID_LEN => rows,
+        _ => SCREEN_ROWS,
+    }
 }
 
 /// Run just the video-register portions of the boss interrupt handlers.

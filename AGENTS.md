@@ -266,6 +266,16 @@ Windows, and macOS. Keep all three green.
   bank. Upload rows wrap with a five-bit mask, not modulo 27. Grand Poo World 2's 32-row
   backgrounds pass the tilemap check; its unused level `$09F` has a null BG table pointer
   and is explicitly rejected with `MissingBackgroundTable`.
+- Expanded level heights (Lunar Magic 3.00+, Vitor Vilela's dynamic level patch): a
+  per-level byte `TB0MMMMM` (T: uses layer 2 or 3, B: show the bottom row, MMMMM: horizontal
+  level mode) selects one of 32 sizes trading height for screens, from `$1B0` px x `$20`
+  screens (mode 0, vanilla) through `$280` x `$16` (mode 7) to `$3800` x 1 (mode `$1C`);
+  the full table is on SNESLab under "Lunar Magic/Custom Level Sizes". The loader hook
+  (`JSL` at `$05D9A1`) stores the height in pixels in `$13D7` (vanilla leaves it zero), so
+  `expand` derives rows per screen from it and lays screens out with a stride of
+  `rows * 16` bytes; layer 1 objects are otherwise the vanilla format plus screen jumps
+  (extended object `01`, and `03` for mode `$1C`). `tests/sprite_lists.rs` checks that
+  sprites in expanded levels stay inside the level, tying the sprite Y jumps to this.
 - Custom level palettes: 3-byte pointers at `$0EF600` per level to `$202` bytes (back area
   colour, then 256 colours); `$000000`/`$FFFFFF` = none. Game mode `$12` loads them itself.
 - ExGFX and Lunar Magic's 4bpp re-inserted GFX are handled by the game's own upload code, so
@@ -299,11 +309,9 @@ Windows, and macOS. Keep all three green.
   font is only used for sprite ID markers.
 - Sprites in ordinary levels are drawn as ID markers, not graphics. Boss arenas show the
   OAM of the first drawing pass instead.
-- Lunar Magic 3 levels with expanded dimensions render wrong. Level 106 of `SMW_2022-4-9`
-  (LM 3.31) reports mode `$00` and 6 screens, but its sprite list places sprites at Y 32-36
-  and the render is a jumble of chunks, so the level is taller than 27 rows and the grid
-  planes are laid out differently from the vanilla per-mode layout. The loader runs fine;
-  `LevelTiles::size()` and the plane indexing need the LM 3 level dimension data.
+- Layer 2 objects in Lunar Magic 3 levels with an expanded height are not drawn: the taller
+  layer 1 screens fill the planes, and where the expanded format keeps layer 2 is unknown.
+  `LevelTiles::layer2_objects` returns `None` for them.
 - `GFX27`'s layout is unknown; `GFX32`/`GFX33` are not handled by the GFX tooling.
 
 ## Open decisions

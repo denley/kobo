@@ -3,7 +3,9 @@
 //! header byte, so the block size is an independent statement of where the
 //! list ends: a parser that stops early or overruns disagrees with it.
 //! Runs on the vanilla ROM (no RATS tags, so only requiring clean parses)
-//! and on every hack in `KOBO_LM_ROMS`.
+//! and on every hack in `KOBO_LM_ROMS`. Levels with Lunar Magic 3's
+//! expanded heights must also keep every sprite inside the level, which
+//! ties the Y position jumps to the height the loader reported.
 
 mod common;
 
@@ -42,6 +44,24 @@ fn check_rom(name: &str, rom: &Rom) -> (usize, usize) {
         let list = sprites::read_sprites_at(rom, start)
             .unwrap_or_else(|e| panic!("{name} level {level:03X}: {e}"));
         parsed += 1;
+        let (w, h) = tiles.size();
+        assert!(
+            tiles.rows * tiles.screens * 16 <= expand::GRID_LEN || tiles.vertical,
+            "{name} level {level:03X}: {} screens of {} rows overflow the planes",
+            tiles.screens,
+            tiles.rows
+        );
+        if !tiles.vertical && tiles.rows != expand::SCREEN_ROWS {
+            for s in &list.sprites {
+                let (x, y) = s.tile_position(false);
+                assert!(
+                    x < w && y < h,
+                    "{name} level {level:03X} ({} rows): sprite {:02X} at ({x}, {y}) lies outside {w}x{h}",
+                    tiles.rows,
+                    s.id
+                );
+            }
+        }
         if let Some(size) = rats_size(rom, start) {
             assert_eq!(
                 list.len, size,
