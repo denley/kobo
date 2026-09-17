@@ -85,3 +85,34 @@ fn boss_graphics_match_emulator_dumps() {
         }
     }
 }
+
+/// The layer 3 tilemap the game uploaded during level preparation, below
+/// the status bar rows the NMI handler rewrites every frame.
+#[test]
+fn layer3_tilemaps_match_emulator_dumps() {
+    let Some(rom) = common::vanilla() else { return };
+    let Some(dir) = oracle_dir() else { return };
+    let mut failures = Vec::new();
+    let mut checked = 0;
+    for level in 0..0x200u16 {
+        let Ok(want) = fs::read(dir.join(format!("level_{level:03X}.vram.bin"))) else {
+            continue;
+        };
+        let tiles = expand::expand_level(&rom, level).unwrap();
+        if tiles.boss_scene.is_some() {
+            continue;
+        }
+        checked += 1;
+        let region = 0xA140..0xC000;
+        let bad = region.clone().filter(|&i| tiles.vram[i] != want[i]).count();
+        if bad != 0 {
+            let first = region.clone().find(|&i| tiles.vram[i] != want[i]).unwrap();
+            failures.push(format!(
+                "level {level:03X}: {bad} bytes differ, first at {first:04X}: {:02X} vs {:02X}",
+                tiles.vram[first], want[first]
+            ));
+        }
+    }
+    eprintln!("checked {checked} levels");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

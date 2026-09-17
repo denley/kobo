@@ -249,6 +249,25 @@ Windows, and macOS. Keep all three green.
   layer 2 slowly so those rows never show; the renderer tiles the background down the
   level instead. `Ptrs00BDE8`/`$00BE68` route mode `$0A` to the vertical object tables,
   but only `CODE_058883` (object modes `$05`-`$08`) uses those.
+- Layer 3: the secondary header byte at `$05F200` (bits 7-6, `$1BE3` after loading) picks
+  one of three settings per object tileset from `Layer3TilemapSettings` (`$009F88`, applied
+  by `CODE_009FB8` in game mode `$12`): `1`/`2` are tides (up-and-down at `$24 = $70`,
+  stationary at `$40`), `$80`/`$C0` fixed backgrounds at `$D0` (`$13D5` non-zero stops all
+  scrolling; `$80` also loads the crusher colours and its sprite moves the layer), and `$81` a
+  scrolling one: half-speed horizontal parallax at `$C0` in tilesets 1 and 3 (castle windows,
+  underground rocks), otherwise autoscrolling with the level (`$24 = $1C`; fish, clouds).
+  The stripe images (`Layer3Ptr`, `$059000`) go to the 64x64 tilemap at word `$5000`
+  (`BG3SC = $53`) with 2bpp tiles from word `$4000`; the status bar occupies rows 0-4 with
+  the scroll at zero, and the IRQ at scanline 36 switches to `$22`/`$24` for the rest of the
+  frame. `ProcScreenScrollCmds` (`$05BC00`) moves layers 2 and 3 each frame from the
+  camera delta in `$17BC`/`$17BD`; `expand::capture_layer3` runs it with the camera moved 16
+  pixels per axis and records the layer's movement as `Layer3::scroll_per_16`, so custom scroll
+  code hooked there measures like vanilla. Layer 2 sits on the subscreen (`$0D9E`) and shows
+  through the transparent main screen (`$0D9D`) by colour math; `CGADSUB` (`$40`) bit 2
+  blends layer 3 with it in the fish and fog levels (mode `$0E` puts only layer 3 on the main
+  screen). Level modes `$1E`/`$1F` have no layer 3 on the main screen. The renderer draws
+  layer 3 at its entry position, tiled at its scroll rate: a non-scrolling axis repeats the
+  entry screen every 256 pixels horizontally and stays in the entry 224-pixel band vertically.
 - Mode 7 boss arenas render a 256x224 scene from captured video registers, with the ROM's
   NMI/IRQ handlers selecting the Mode 1 ceiling/floor bands and Mode 7 transform. One
   game drawing pass supplies packed OAM (including arena walls and Bowser's floor) and
@@ -325,8 +344,11 @@ Windows, and macOS. Keep all three green.
 
 ## Known gaps
 
-- Layer 3 is not rendered: no status bar, layer 3 backgrounds, or tides. The uploaded layer 3
-  font is only used for sprite ID markers.
+- Layer 3 is drawn as the entry screen shows it (see the layer 3 facts above); the status bar
+  is left out, and an axis the layer does not scroll along cannot be followed once the camera
+  moves. Colour math is modelled only for layer 3 (add/subtract with the subscreen), not for
+  the half-brightness level modes `$0C`/`$0D`, and objects on the subscreen (mode `$0E`)
+  are hidden under layer 3 rather than blended.
 - Sprites show their first drawn frame with Mario off the left screen edge and no scrolling,
   so anything that waits for Mario, spawns over time, or moves before it appears (Bullet
   Bill shooters, generators, Lakitu) is not what a player sees. Custom sprite loaders run

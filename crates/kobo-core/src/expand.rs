@@ -93,6 +93,22 @@ mod ram {
     /// "already loaded" flags the level sprite loader keeps.
     pub const SPRITE_STATUS: u32 = 0x7E_14C8;
     pub const SPRITE_LOAD_STATUS: u32 = 0x7E_1938;
+    /// `$22`/`$24`: layer 3 position, as the IRQ handler writes it to
+    /// `BG3HOFS`/`BG3VOFS` below the status bar.
+    pub const LAYER3_X: u32 = 0x7E_0022;
+    pub const LAYER3_Y: u32 = 0x7E_0024;
+    /// `$17BD`/`$17BC`: how far layer 1 moved this frame, as the camera
+    /// update leaves it for the layer scroll routine.
+    pub const LAYER1_DX: u32 = 0x7E_17BD;
+    pub const LAYER1_DY: u32 = 0x7E_17BC;
+    /// `$9D`: sprite lock, which also pauses layer 3 autoscroll.
+    pub const SPRITE_LOCK: u32 = 0x7E_009D;
+    /// `$3E`: `BGMODE` mirror; `$40`: `CGADSUB` mirror; `$0D9D`/`$0D9E`:
+    /// main and sub screen designation mirrors.
+    pub const BG_MODE: u32 = 0x7E_003E;
+    pub const COLOR_MATH: u32 = 0x7E_0040;
+    pub const MAIN_SCREEN: u32 = 0x7E_0D9D;
+    pub const SUB_SCREEN: u32 = 0x7E_0D9E;
 }
 
 /// Vanilla sprite slots and level sprite entries the loader tracks.
@@ -204,6 +220,11 @@ mod routines {
     pub const UPLOAD_BOSS_TILES: u32 = 0x00_98A9;
     /// `CODE_00A300`: uploads the player's graphics to VRAM.
     pub const UPLOAD_PLAYER_TILES: u32 = 0x00_A300;
+    /// `ProcScreenScrollCmds`: the level loop's per-frame layer scroll
+    /// update, run right after the camera update. It moves layer 2 and
+    /// layer 3 according to the level's scroll settings (tides, parallax
+    /// backgrounds, autoscroll) from the camera delta `$17BC`-`$17BD`.
+    pub const SCROLL_LAYERS: u32 = 0x05_BC00;
 }
 
 /// `$0101`-`$0108`: the GFX files currently in VRAM. `$FF` forces uploads.
@@ -290,6 +311,10 @@ pub struct LevelTiles {
     pub object_select: u8,
     /// Video-mode bands installed by the ROM's boss NMI/IRQ handlers.
     pub boss_scene: Option<crate::video::BossScene>,
+    /// Layer 3 position and scroll behaviour, when the level shows
+    /// layer 3 on the main screen in Mode 1 (every ordinary level; boss
+    /// arenas draw theirs into `boss_scene`).
+    pub layer3: Option<crate::video::Layer3>,
     /// Layer 2 background tilemap planes, when the level uses a
     /// pre-built background instead of layer 2 objects. Raw tile numbers
     /// index `bg_map16`; `layer2_bg_tile` adds the legacy 0x200 display base.
@@ -496,6 +521,11 @@ pub fn expand_level_traced(
     run_jsr(&mut cpu, &mut bus, routines::PREPARE_LEVEL)?;
     let boss_scene = capture_boss_scene(&mut bus, level)?;
     let trace = cpu.trace_data_reads.take();
+    let layer3 = if boss_scene.is_some() {
+        None
+    } else {
+        capture_layer3(&mut cpu, &mut bus, level)?
+    };
     let lunar_magic = rom.lunar_magic_version().is_some();
     let (bg_map16, layer2_screen_len) = match &layer2_tilemap {
         Some(planes) => read_bg_map16(&mut cpu, &mut bus, level, planes)?,
@@ -520,6 +550,7 @@ pub fn expand_level_traced(
         bg_sc: bus.bg_sc,
         object_select: bus.object_select,
         boss_scene,
+        layer3,
         wram: bus.wram,
         map16,
         bg_map16,
@@ -837,6 +868,72 @@ fn capture_boss_scene(
         oam,
         object_select: bus.object_select,
         first_object,
+    }))
+}
+
+/// Layer 3 as level preparation left it, plus how it follows the camera.
+/// The latter is measured rather than decoded: the ROM's per-frame layer
+/// scroll routine runs three times from the prepared state, with the
+/// camera where it is and then moved 16 pixels along each axis, the way
+/// the camera update hands it a frame's movement. Tides, the tileset
+/// backgrounds' half-speed parallax, autoscrolling fish, sprite-driven
+/// layers, and custom scroll code hooked into the routine all come out
+/// of the same measurement. `None` when layer 3 is not shown on the main
+/// screen in Mode 1.
+fn capture_layer3(
+    cpu: &mut Cpu,
+    bus: &mut SmwBus,
+    level: u16,
+) -> Result<Option<crate::video::Layer3>, ExpandError> {
+    let bg_mode = bus.wram_u8(ram::BG_MODE);
+    let main_screen = bus.wram_u8(ram::MAIN_SCREEN);
+    if bg_mode & 0x07 != 1 || main_screen & 0x04 == 0 {
+        return Ok(None);
+    }
+    let read16 =
+        |bus: &SmwBus, addr: u32| u16::from_le_bytes([bus.wram_u8(addr), bus.wram_u8(addr + 1)]);
+    let position = [read16(bus, ram::LAYER3_X), read16(bus, ram::LAYER3_Y)];
+    let camera = [read16(bus, ram::LAYER1_X), read16(bus, ram::LAYER1_Y)];
+    let saved = bus.wram.clone();
+    let scrolled = |cpu: &mut Cpu, bus: &mut SmwBus, delta: [u16; 2]| {
+        bus.wram.copy_from_slice(&saved);
+        // The entrance locks sprites, which also pauses autoscroll.
+        bus.set_wram_u8(ram::SPRITE_LOCK, 0);
+        for axis in 0..2 {
+            let moved = camera[axis].wrapping_add(delta[axis]).to_le_bytes();
+            for addr in [
+                [ram::LAYER1_X, ram::LAYER1_Y][axis],
+                [ram::NEXT_LAYER1_X, ram::NEXT_LAYER1_Y][axis],
+            ] {
+                bus.set_wram_u8(addr, moved[0]);
+                bus.set_wram_u8(addr + 1, moved[1]);
+            }
+            bus.set_wram_u8([ram::LAYER1_DX, ram::LAYER1_DY][axis], delta[axis] as u8);
+        }
+        cpu.p |= crate::cpu::Flags::M | crate::cpu::Flags::X;
+        cpu.db = 0;
+        cpu.dp = 0;
+        cpu.call(bus, routines::SCROLL_LAYERS, STEP_LIMIT)
+            .map_err(|source| ExpandError::Cpu { level, source })?;
+        Ok::<_, ExpandError>([read16(bus, ram::LAYER3_X), read16(bus, ram::LAYER3_Y)])
+    };
+    let still = scrolled(cpu, bus, [0, 0])?;
+    let moved_x = scrolled(cpu, bus, [16, 0])?;
+    let moved_y = scrolled(cpu, bus, [0, 16])?;
+    bus.wram = saved;
+    Ok(Some(crate::video::Layer3 {
+        position,
+        camera,
+        scroll_per_16: [
+            moved_x[0].wrapping_sub(still[0]) as i16 as i32,
+            moved_y[1].wrapping_sub(still[1]) as i16 as i32,
+        ],
+        tilemap: bus.bg_sc[2],
+        character_base: bus.bg_character_base[2],
+        bg_mode,
+        main_screen,
+        sub_screen: bus.wram_u8(ram::SUB_SCREEN),
+        color_math: bus.wram_u8(ram::COLOR_MATH),
     }))
 }
 

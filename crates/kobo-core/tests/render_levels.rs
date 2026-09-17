@@ -9,6 +9,7 @@ use kobo_core::level::PrimaryHeader;
 use kobo_core::map16::{BG_TILE_COUNT, Map16Tile, Tile8Ref};
 use kobo_core::palette::{Color15, Palette};
 use kobo_core::render::{self, LayerTiles};
+use kobo_core::video::Layer3;
 use std::collections::HashMap;
 
 fn solid_tile(index: u16) -> Map16Tile {
@@ -40,6 +41,7 @@ fn scene() -> (LevelTiles, LayerTiles, Palette) {
         bg_sc: [0; 4],
         object_select: 0,
         boss_scene: None,
+        layer3: None,
         layer2_tilemap: Some((vec![0; LAYER2_TILEMAP_LEN], vec![0; LAYER2_TILEMAP_LEN])),
         layer2_screen_len: SCREEN_COLS * SCREEN_ROWS,
         rows: SCREEN_ROWS,
@@ -364,4 +366,75 @@ fn boss_arenas_capture_mode_switches_and_object_art() {
         );
         assert_eq!(tiles.wram[0x13], 0); // Keep the frame counter from before the drawing pass.
     }
+}
+
+/// The scene plus a layer 3: a solid 2bpp tile (colour 1 of palette row 1,
+/// green) at tilemap column 2, row 24, shown with the tide's scroll
+/// behaviour from a camera resting at the bottom of the level.
+fn layer3_scene(priority: bool) -> (LevelTiles, LayerTiles, Palette) {
+    let (mut tiles, gfx, mut palette) = scene();
+    tiles.vram = vec![0; 0x10000];
+    for row in 0..8 {
+        tiles.vram[0x8000 + 16 + row * 2] = 0xFF;
+    }
+    let word: u16 = 0x0001 | (1 << 10) | if priority { 0x2000 } else { 0 };
+    let at = 0xA000 + (24 * 32 + 2) * 2;
+    tiles.vram[at..at + 2].copy_from_slice(&word.to_le_bytes());
+    palette.set(0, 5, Color15::from_rgb5(0, 31, 0));
+    tiles.layer3 = Some(Layer3 {
+        position: [0, 64],
+        camera: [0, 192],
+        scroll_per_16: [16, 0],
+        tilemap: 0x53,
+        character_base: 0x8000,
+        bg_mode: 1,
+        main_screen: 0x15,
+        sub_screen: 0x02,
+        color_math: 0x20,
+    });
+    (tiles, gfx, palette)
+}
+
+#[test]
+fn layer3_is_placed_where_the_entry_screen_shows_it() {
+    let (mut tiles, gfx, palette) = layer3_scene(false);
+    tiles.layer2_tilemap = None;
+    tiles.bg_map16.clear();
+    let back = [0, 0, 0];
+    let image = render::level_image(&tiles, &gfx, &palette, back);
+    let at = |x: usize, y: usize| image.pixels[y * 768 + x];
+    // Tilemap row 24 sits 128 pixels below the scroll position of 64, so
+    // 128 pixels below the camera's top edge at 192.
+    assert_eq!(at(16, 320), [0, 255, 0]);
+    assert_eq!(at(23, 327), [0, 255, 0]);
+    assert_eq!(at(16, 319), back);
+    assert_eq!(at(24, 320), back);
+    assert_eq!(at(16 + 256, 320), back); // Scrolls with the level: no repeat.
+    // A fixed layer repeats the entry screen across the level.
+    tiles.layer3.as_mut().unwrap().scroll_per_16 = [0, 0];
+    let image = render::level_image(&tiles, &gfx, &palette, back);
+    assert_eq!(image.pixels[320 * 768 + 16 + 256], [0, 255, 0]);
+}
+
+#[test]
+fn layer3_stacks_under_layer_2_unless_the_priority_bit_lifts_it() {
+    let blue = [0, 0, 255];
+    let (tiles, gfx, palette) = layer3_scene(false);
+    let image = render::level_image(&tiles, &gfx, &palette, [0; 3]);
+    assert_eq!(image.pixels[320 * 768 + 16], blue);
+    let (mut tiles, gfx, palette) = layer3_scene(true);
+    let image = render::level_image(&tiles, &gfx, &palette, [0; 3]);
+    assert_eq!(image.pixels[320 * 768 + 16], blue);
+    tiles.layer3.as_mut().unwrap().bg_mode = 0x09;
+    let image = render::level_image(&tiles, &gfx, &palette, [0; 3]);
+    assert_eq!(image.pixels[320 * 768 + 16], [0, 255, 0]);
+    // With colour math on, the pixel adds the subscreen's layer 2 to it.
+    tiles.layer3.as_mut().unwrap().color_math = 0x24;
+    let image = render::level_image(&tiles, &gfx, &palette, [0; 3]);
+    assert_eq!(image.pixels[320 * 768 + 16], [0, 255, 255]);
+    // Layer 3 alone on the main screen goes in front regardless.
+    let (mut tiles, gfx, palette) = layer3_scene(false);
+    tiles.layer3.as_mut().unwrap().main_screen = 0x04;
+    let image = render::level_image(&tiles, &gfx, &palette, [0; 3]);
+    assert_eq!(image.pixels[320 * 768 + 16], [0, 255, 0]);
 }
