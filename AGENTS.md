@@ -222,6 +222,13 @@ Windows, and macOS. Keep all three green.
   uploaded the tilemap to VRAM by then and does not notice.
 - Level modes `$09`, `$0B`, `$0F`, and `$10` (boss arenas and the dark rooms sharing their
   tilemap) never upload the decoded background; the renderer skips it.
+- Vertical levels with a background (mode `$0A`) keep layer 2 horizontal (`$5B` bit 1
+  clear): `CODE_058955` dispatches to the same column upload as mode `$00`, so the two
+  screens sit side by side across the level's 32-tile width, 27 rows tall, in a 64x64
+  tilemap (`BG2SC = $33`) whose last five Map16 rows are never written. The game scrolls
+  layer 2 slowly so those rows never show; the renderer tiles the background down the
+  level instead. `Ptrs00BDE8`/`$00BE68` route mode `$0A` to the vertical object tables,
+  but only `CODE_058883` (object modes `$05`-`$08`) uses those.
 - Mode 7 boss arenas render a 256x224 scene from captured video registers, with the ROM's
   NMI/IRQ handlers selecting the Mode 1 ceiling/floor bands and Mode 7 transform. One
   game drawing pass supplies packed OAM (including arena walls and Bowser's floor) and
@@ -292,8 +299,6 @@ Windows, and macOS. Keep all three green.
   font is only used for sprite ID markers.
 - Sprites in ordinary levels are drawn as ID markers, not graphics. Boss arenas show the
   OAM of the first drawing pass instead.
-- Vertical levels skip the layer 2 background tilemap; `tests/layer2_background.rs` skips
-  them too.
 - Lunar Magic 3 levels with expanded dimensions render wrong. Level 106 of `SMW_2022-4-9`
   (LM 3.31) reports mode `$00` and 6 screens, but its sprite list places sprites at Y 32-36
   and the render is a jumble of chunks, so the level is taller than 27 rows and the grid

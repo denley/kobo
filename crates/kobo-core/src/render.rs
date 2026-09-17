@@ -223,6 +223,12 @@ pub fn level_image(
 /// Draws the quadrants of layer 2 with the given priority: the
 /// background tilemap repeated every two screens, or the layer 2 objects
 /// from their own region of the tile grid.
+///
+/// A vertical level's background is the same two-screen-wide tilemap
+/// (mode `$0A` keeps layer 2 horizontal: `$5B` bit 1 clear) spanning the
+/// level's full 32-tile width, and the game scrolls it slowly so the
+/// 27 rows cover the whole descent. A static render cannot reproduce
+/// that parallax, so the background is tiled down the level instead.
 fn draw_layer2(
     img: &mut RgbImage,
     tiles: &crate::expand::LevelTiles,
@@ -234,22 +240,24 @@ fn draw_layer2(
     if tiles.layer2_tilemap.is_some() {
         // Boss arenas and dark rooms sharing their tilemap do not display
         // the decoded background buffer.
-        if tiles.vertical || matches!(tiles.level_mode, 0x09 | 0x0B | 0x0F | 0x10) {
+        if matches!(tiles.level_mode, 0x09 | 0x0B | 0x0F | 0x10) {
             return;
         }
-        for screen in 0..w / crate::expand::SCREEN_COLS {
-            for y in 0..crate::expand::SCREEN_ROWS {
-                for x in 0..crate::expand::SCREEN_COLS {
-                    let n = tiles.layer2_bg_tile(screen, x, y).unwrap();
-                    if let Some(tile) = tiles.bg_map16.get(n as usize - 0x200) {
-                        let px = ((screen * crate::expand::SCREEN_COLS + x) * 16) as u32;
-                        let py = (y * 16) as u32;
-                        let pass = LayerPass {
-                            priority,
-                            palette_mask: 0,
-                        };
-                        draw_map16_layer(img, px, py, tile, layer_tiles, palette, pass);
-                    }
+        let rows = tiles.layer2_bg_rows().min(crate::expand::SCREEN_ROWS);
+        let pass = LayerPass {
+            priority,
+            palette_mask: 0,
+        };
+        for y in 0..h {
+            for x in 0..w {
+                let (screen, col) = (
+                    x / crate::expand::SCREEN_COLS,
+                    x % crate::expand::SCREEN_COLS,
+                );
+                let n = tiles.layer2_bg_tile(screen, col, y % rows).unwrap();
+                if let Some(tile) = tiles.bg_map16.get(n as usize - 0x200) {
+                    let (px, py) = ((x * 16) as u32, (y * 16) as u32);
+                    draw_map16_layer(img, px, py, tile, layer_tiles, palette, pass);
                 }
             }
         }

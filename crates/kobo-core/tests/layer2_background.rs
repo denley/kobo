@@ -87,7 +87,9 @@ fn check_level(tiles: &LevelTiles) -> (usize, usize) {
     (checked, bad)
 }
 
-/// Checks every horizontal level whose layer 2 is a background tilemap.
+/// Checks every level whose layer 2 is a background tilemap. Vertical
+/// levels (mode `$0A`) keep layer 2 horizontal and upload the same
+/// two-screen-wide, 27-row tilemap, so they need no special handling.
 /// Returns (levels checked, failure descriptions).
 fn check_rom(rom: &Rom) -> (usize, Vec<String>) {
     let mut checked = 0;
@@ -105,10 +107,7 @@ fn check_rom(rom: &Rom) -> (usize, Vec<String>) {
                 continue;
             }
         };
-        if tiles.layer2_tilemap.is_none()
-            || tiles.vertical
-            || MODES_WITHOUT_BACKGROUND.contains(&tiles.level_mode)
-        {
+        if tiles.layer2_tilemap.is_none() || MODES_WITHOUT_BACKGROUND.contains(&tiles.level_mode) {
             continue;
         }
         checked += 1;
