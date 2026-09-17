@@ -263,11 +263,18 @@ Windows, and macOS. Keep all three green.
   colour, then 256 colours); `$000000`/`$FFFFFF` = none. Game mode `$12` loads them itself.
 - ExGFX and Lunar Magic's 4bpp re-inserted GFX are handled by the game's own upload code, so
   capturing VRAM during game mode `$12` covers them without knowing the tables.
-- Sprite data: header `SBNMMMMM`, entries `yyyyEESY XXXXssss NNNNNNNN`; vanilla ends with `$FF`,
-  Lunar Magic 3+ with `$FF $FE` (`$FF nn` below `$80` is a command). PIXI extension bytes: if
-  `$0EF30F` is `$42`, a `$400`-byte size table at `read3($0EF30C)` indexed by
-  `extra_bits*256 + id` gives the entry size. Lunar Magic relocates sprite data; take the
-  pointer the game resolved at `$7E00CE` after loading rather than the vanilla table.
+- Sprite data: header `SBNMMMMM`, entries `yyyyEESY XXXXssss NNNNNNNN`. In vertical levels
+  the game reads `Y` as the X position and `screen*16 + X` as the Y position. The header's
+  `N` bit (`$20`, "new sprite system") selects the format per level, whatever the Lunar
+  Magic version: clear means `$FF` ends the list (most levels in LM 3.x hacks, including
+  every untouched one); set means `$FF` starts a command: `$00`-`$7F` sets the Y position's
+  upper bits (`y = nn*32 + yyyyy`) for every following sprite, `$FE` ends the list, `$FF` is
+  a sprite whose first byte is `$FF`. PIXI extension bytes: if `$0EF30F` is `$42`, a
+  `$400`-byte size table at `read3($0EF30C)` indexed by `extra_bits*256 + id` gives the
+  entry size. Lunar Magic relocates sprite data into RATS blocks; take the pointer the game
+  resolved at `$7E00CE` after loading rather than the vanilla table. `tests/sprite_lists.rs`
+  checks every parsed list's length against the RATS tag preceding it, on every ROM in
+  `KOBO_LM_ROMS`.
 - SA-1 hacks do not run yet: the SA-1 registers and its CPU are not modelled.
 
 ## Decisions
@@ -287,13 +294,11 @@ Windows, and macOS. Keep all three green.
   OAM of the first drawing pass instead.
 - Vertical levels skip the layer 2 background tilemap; `tests/layer2_background.rs` skips
   them too.
-- Sprite lists in Lunar Magic 3.x ROMs parse garbage. `sprites::read_sprites_at` assumes
-  every list in an LM 3+ ROM ends with `$FF $FE`, but untouched vanilla levels keep the
-  plain `$FF` terminator and edited levels use an undocumented layout (level 105 of Kaizo
-  Kindergarten begins `00 FF "STAR" 0D 00 F2 FF ...`: a tag, a length, and its complement).
-  The parser walks off the end of the ROM, so `level png` fails unless `--no-sprites` is
-  given. 14 of the 43 corpus hacks are affected. Fix by documenting the LM 3 sprite format
-  or by running the game's own sprite loader on the core.
+- Lunar Magic 3 levels with expanded dimensions render wrong. Level 106 of `SMW_2022-4-9`
+  (LM 3.31) reports mode `$00` and 6 screens, but its sprite list places sprites at Y 32-36
+  and the render is a jumble of chunks, so the level is taller than 27 rows and the grid
+  planes are laid out differently from the vanilla per-mode layout. The loader runs fine;
+  `LevelTiles::size()` and the plane indexing need the LM 3 level dimension data.
 - `GFX27`'s layout is unknown; `GFX32`/`GFX33` are not handled by the GFX tooling.
 
 ## Open decisions

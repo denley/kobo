@@ -388,12 +388,8 @@ fn level_png(rom: &Rom, level: &str, out: &PathBuf, with_sprites: bool) -> Resul
     if with_sprites {
         let list = sprites::read_sprites_at(rom, tiles.sprite_data_ptr())?;
         for s in &list.sprites {
-            let (x, y) = if tiles.vertical {
-                (s.x as u32 * 16, (s.screen as u32 * 16 + s.y as u32) * 16)
-            } else {
-                (s.level_x() as u32 * 16, s.y as u32 * 16)
-            };
-            render::draw_sprite_marker(&mut img, x, y, s.id, &tiles.vram);
+            let (x, y) = s.tile_position(tiles.vertical);
+            render::draw_sprite_marker(&mut img, x as u32 * 16, y as u32 * 16, s.id, &tiles.vram);
         }
     }
     img.write_png(out)?;
