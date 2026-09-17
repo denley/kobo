@@ -328,7 +328,6 @@ fn expanded_height_lays_screens_out_with_a_taller_stride() {
     assert_eq!(tiles.size(), (32, 40));
     assert_eq!(tiles.tile_at(19, 30), 0x200);
     assert_eq!(tiles.tile(1, 3, 30), 0x200);
-    assert!(tiles.layer2_objects().is_none());
     let back = [0, 255, 0];
     let image = render::level_image(&tiles, &gfx, &palette);
     assert_eq!((image.width, image.height), (512, 640));

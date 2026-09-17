@@ -124,25 +124,91 @@ const SPRITE_LOAD_FLAGS: u32 = 0x80;
 /// Most frames a sprite pass runs waiting for the sprites to draw.
 const SPRITE_FRAMES: usize = 8;
 
-/// Where a level mode keeps its layer 2 objects in the tile grid, per the
+/// Lunar Magic 3's level sizes (Vitor Vilela's dynamic level patch):
+/// the height in pixels of each horizontal level mode and how many
+/// screens of it fit the tile planes. Mode 0 is the vanilla layout.
+pub const LEVEL_SIZES: [(u16, usize); 32] = [
+    (0x01B0, 0x20),
+    (0x01C0, 0x20),
+    (0x01D0, 0x1E),
+    (0x0200, 0x1C),
+    (0x0220, 0x1A),
+    (0x0250, 0x18),
+    (0x0260, 0x17),
+    (0x0280, 0x16),
+    (0x02A0, 0x15),
+    (0x02C0, 0x14),
+    (0x02F0, 0x13),
+    (0x0310, 0x12),
+    (0x0340, 0x11),
+    (0x0380, 0x10),
+    (0x03B0, 0x0F),
+    (0x0400, 0x0E),
+    (0x0440, 0x0D),
+    (0x04A0, 0x0C),
+    (0x0510, 0x0B),
+    (0x0590, 0x0A),
+    (0x0630, 0x09),
+    (0x0700, 0x08),
+    (0x0800, 0x07),
+    (0x0950, 0x06),
+    (0x0B30, 0x05),
+    (0x0E00, 0x04),
+    (0x12A0, 0x03),
+    (0x1C00, 0x02),
+    (0x3800, 0x01),
+    (0x0100, 0x38),
+    (0x00F0, 0x3B),
+    (0x00E0, 0x40),
+];
+
+/// Screens of a horizontal level of `rows` tile rows that fit the planes,
+/// per [`LEVEL_SIZES`]; `None` for a height Lunar Magic does not define.
+pub fn max_screens(rows: usize) -> Option<usize> {
+    LEVEL_SIZES
+        .iter()
+        .find(|(height, _)| *height as usize == rows * 16)
+        .map(|(_, screens)| *screens)
+}
+
+/// Where a level keeps its layer 2 objects in the tile grid, per the
 /// game's layer 2 upload dispatch (`CODE_058883`) and the per-mode screen
 /// pointer tables at `$00BB08` and `$00BC16`. The layout is independent
 /// of layer 1's: modes 3 and 4 pair a vertical layer 1 with a horizontal
 /// layer 2, and modes 5 and 6 the reverse.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Layer2Objects {
-    /// 16 screens of 16x27 tiles from plane offset `0x1B00`.
-    Horizontal,
+    /// Horizontal screens of 16 by `rows` tiles from plane offset `base`.
+    /// A level with layer 2 objects splits the screens its height allows
+    /// between the layers: layer 1 takes the first half (rounded up) and
+    /// layer 2 the rest, starting right after. Vanilla's 27-row levels
+    /// give 16 screens each from `0x1B00`; Lunar Magic 3's expanded
+    /// heights follow the same rule with their own screen counts (the
+    /// dynamic tilemap upload at `$1F8000` reads layer 2 from there).
+    Horizontal {
+        base: usize,
+        rows: usize,
+        screens: usize,
+    },
     /// 14 screens of 32x16 tiles (left and right halves) from `0x1C00`.
     Vertical,
 }
 
 impl Layer2Objects {
-    /// The layout for a level mode, or `None` when the mode uploads no
-    /// layer 2 objects (background tilemap modes and boss arenas).
-    pub fn for_level_mode(mode: u8) -> Option<Self> {
+    /// The layout for a level mode and layer 1 row count, or `None` when
+    /// the mode uploads no layer 2 objects (background tilemap modes and
+    /// boss arenas) or the height is unknown.
+    pub fn for_level(mode: u8, rows: usize) -> Option<Self> {
         match mode {
-            0x01..=0x04 | 0x0F | 0x1F => Some(Self::Horizontal),
+            0x01..=0x04 | 0x0F | 0x1F => {
+                let total = max_screens(rows)?;
+                let layer1 = total.div_ceil(2);
+                Some(Self::Horizontal {
+                    base: layer1 * rows * SCREEN_COLS,
+                    rows,
+                    screens: total - layer1,
+                })
+            }
             0x05..=0x08 => Some(Self::Vertical),
             _ => None,
         }
@@ -152,8 +218,12 @@ impl Layer2Objects {
     /// buffer.
     pub fn offset(self, x: usize, y: usize) -> Option<usize> {
         match self {
-            Self::Horizontal => (x / SCREEN_COLS < 16 && y < SCREEN_ROWS).then(|| {
-                0x1B00 + (x / SCREEN_COLS) * SCREEN_LEN + y * SCREEN_COLS + x % SCREEN_COLS
+            Self::Horizontal {
+                base,
+                rows,
+                screens,
+            } => (x / SCREEN_COLS < screens && y < rows).then(|| {
+                base + (x / SCREEN_COLS) * rows * SCREEN_COLS + y * SCREEN_COLS + x % SCREEN_COLS
             }),
             Self::Vertical => (x < 32 && y / 16 < 14)
                 .then(|| 0x1C00 + (y / 16) * 0x200 + (x / 16) * 0x100 + (y % 16) * 16 + x % 16),
@@ -412,14 +482,18 @@ impl LevelTiles {
     }
 
     /// How this level's layer 2 objects are laid out, if it has any.
-    /// Unknown for horizontal levels with an expanded height: their
-    /// layer 1 screens fill the planes, so the layer 2 objects live
-    /// somewhere this crate does not know yet.
     pub fn layer2_objects(&self) -> Option<Layer2Objects> {
-        if self.layer2_tilemap.is_some() || (!self.vertical && self.rows != SCREEN_ROWS) {
+        if self.layer2_tilemap.is_some() {
             return None;
         }
-        Layer2Objects::for_level_mode(self.level_mode)
+        // Modes 3 and 4 pair a vertical layer 1 with a vanilla horizontal
+        // layer 2.
+        let rows = if self.vertical {
+            SCREEN_ROWS
+        } else {
+            self.rows
+        };
+        Layer2Objects::for_level(self.level_mode, rows)
     }
 
     /// Map16 tile number of the layer 2 object at a level-wide position.
@@ -1204,6 +1278,29 @@ mod sprite_capture_tests {
         let oam = oam_with(&[(0, 1, 1, 1, 0, 0), (100, 2, 2, 2, 0, 0)], 100);
         let got: Vec<u8> = screen_objects(&oam, sizes).iter().map(|o| o.2).collect();
         assert_eq!(got, [2, 1]);
+    }
+
+    #[test]
+    fn layer2_objects_start_after_layer_1s_share_of_the_screens() {
+        let horizontal = |rows: usize| match Layer2Objects::for_level(0x02, rows) {
+            Some(Layer2Objects::Horizontal {
+                base,
+                rows,
+                screens,
+            }) => (base, rows, screens),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(horizontal(27), (0x1B00, 27, 16));
+        assert_eq!(horizontal(47), (0x1D60, 47, 9)); // 19 screens: 10 + 9
+        assert_eq!(horizontal(74), (0x1BC0, 74, 6));
+        assert_eq!(horizontal(298), (0x2540, 298, 1));
+        assert_eq!(horizontal(448), (0x1C00, 448, 1));
+        assert_eq!(Layer2Objects::for_level(0x02, 50), None);
+        assert_eq!(Layer2Objects::for_level(0x00, 27), None);
+        let layout = Layer2Objects::for_level(0x01, 47).unwrap();
+        assert_eq!(layout.offset(17, 3), Some(0x1D60 + 0x2F0 + 3 * 16 + 1));
+        assert_eq!(layout.offset(9 * 16, 0), None);
+        assert_eq!(layout.offset(0, 47), None);
     }
 
     #[test]

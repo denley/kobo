@@ -367,6 +367,13 @@ Windows, and macOS. Keep all three green.
   `rows * 16` bytes; layer 1 objects are otherwise the vanilla format plus screen jumps
   (extended object `01`, and `03` for mode `$1C`). `tests/sprite_lists.rs` checks that
   sprites in expanded levels stay inside the level, tying the sprite Y jumps to this.
+  A level with layer 2 objects splits the screens its height allows (`expand::LEVEL_SIZES`)
+  between the layers: layer 1 takes the first half rounded up, and layer 2 starts right
+  after it with the rest (47 rows: 19 screens, layer 2 from `0x1D60`; 298 rows: 3, from
+  `0x2540`). Vanilla's 27 rows and 32 screens give the same `0x1B00`. Lunar Magic's
+  dynamic tilemap upload (`$1F8000`, 20 unrolled column slots per layer, reading from the
+  row above the camera) was traced to find this, and its BG2 tilemap cells agree with
+  `LevelTiles::layer2_object_tile` on every corpus level checked.
 - Custom level palettes: 3-byte pointers at `$0EF600` per level to `$202` bytes (back area
   colour, then 256 colours); `$000000`/`$FFFFFF` = none. Game mode `$12` loads them itself.
 - ExGFX and Lunar Magic's 4bpp re-inserted GFX are handled by the game's own upload code, so
@@ -406,9 +413,6 @@ Windows, and macOS. Keep all three green.
   Bill shooters, generators, Lakitu) is not what a player sees. Custom sprite loaders run
   as ROM code, but nothing has checked PIXI or Lunar Magic 3 sprite output yet. Boss arenas
   show the OAM of the first drawing pass instead.
-- Layer 2 objects in Lunar Magic 3 levels with an expanded height are not drawn: the taller
-  layer 1 screens fill the planes, and where the expanded format keeps layer 2 is unknown.
-  `LevelTiles::layer2_objects` returns `None` for them.
 - `GFX27`'s layout is unknown; `GFX32`/`GFX33` are not handled by the GFX tooling.
 
 ## Open decisions
