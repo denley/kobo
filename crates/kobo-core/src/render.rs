@@ -8,7 +8,7 @@
 use crate::gfx::{self, Bpp, GfxError, Tile8};
 use crate::image::RgbImage;
 use crate::map16::{Map16Table, Map16Tile, Tile8Ref};
-use crate::palette::Palette;
+use crate::palette::{Color15, Palette};
 use crate::rom::Rom;
 
 /// Number of 8x8 tiles addressable by a tilemap word.
@@ -82,15 +82,23 @@ pub fn draw_tile8(
     flip_x: bool,
     flip_y: bool,
 ) {
-    draw_tile8_prio(img, None, x, y, tile, row, flip_x, flip_y);
+    for (ty, line) in tile.pixels.iter().enumerate() {
+        for (tx, &px) in line.iter().enumerate() {
+            if px == 0 {
+                continue;
+            }
+            let dx = if flip_x { 7 - tx } else { tx } as u32;
+            let dy = if flip_y { 7 - ty } else { ty } as u32;
+            img.put(x + dx, y + dy, row[px as usize]);
+        }
+    }
 }
 
-/// Per-pixel stacking order of what the level image holds, in Mode 1
-/// terms: layer 3 low priority (1), layer 3 high (3), layer 2 low (5),
-/// layer 1 low (6), layer 2 high (8), layer 1 high (9). Objects with
-/// priority 0-3 slot in at 2, 4, 7, and 10. With the BG3 priority bit,
-/// high-priority layer 3 moves in front of everything (11).
-pub type Priorities = Vec<u8>;
+/// Stacking order of the layers in Mode 1 terms: layer 3 low priority
+/// (1), layer 3 high (3), layer 2 low (5), layer 1 low (6), layer 2 high
+/// (8), layer 1 high (9). Objects with priority 0-3 slot in at 2, 4, 7,
+/// and 10. With the BG3 priority bit, high-priority layer 3 moves in
+/// front of everything (11). Zero is transparent.
 pub const LAYER3_LOW: u8 = 1;
 pub const LAYER3_HIGH: u8 = 3;
 pub const LAYER2_LOW: u8 = 5;
@@ -100,34 +108,165 @@ pub const LAYER1_HIGH: u8 = 9;
 pub const LAYER3_FRONT: u8 = 11;
 pub const OBJECT_PRIORITIES: [u8; 4] = [2, 4, 7, 10];
 
-/// `draw_tile8`, also recording `value` in the priority buffer for every
-/// pixel drawn.
+/// One pixel of one layer: its CGRAM colour (0 is transparent, as on the
+/// PPU) and its stacking priority.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct LayerPixel {
+    pub color: u8,
+    pub priority: u8,
+}
+
+/// Indices of the layers in [`LevelLayers`].
+pub const BG1: usize = 0;
+pub const BG2: usize = 1;
+pub const BG3: usize = 2;
+pub const OBJ: usize = 3;
+/// Each layer's bit in `TM`, `TS`, and `CGADSUB`.
+const LAYER_BITS: [u8; 4] = [0x01, 0x02, 0x04, 0x10];
+/// The backdrop's bit in `CGADSUB`.
+const BACKDROP_BIT: u8 = 0x20;
+/// Objects using sprite palettes 0-3 never take part in colour math.
+const FIRST_MATH_OBJECT_COLOR: u8 = 0xC0;
+
+/// A level drawn layer by layer, before the PPU's screen designation and
+/// colour math combine the layers into a picture. Layer 1, layer 2,
+/// layer 3, and the objects each keep their own pixels, so the same
+/// buffers serve as the main screen and the subscreen.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct LevelLayers {
+    pub width: u32,
+    pub height: u32,
+    pub layers: [Vec<LayerPixel>; 4],
+}
+
+impl LevelLayers {
+    pub fn new(width: u32, height: u32) -> Self {
+        let len = (width * height) as usize;
+        Self {
+            width,
+            height,
+            layers: std::array::from_fn(|_| vec![LayerPixel::default(); len]),
+        }
+    }
+
+    fn index(&self, x: i32, y: i32) -> Option<usize> {
+        (x >= 0 && y >= 0 && x < self.width as i32 && y < self.height as i32)
+            .then(|| (y as u32 * self.width + x as u32) as usize)
+    }
+
+    /// Sets a background layer pixel unless a higher-priority one is there.
+    fn put(&mut self, layer: usize, at: usize, color: u8, priority: u8) {
+        let p = &mut self.layers[layer][at];
+        if color != 0 && priority > p.priority {
+            *p = LayerPixel { color, priority };
+        }
+    }
+
+    /// Sets an object pixel: the first opaque object in OAM order wins,
+    /// whatever its priority.
+    fn put_object(&mut self, at: usize, color: u8, priority: u8) {
+        let p = &mut self.layers[OBJ][at];
+        if color != 0 && p.color == 0 {
+            *p = LayerPixel { color, priority };
+        }
+    }
+
+    /// The topmost opaque pixel among the layers enabled in `mask` (a `TM`
+    /// or `TS` value), with its layer index.
+    fn pick(&self, mask: u8, at: usize) -> Option<(usize, LayerPixel)> {
+        let mut best: Option<(usize, LayerPixel)> = None;
+        for (layer, bit) in LAYER_BITS.iter().enumerate() {
+            if mask & bit == 0 {
+                continue;
+            }
+            let p = self.layers[layer][at];
+            if p.color != 0 && best.is_none_or(|(_, b)| p.priority > b.priority) {
+                best = Some((layer, p));
+            }
+        }
+        best
+    }
+
+    /// Combines the layers the way the PPU does: the main screen shows the
+    /// topmost enabled layer or the backdrop (CGRAM colour 0), and pixels
+    /// whose layer is enabled in `CGADSUB` are added to or subtracted from
+    /// the subscreen's topmost pixel, or the fixed colour where the
+    /// subscreen is transparent (in which case the result is not halved).
+    /// Objects on sprite palettes 0-3 are exempt. No colour window is
+    /// modelled.
+    pub fn compose(&self, palette: &Palette, screen: &crate::video::Screen) -> RgbImage {
+        let mut img = RgbImage::new(self.width, self.height);
+        let prevented = screen.prevents_math();
+        let clipped = screen.clips_to_black();
+        let add_subscreen = screen.math_select & 0x02 != 0;
+        let halve = screen.color_math & 0x40 != 0;
+        let subtract = screen.color_math & 0x80 != 0;
+        for (at, out) in img.pixels.iter_mut().enumerate() {
+            let (color, bit, exempt) = match self.pick(screen.main, at) {
+                Some((layer, p)) => (
+                    palette.colors[p.color as usize],
+                    LAYER_BITS[layer],
+                    layer == OBJ && p.color < FIRST_MATH_OBJECT_COLOR,
+                ),
+                None => (palette.colors[0], BACKDROP_BIT, false),
+            };
+            let main = if clipped { Color15(0) } else { color };
+            let math = screen.color_math & bit != 0 && !exempt && !prevented;
+            let result = if math {
+                let (operand, halve) = match (add_subscreen, self.pick(screen.sub, at)) {
+                    (true, Some((_, p))) => (palette.colors[p.color as usize], halve && !clipped),
+                    (true, None) => (screen.fixed_color, false),
+                    (false, _) => (screen.fixed_color, halve && !clipped),
+                };
+                color_math(main, operand, subtract, halve)
+            } else {
+                main
+            };
+            *out = result.to_rgb8();
+        }
+        img
+    }
+}
+
+/// Adds or subtracts two colours per channel in the PPU's five bits,
+/// optionally halving the result, clamped to the channel range.
+fn color_math(main: Color15, operand: Color15, subtract: bool, halve: bool) -> Color15 {
+    let channel = |m: u8, o: u8| -> u8 {
+        let (m, o) = (m as i32, o as i32);
+        let v = if subtract { (m - o).max(0) } else { m + o };
+        let v = if halve { v / 2 } else { v };
+        v.min(31) as u8
+    };
+    Color15::from_rgb5(
+        channel(main.r(), operand.r()),
+        channel(main.g(), operand.g()),
+        channel(main.b(), operand.b()),
+    )
+}
+
+/// Draws one 8x8 tile into a background layer: pixel value `p` becomes
+/// CGRAM colour `color_base + p`.
 #[allow(clippy::too_many_arguments)]
-fn draw_tile8_prio(
-    img: &mut RgbImage,
-    prio: Option<(&mut [u8], u8)>,
-    x: u32,
-    y: u32,
+fn draw_tile8_layer(
+    layers: &mut LevelLayers,
+    layer: usize,
+    x: i32,
+    y: i32,
     tile: &Tile8,
-    row: &[[u8; 3]; 16],
+    color_base: u8,
+    priority: u8,
     flip_x: bool,
     flip_y: bool,
 ) {
-    let mut prio = prio;
     for (ty, line) in tile.pixels.iter().enumerate() {
         for (tx, &px) in line.iter().enumerate() {
             if px == 0 {
                 continue;
             }
-            let dx = if flip_x { 7 - tx } else { tx } as u32;
-            let dy = if flip_y { 7 - ty } else { ty } as u32;
-            let (px_x, px_y) = (x + dx, y + dy);
-            if px_x < img.width && px_y < img.height {
-                let at = (px_y * img.width + px_x) as usize;
-                img.pixels[at] = row[px as usize];
-                if let Some((buf, value)) = prio.as_mut() {
-                    buf[at] = *value;
-                }
+            let dx = if flip_x { 7 - tx } else { tx } as i32;
+            let dy = if flip_y { 7 - ty } else { ty } as i32;
+            if let Some(at) = layers.index(x + dx, y + dy) {
+                layers.put(layer, at, color_base + px, priority);
             }
         }
     }
@@ -146,44 +285,33 @@ pub fn draw_tile_ref(
     draw_tile8(img, x, y, tiles.get(r.tile()), &row, r.flip_x(), r.flip_y());
 }
 
-/// One drawing pass over a layer: which priority bit it draws, and the
-/// palette bits the game's upload routine ORs into that layer's tilemap
-/// words.
-#[derive(Clone, Copy)]
-struct LayerPass {
-    priority: bool,
-    palette_mask: u8,
-}
-
-/// Draws the quadrants of a 16x16 tile that belong to `pass`, recording
-/// `prio` for their pixels.
+/// Draws a 16x16 tile into a layer at pixel position (`x`, `y`), each
+/// quadrant at the low or high priority its priority bit selects.
+/// `palette_mask` is ORed into the palette row, as the game's upload
+/// routine does for layer 2 objects in object tileset 3.
 #[allow(clippy::too_many_arguments)]
 fn draw_map16_layer(
-    img: &mut RgbImage,
-    priorities: &mut [u8],
-    prio: u8,
-    x: u32,
-    y: u32,
+    layers: &mut LevelLayers,
+    layer: usize,
+    priorities: [u8; 2],
+    x: i32,
+    y: i32,
     tile: &Map16Tile,
     tiles: &LayerTiles,
-    palette: &Palette,
-    pass: LayerPass,
+    palette_mask: u8,
 ) {
     for qy in 0..2 {
         for qx in 0..2 {
             let r = tile.quadrant(qx, qy);
-            if r.priority() != pass.priority {
-                continue;
-            }
-            let row = palette.row_rgb8((r.palette() | pass.palette_mask) as usize & 7);
-            let (px, py) = (x + 8 * qx as u32, y + 8 * qy as u32);
-            draw_tile8_prio(
-                img,
-                Some((priorities, prio)),
-                px,
-                py,
+            let color_base = ((r.palette() | palette_mask) & 7) * 16;
+            draw_tile8_layer(
+                layers,
+                layer,
+                x + 8 * qx as i32,
+                y + 8 * qy as i32,
                 tiles.get(r.tile()),
-                &row,
+                color_base,
+                priorities[r.priority() as usize],
                 r.flip_x(),
                 r.flip_y(),
             );
@@ -229,172 +357,106 @@ pub fn map16_sheet(
     img
 }
 
-/// Renders a level's layer 1 tile grid, its layer 2 (background tilemap
-/// or objects), and its layer 3 over the back area colour. Layers
-/// interleave the way Mode 1 stacks them: layer 3 low priority, layer 3
-/// high priority, layer 2 low priority, layer 1 low priority, layer 2
-/// high priority, layer 1 high priority.
+/// Renders a level: its layer 1 tile grid, its layer 2 (background
+/// tilemap or objects), and its layer 3, combined by the screen
+/// designation and colour math the level set up. Sprites are left out;
+/// see [`level_layers`] and [`draw_sprite_scene`] to include them.
 pub fn level_image(
     tiles: &crate::expand::LevelTiles,
     layer_tiles: &LayerTiles,
     palette: &Palette,
-    background: [u8; 3],
 ) -> RgbImage {
-    level_render(tiles, layer_tiles, palette, background).0
+    compose_level(tiles, &level_layers(tiles, layer_tiles), palette)
 }
 
-/// `level_image` plus the stacking priority of every pixel, for drawing
-/// sprites into the image afterwards. Boss arenas return no priorities:
-/// their objects are already part of the image.
-pub fn level_render(
-    tiles: &crate::expand::LevelTiles,
-    layer_tiles: &LayerTiles,
-    palette: &Palette,
-    background: [u8; 3],
-) -> (RgbImage, Priorities) {
-    if let Some(scene) = &tiles.boss_scene {
-        return (
-            boss_image(scene, &tiles.vram, palette, background),
-            Vec::new(),
-        );
+/// Draws a level's background layers, ready for sprites to be added
+/// before [`compose_level`] turns them into a picture. Boss arenas have
+/// their own drawing path and get empty layers.
+pub fn level_layers(tiles: &crate::expand::LevelTiles, layer_tiles: &LayerTiles) -> LevelLayers {
+    if tiles.boss_scene.is_some() {
+        return LevelLayers::new(256, 224);
     }
     let (w, h) = tiles.size();
-    let mut img = RgbImage::new(w as u32 * 16, h as u32 * 16);
-    img.pixels.fill(background);
-    let mut priorities = vec![0u8; img.pixels.len()];
-    draw_layers(
-        &mut img,
-        &mut priorities,
-        tiles,
-        layer_tiles,
-        palette,
-        true,
-        true,
-    );
+    let mut layers = LevelLayers::new(w as u32 * 16, h as u32 * 16);
+    draw_layer1(&mut layers, tiles, layer_tiles);
+    draw_layer2(&mut layers, tiles, layer_tiles);
     if let Some(layer3) = &tiles.layer3 {
-        // Colour math adds the subscreen's pixel to layer 3's: normally
-        // layer 2 over the back area colour, which the game keeps on the
-        // subscreen and shows through the transparent main screen.
-        let sub = layer3.blends().then(|| {
-            let mut sub = RgbImage::new(img.width, img.height);
-            sub.pixels.fill(background);
-            let mut unused = vec![0u8; sub.pixels.len()];
-            draw_layers(
-                &mut sub,
-                &mut unused,
-                tiles,
-                layer_tiles,
-                palette,
-                layer3.sub_screen & 0x01 != 0,
-                layer3.sub_screen & 0x02 != 0,
-            );
-            sub
-        });
-        draw_layer3(
-            &mut img,
-            &mut priorities,
-            layer3,
+        draw_layer3(&mut layers, layer3, &tiles.vram);
+    }
+    layers
+}
+
+/// Turns drawn layers into the picture the level shows. Boss arenas are
+/// rendered from their captured video-mode bands instead.
+pub fn compose_level(
+    tiles: &crate::expand::LevelTiles,
+    layers: &LevelLayers,
+    palette: &Palette,
+) -> RgbImage {
+    match &tiles.boss_scene {
+        Some(scene) => boss_image(
+            scene,
             &tiles.vram,
             palette,
-            sub.as_ref(),
-        );
+            tiles.screen.fixed_color.to_rgb8(),
+        ),
+        None => layers.compose(palette, &tiles.screen),
     }
-    (img, priorities)
 }
 
-/// Draws the requested layers of a level's tile grid, interleaved the way
-/// Mode 1 stacks them: layer 2 low priority, layer 1 low priority, layer 2
-/// high priority, layer 1 high priority.
-fn draw_layers(
-    img: &mut RgbImage,
-    priorities: &mut [u8],
+/// Draws the layer 1 tile grid.
+fn draw_layer1(
+    layers: &mut LevelLayers,
     tiles: &crate::expand::LevelTiles,
     layer_tiles: &LayerTiles,
-    palette: &Palette,
-    layer1: bool,
-    layer2: bool,
 ) {
-    let map16 = &tiles.map16;
     let (w, h) = tiles.size();
-    for priority in [false, true] {
-        if layer2 {
-            draw_layer2(img, priorities, tiles, layer_tiles, palette, priority);
-        }
-        if !layer1 {
-            continue;
-        }
-        let prio = if priority { LAYER1_HIGH } else { LAYER1_LOW };
-        for y in 0..h {
-            for x in 0..w {
-                if let Some(tile) = map16.get(&tiles.tile_at(x, y)) {
-                    let (px, py) = ((x * 16) as u32, (y * 16) as u32);
-                    let pass = LayerPass {
-                        priority,
-                        palette_mask: 0,
-                    };
-                    draw_map16_layer(
-                        img,
-                        priorities,
-                        prio,
-                        px,
-                        py,
-                        tile,
-                        layer_tiles,
-                        palette,
-                        pass,
-                    );
-                }
+    for y in 0..h {
+        for x in 0..w {
+            if let Some(tile) = tiles.map16_at(tiles.tile_at(x, y), x, y) {
+                draw_map16_layer(
+                    layers,
+                    BG1,
+                    [LAYER1_LOW, LAYER1_HIGH],
+                    (x * 16) as i32,
+                    (y * 16) as i32,
+                    tile,
+                    layer_tiles,
+                    0,
+                );
             }
         }
     }
 }
 
 /// Draws layer 3 from the captured tilemap: where the game showed it on
-/// the entry screen, carried across the level at its measured scroll
-/// rate. Along an axis the layer does not scroll it keeps its screen
-/// position: horizontally the entry view repeats every 256 pixels, since
-/// every screen of the level shows the same fixed backdrop; vertically it
-/// stays inside the entry screen's 224-pixel band, where a tide sits
-/// while the camera rests. Pixels blend with the subscreen image when the
-/// level enables colour math for layer 3 (the fish and fog backgrounds).
-fn draw_layer3(
-    img: &mut RgbImage,
-    priorities: &mut [u8],
-    layer3: &crate::video::Layer3,
-    vram: &[u8],
-    palette: &Palette,
-    sub: Option<&RgbImage>,
-) {
-    let front = layer3.alone_on_main();
+/// the entry screen, continued unstretched across the level along the
+/// axes it scrolls on (a parallax layer keeps the entry screen's phase).
+/// Along an axis the layer does not scroll it keeps its screen position:
+/// horizontally the entry view repeats every 256 pixels, since every
+/// screen of the level shows the same fixed backdrop; vertically it stays
+/// inside the entry screen's 224-pixel band, where a tide sits while the
+/// camera rests.
+fn draw_layer3(layers: &mut LevelLayers, layer3: &crate::video::Layer3, vram: &[u8]) {
     let priority_bit = layer3.high_priority_in_front();
-    for ly in 0..img.height {
+    for ly in 0..layers.height {
         let Some(ty) = layer3_axis(layer3, 1, ly as i32) else {
             continue;
         };
-        for lx in 0..img.width {
+        for lx in 0..layers.width {
             let Some(tx) = layer3_axis(layer3, 0, lx as i32) else {
                 continue;
             };
             let Some((color, high)) = layer3_pixel(vram, layer3, tx, ty) else {
                 continue;
             };
-            let prio = if front || (high && priority_bit) {
-                LAYER3_FRONT
-            } else if high {
-                LAYER3_HIGH
-            } else {
-                LAYER3_LOW
+            let priority = match (high, priority_bit) {
+                (true, true) => LAYER3_FRONT,
+                (true, false) => LAYER3_HIGH,
+                (false, _) => LAYER3_LOW,
             };
-            let at = (ly * img.width + lx) as usize;
-            if prio <= priorities[at] {
-                continue;
-            }
-            let color = palette.colors[color as usize];
-            img.pixels[at] = match sub {
-                Some(sub) => color_math(color, sub.pixels[at], layer3.color_math),
-                None => color.to_rgb8(),
-            };
-            priorities[at] = prio;
+            let at = (ly * layers.width + lx) as usize;
+            layers.put(BG3, at, color, priority);
         }
     }
 }
@@ -404,9 +466,8 @@ fn draw_layer3(
 fn layer3_axis(layer3: &crate::video::Layer3, axis: usize, at: i32) -> Option<i32> {
     let position = layer3.position[axis] as i32;
     let offset = at - layer3.camera[axis] as i32;
-    let rate = layer3.scroll_per_16[axis];
-    if rate != 0 {
-        Some(position + (offset * rate).div_euclid(16))
+    if layer3.scroll_per_16[axis] != 0 {
+        Some(position + offset)
     } else if axis == 0 {
         Some(position + offset.rem_euclid(256))
     } else {
@@ -439,52 +500,20 @@ fn layer3_pixel(vram: &[u8], layer3: &crate::video::Layer3, x: i32, y: i32) -> O
     (color != 0).then_some((color + tile.palette() * 4, tile.priority()))
 }
 
-/// Applies `CGADSUB` colour math to a main-screen colour with the
-/// subscreen pixel behind it: add or subtract per channel in the PPU's
-/// five bits, optionally halved, clamped.
-fn color_math(main: crate::palette::Color15, sub: [u8; 3], cgadsub: u8) -> [u8; 3] {
-    let main = [main.r(), main.g(), main.b()];
-    let mut out = [0u8; 3];
-    for (channel, out) in out.iter_mut().enumerate() {
-        let (m, s) = (main[channel] as i32, (sub[channel] >> 3) as i32);
-        let mut v = if cgadsub & 0x80 != 0 {
-            (m - s).max(0)
-        } else {
-            m + s
-        };
-        if cgadsub & 0x40 != 0 {
-            v /= 2;
-        }
-        *out = v.min(31) as u8;
-    }
-    crate::palette::Color15::from_rgb5(out[0], out[1], out[2]).to_rgb8()
-}
-
-/// Draws captured sprite objects into a level image, front to back,
-/// honouring their OAM priority against the layers and each other.
-pub fn draw_sprite_scene(
-    img: &mut RgbImage,
-    priorities: &[u8],
-    scene: &crate::video::SpriteScene,
-    vram: &[u8],
-    palette: &Palette,
-) {
-    let colors = palette.colors.map(|color| color.to_rgb8());
+/// Draws captured sprite objects into the object layer, front to back:
+/// the first opaque object at a pixel wins, and carries its OAM priority
+/// against the background layers.
+pub fn draw_sprite_scene(layers: &mut LevelLayers, scene: &crate::video::SpriteScene, vram: &[u8]) {
     let sizes = crate::expand::object_sizes(scene.object_select);
-    let mut covered = vec![false; img.pixels.len()];
     for object in &scene.objects {
         let (width, height) = sizes[object.large as usize];
         let priority = OBJECT_PRIORITIES[(object.attr >> 4 & 3) as usize];
+        let color_base = 128 + (object.attr >> 1 & 7) * 16;
         for dy in 0..height {
             for dx in 0..width {
-                let (x, y) = (object.x + dx, object.y + dy);
-                if x < 0 || y < 0 || x >= img.width as i32 || y >= img.height as i32 {
+                let Some(at) = layers.index(object.x + dx, object.y + dy) else {
                     continue;
-                }
-                let at = (y as u32 * img.width + x as u32) as usize;
-                if covered[at] {
-                    continue;
-                }
+                };
                 let Some(color) = object_pixel(
                     vram,
                     scene.object_select,
@@ -497,11 +526,7 @@ pub fn draw_sprite_scene(
                 ) else {
                     continue;
                 };
-                covered[at] = true;
-                if priority > priorities[at] {
-                    img.pixels[at] =
-                        colors[128 + (object.attr as usize >> 1 & 7) * 16 + color as usize];
-                }
+                layers.put_object(at, color_base + color, priority);
             }
         }
     }
@@ -542,9 +567,12 @@ fn object_pixel(
     (color != 0).then_some(color)
 }
 
-/// Draws the quadrants of layer 2 with the given priority: the
-/// background tilemap repeated every two screens, or the layer 2 objects
-/// from their own region of the tile grid.
+/// Draws layer 2 where the entry camera sees it: the background tilemap
+/// repeated every two screens, or the layer 2 objects from their own
+/// region of the tile grid, displaced from the layer 1 grid by the
+/// difference between the layer 2 and layer 1 positions at entry (layer 2
+/// scroll settings offset the layer or move it at another rate). Beyond
+/// the entry screen the layer continues unstretched.
 ///
 /// A vertical level's background is the same two-screen-wide tilemap
 /// (mode `$0A` keeps layer 2 horizontal: `$5B` bit 1 clear) spanning the
@@ -552,75 +580,54 @@ fn object_pixel(
 /// 27 rows cover the whole descent. A static render cannot reproduce
 /// that parallax, so the background is tiled down the level instead.
 fn draw_layer2(
-    img: &mut RgbImage,
-    priorities: &mut [u8],
+    layers: &mut LevelLayers,
     tiles: &crate::expand::LevelTiles,
     layer_tiles: &LayerTiles,
-    palette: &Palette,
-    priority: bool,
 ) {
-    let (w, h) = tiles.size();
-    let prio = if priority { LAYER2_HIGH } else { LAYER2_LOW };
-    if tiles.layer2_tilemap.is_some() {
-        // Boss arenas and dark rooms sharing their tilemap do not display
-        // the decoded background buffer.
-        if matches!(tiles.level_mode, 0x09 | 0x0B | 0x0F | 0x10) {
-            return;
-        }
-        let rows = tiles.layer2_bg_rows().min(crate::expand::SCREEN_ROWS);
-        let pass = LayerPass {
-            priority,
-            palette_mask: 0,
-        };
-        for y in 0..h {
-            for x in 0..w {
-                let (screen, col) = (
-                    x / crate::expand::SCREEN_COLS,
-                    x % crate::expand::SCREEN_COLS,
-                );
-                let n = tiles.layer2_bg_tile(screen, col, y % rows).unwrap();
-                if let Some(tile) = tiles.bg_map16.get(n as usize - 0x200) {
-                    let (px, py) = ((x * 16) as u32, (y * 16) as u32);
-                    draw_map16_layer(
-                        img,
-                        priorities,
-                        prio,
-                        px,
-                        py,
-                        tile,
-                        layer_tiles,
-                        palette,
-                        pass,
-                    );
-                }
-            }
-        }
+    let priorities = [LAYER2_LOW, LAYER2_HIGH];
+    // Boss arenas and dark rooms sharing their tilemap do not display the
+    // decoded background buffer.
+    let background = tiles.layer2_tilemap.is_some();
+    if background && matches!(tiles.level_mode, 0x09 | 0x0B | 0x0F | 0x10) {
         return;
     }
-    if tiles.layer2_objects().is_none() {
+    if !background && tiles.layer2_objects().is_none() {
         return;
     }
-    let pass = LayerPass {
-        priority,
-        palette_mask: tiles.layer2_palette_mask(),
+    let palette_mask = if background {
+        0
+    } else {
+        tiles.layer2_palette_mask()
     };
-    for y in 0..h {
-        for x in 0..w {
-            let Some(n) = tiles.layer2_object_tile(x, y) else {
-                continue;
+    let rows = tiles.layer2_bg_rows().min(crate::expand::SCREEN_ROWS) as i32;
+    let [dx, dy] = tiles.layer2_offset();
+    // Layer 2 tile (tx, ty) covers level pixels from (tx * 16 + dx, ty * 16 + dy).
+    let first = |d: i32| (-d).div_euclid(16);
+    let last = |d: i32, extent: u32| (extent as i32 - d).div_euclid(16);
+    for ty in first(dy)..=last(dy, layers.height) {
+        for tx in first(dx)..=last(dx, layers.width) {
+            let tile = if background {
+                let (col, row) = (tx.rem_euclid(32) as usize, ty.rem_euclid(rows) as usize);
+                let n = tiles.layer2_bg_tile(col / 16, col % 16, row).unwrap();
+                tiles.bg_map16.get(n as usize - 0x200)
+            } else {
+                let (Ok(x), Ok(y)) = (usize::try_from(tx), usize::try_from(ty)) else {
+                    continue;
+                };
+                tiles
+                    .layer2_object_tile(x, y)
+                    .and_then(|n| tiles.map16_at(n, x, y))
             };
-            if let Some(tile) = tiles.map16.get(&n) {
-                let (px, py) = ((x * 16) as u32, (y * 16) as u32);
+            if let Some(tile) = tile {
                 draw_map16_layer(
-                    img,
+                    layers,
+                    BG2,
                     priorities,
-                    prio,
-                    px,
-                    py,
+                    tx * 16 + dx,
+                    ty * 16 + dy,
                     tile,
                     layer_tiles,
-                    palette,
-                    pass,
+                    palette_mask,
                 );
             }
         }
@@ -929,7 +936,7 @@ mod video_tests {
     }
 
     #[test]
-    fn layer3_axes_follow_the_measured_scroll_rate_or_keep_the_screen() {
+    fn layer3_axes_continue_the_entry_view_or_keep_the_screen() {
         let mut layer3 = crate::video::Layer3 {
             position: [100, 64],
             camera: [32, 192],
@@ -937,7 +944,7 @@ mod video_tests {
             ..Default::default()
         };
         assert_eq!(layer3_axis(&layer3, 0, 32), Some(100));
-        assert_eq!(layer3_axis(&layer3, 0, 48), Some(108));
+        assert_eq!(layer3_axis(&layer3, 0, 48), Some(116)); // unstretched
         assert_eq!(layer3_axis(&layer3, 0, 31), Some(99));
         // A vertically fixed layer stays inside the entry screen's band.
         assert_eq!(layer3_axis(&layer3, 1, 192), Some(64));
@@ -954,14 +961,103 @@ mod video_tests {
 
     #[test]
     fn color_math_adds_subtracts_and_halves_in_five_bits() {
-        use crate::palette::Color15;
         let main = Color15::from_rgb5(31, 0, 20);
-        let sub = Color15::from_rgb5(0, 31, 20).to_rgb8();
-        assert_eq!(color_math(main, sub, 0x24), [255, 255, 255]);
-        assert_eq!(color_math(main, sub, 0xA4), [255, 0, 0]);
+        let sub = Color15::from_rgb5(0, 31, 20);
         assert_eq!(
-            color_math(main, sub, 0x64),
-            Color15::from_rgb5(15, 15, 20).to_rgb8()
+            color_math(main, sub, false, false),
+            Color15::from_rgb5(31, 31, 31)
+        );
+        assert_eq!(
+            color_math(main, sub, true, false),
+            Color15::from_rgb5(31, 0, 0)
+        );
+        assert_eq!(
+            color_math(main, sub, false, true),
+            Color15::from_rgb5(15, 15, 20)
+        );
+        assert_eq!(
+            color_math(main, sub, true, true),
+            Color15::from_rgb5(15, 0, 0)
+        );
+    }
+
+    /// One pixel per column: layer 1 (colour 1, red) at column 1, layer 2
+    /// (colour 2, blue) at columns 1 and 2, an object on sprite palette 0
+    /// (colour 129, green) at column 3 and one on palette 4 (colour 193,
+    /// also green) at column 4, all low priority; nothing at column 0.
+    fn layers() -> (LevelLayers, Palette) {
+        let mut layers = LevelLayers::new(5, 1);
+        layers.put(BG1, 1, 1, LAYER1_LOW);
+        layers.put(BG2, 1, 2, LAYER2_LOW);
+        layers.put(BG2, 2, 2, LAYER2_LOW);
+        layers.put_object(3, 129, OBJECT_PRIORITIES[0]);
+        layers.put_object(4, 193, OBJECT_PRIORITIES[0]);
+        let mut palette = Palette::default();
+        palette.colors[1] = Color15::from_rgb5(31, 0, 0);
+        palette.colors[2] = Color15::from_rgb5(0, 0, 31);
+        palette.colors[129] = Color15::from_rgb5(0, 31, 0);
+        palette.colors[193] = Color15::from_rgb5(0, 31, 0);
+        (layers, palette)
+    }
+
+    fn rgb5(image: &RgbImage) -> Vec<[u8; 3]> {
+        image.pixels.iter().map(|p| p.map(|c| c >> 3)).collect()
+    }
+
+    #[test]
+    fn compose_follows_screen_designation_and_color_math() {
+        use crate::video::Screen;
+        let (layers, palette) = layers();
+        let fixed = Color15::from_rgb5(8, 8, 8);
+        // Vanilla: layer 2 on the subscreen shows through the backdrop only.
+        let screen = Screen::vanilla(fixed);
+        assert_eq!(
+            rgb5(&layers.compose(&palette, &screen)),
+            [[8, 8, 8], [31, 0, 0], [0, 0, 31], [0, 31, 0], [0, 31, 0]]
+        );
+        // Half-brightness modes: objects and the backdrop halve with layer
+        // 2, except objects on palettes 0-3 and pixels over a transparent
+        // subscreen, which take the fixed colour unhalved.
+        let half = Screen {
+            color_math: 0x70,
+            ..screen
+        };
+        assert_eq!(
+            rgb5(&layers.compose(&palette, &half)),
+            [[8, 8, 8], [31, 0, 0], [0, 0, 15], [0, 31, 0], [8, 31, 8]]
+        );
+        // The spotlight rooms subtract the fixed colour from everything and
+        // halve, with the fixed colour as the operand; "prevent inside the
+        // colour window" prevents nothing without a window.
+        let dark = Screen {
+            main: 0x17,
+            sub: 0x00,
+            color_math: 0xFF,
+            math_select: 0x20,
+            fixed_color: fixed,
+        };
+        assert_eq!(
+            rgb5(&layers.compose(&palette, &dark)),
+            [[0, 0, 0], [11, 0, 0], [0, 0, 11], [0, 31, 0], [0, 11, 0]]
+        );
+        // Clipping to black and preventing math everywhere.
+        let clipped = Screen {
+            math_select: 0xF2,
+            ..screen
+        };
+        assert_eq!(rgb5(&layers.compose(&palette, &clipped)), [[0; 3]; 5]);
+        // Level mode $1E: only layer 1 on the main screen, added to the
+        // objects and layer 2 beneath it.
+        let translucent = Screen {
+            main: 0x01,
+            sub: 0x16,
+            color_math: 0x21,
+            math_select: 0x02,
+            fixed_color: fixed,
+        };
+        assert_eq!(
+            rgb5(&layers.compose(&palette, &translucent)),
+            [[8, 8, 8], [31, 0, 31], [0, 0, 31], [0, 31, 0], [0, 31, 0]]
         );
     }
 

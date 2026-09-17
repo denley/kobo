@@ -61,32 +61,72 @@ pub struct Layer3 {
     /// `BGMODE` mirror (`$3E`): bit 3 puts high-priority layer 3 tiles
     /// in front of everything.
     pub bg_mode: u8,
-    /// `TM`/`TS` mirrors (`$0D9D`/`$0D9E`): the layers on the main and
-    /// sub screens (bit 0 layer 1, bit 1 layer 2, bit 2 layer 3, bit 4
-    /// objects).
-    pub main_screen: u8,
-    pub sub_screen: u8,
-    /// `CGADSUB` mirror (`$40`): bit 2 blends layer 3 with the subscreen
-    /// (bit 7 subtracts instead of adding, bit 6 halves the result).
-    pub color_math: u8,
 }
 
 impl Layer3 {
-    /// Whether layer 3 pixels are blended with the subscreen.
-    pub fn blends(&self) -> bool {
-        self.color_math & 0x04 != 0
-    }
-
-    /// Whether layer 3 is the only background layer on the main screen,
-    /// so it draws in front of the others whatever its tiles' priority.
-    pub fn alone_on_main(&self) -> bool {
-        self.main_screen & 0x03 == 0
-    }
-
     /// Whether high-priority tiles go in front of everything (Mode 1's
     /// BG3 priority bit).
     pub fn high_priority_in_front(&self) -> bool {
         self.bg_mode & 0x08 != 0
+    }
+}
+
+/// Screen designation and colour math as level preparation left them.
+/// The level mode tables in `LoadLevel` (`LevMainScrnTbl`, `LevSubScrnTbl`,
+/// `LevCGADSUBtable` at `$0581E0`-`$05823F`) choose them, and sprites such
+/// as the spotlight change them afterwards.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Screen {
+    /// `TM` mirror (`$0D9D`): layers on the main screen (bit 0 layer 1,
+    /// bit 1 layer 2, bit 2 layer 3, bit 4 objects).
+    pub main: u8,
+    /// `TS` mirror (`$0D9E`): layers on the subscreen.
+    pub sub: u8,
+    /// `CGADSUB` mirror (`$40`): which main-screen layers take part in
+    /// colour math (bits as above, bit 5 the backdrop), bit 6 halves the
+    /// result, bit 7 subtracts instead of adding.
+    pub color_math: u8,
+    /// `CGWSEL` mirror (`$44`): bit 1 uses the subscreen pixel as the
+    /// operand (falling back to the fixed colour where the subscreen is
+    /// transparent) instead of the fixed colour; bits 7-6 clip the main
+    /// colour to black and bits 5-4 prevent colour math, each never (0),
+    /// outside the colour window (1), inside it (2), or always (3).
+    pub math_select: u8,
+    /// `COLDATA`: the fixed colour, which the game keeps at the level's
+    /// back area colour (`$0701`).
+    pub fixed_color: crate::palette::Color15,
+}
+
+impl Screen {
+    /// The vanilla setup of most level modes: layers 1 and 3 with objects
+    /// on the main screen, layer 2 on the subscreen, added to the backdrop
+    /// and layer 3 wherever they are.
+    pub fn vanilla(fixed_color: crate::palette::Color15) -> Self {
+        Self {
+            main: 0x15,
+            sub: 0x02,
+            color_math: 0x24,
+            math_select: 0x02,
+            fixed_color,
+        }
+    }
+
+    /// Whether a `CGWSEL` window-relative setting (clip or prevent, bits
+    /// `10` = inside, `01` = outside, `11` = always) applies. No colour
+    /// window is modelled, so "inside" never applies and "outside" always
+    /// does.
+    fn window_setting_applies(setting: u8) -> bool {
+        matches!(setting & 3, 1 | 3)
+    }
+
+    /// Whether main-screen colours are forced to black before the math.
+    pub fn clips_to_black(&self) -> bool {
+        Self::window_setting_applies(self.math_select >> 6)
+    }
+
+    /// Whether colour math is switched off for every pixel.
+    pub fn prevents_math(&self) -> bool {
+        Self::window_setting_applies(self.math_select >> 4)
     }
 }
 

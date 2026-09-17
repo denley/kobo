@@ -73,6 +73,12 @@ mod ram {
     /// the camera update copies from at the start of each frame.
     pub const LAYER1_X: u32 = 0x7E_001A;
     pub const LAYER1_Y: u32 = 0x7E_001C;
+    /// `$1E`/`$20`: layer 2 position. Game mode `$11` copies all eight
+    /// bytes of `$1A`-`$21` to `$1462`-`$1469` after resolving the level
+    /// header, seeding the camera update.
+    pub const LAYER2_X: u32 = 0x7E_001E;
+    pub const LAYER2_Y: u32 = 0x7E_0020;
+    pub const LAYER_POSITIONS_LEN: u32 = 8;
     pub const NEXT_LAYER1_X: u32 = 0x7E_1462;
     pub const NEXT_LAYER1_Y: u32 = 0x7E_1464;
     /// `$55`: layer 1 scroll direction, which the sprite loader turns into
@@ -103,10 +109,11 @@ mod ram {
     pub const LAYER1_DY: u32 = 0x7E_17BC;
     /// `$9D`: sprite lock, which also pauses layer 3 autoscroll.
     pub const SPRITE_LOCK: u32 = 0x7E_009D;
-    /// `$3E`: `BGMODE` mirror; `$40`: `CGADSUB` mirror; `$0D9D`/`$0D9E`:
-    /// main and sub screen designation mirrors.
+    /// `$3E`: `BGMODE` mirror; `$40`: `CGADSUB` mirror; `$44`: `CGWSEL`
+    /// mirror; `$0D9D`/`$0D9E`: main and sub screen designation mirrors.
     pub const BG_MODE: u32 = 0x7E_003E;
     pub const COLOR_MATH: u32 = 0x7E_0040;
+    pub const COLOR_MATH_SELECT: u32 = 0x7E_0044;
     pub const MAIN_SCREEN: u32 = 0x7E_0D9D;
     pub const SUB_SCREEN: u32 = 0x7E_0D9E;
 }
@@ -156,6 +163,11 @@ impl Layer2Objects {
 
 /// Bytes per plane of the layer 2 background tilemap buffer.
 pub const LAYER2_TILEMAP_LEN: usize = 0x400;
+/// The vertical pipe tiles whose definition the game picks by position,
+/// and how many alternatives `MAP16AppTable` offers.
+pub const PIPE_TILES: std::ops::RangeInclusive<u16> = 0x133..=0x13A;
+pub const PIPE_TILE_COUNT: usize = 8;
+pub const PIPE_VARIANTS: usize = 4;
 /// Bytes per screen of a Lunar Magic 32-row background (16x32 tiles).
 const LM_TALL_SCREEN_LEN: usize = 0x200;
 
@@ -220,6 +232,18 @@ mod routines {
     pub const UPLOAD_BOSS_TILES: u32 = 0x00_98A9;
     /// `CODE_00A300`: uploads the player's graphics to VRAM.
     pub const UPLOAD_PLAYER_TILES: u32 = 0x00_A300;
+    /// `MAP16AppTable`: four pointers into bank `$0D`, one per 8-column
+    /// stretch of the level, to alternative definitions of the vertical
+    /// pipe tiles `133`-`13A`. The initial tilemap upload (`CODE_0580BD`)
+    /// and the scroll setup (`CODE_05877E`) re-point those tiles from it
+    /// as each column goes up, so a pipe's colour follows its position.
+    pub const PIPE_POINTER_TABLE: u32 = 0x05_8776;
+    /// `UpdateScreenPosition`: the level loop's per-frame camera update.
+    /// It follows the player with layer 1 and derives the layer 2 position
+    /// from it and the level's layer 2 scroll settings (`$1413`/`$1414`):
+    /// the same position, half of it, or a fraction plus the offset
+    /// `CODE_00A796` worked out at load time.
+    pub const UPDATE_CAMERA: u32 = 0x00_F6DB;
     /// `ProcScreenScrollCmds`: the level loop's per-frame layer scroll
     /// update, run right after the camera update. It moves layer 2 and
     /// layer 3 according to the level's scroll settings (tides, parallax
@@ -287,8 +311,16 @@ pub struct LevelTiles {
     pub wram: Vec<u8>,
     /// Foreground Map16 definitions for tile numbers in the object grid.
     /// Lunar Magic pages 2 and 3 are distinct from the same-numbered BG
-    /// tiles, which live in `bg_map16`.
+    /// tiles, which live in `bg_map16`. Prefer [`LevelTiles::map16_at`],
+    /// which also knows the position-dependent pipe tiles.
     pub map16: HashMap<u16, Map16Tile>,
+    /// Vanilla definitions of the vertical pipe tiles `133`-`13A` by
+    /// position: the game re-points them for every column (row in vertical
+    /// levels) it uploads, choosing variant `(column / 8) % 4` from
+    /// `MAP16AppTable`, so a pipe's colour depends on where it stands.
+    /// `None` for Lunar Magic ROMs, whose upload resolves tiles through
+    /// Lunar Magic's own pointer routine and ignores the re-pointing.
+    pub pipe_map16: Option<[[Map16Tile; PIPE_TILE_COUNT]; PIPE_VARIANTS]>,
     /// BG Map16 definitions, indexed by the raw background tile number.
     /// Vanilla has 0x200 definitions; Lunar Magic backgrounds can use
     /// higher indices. Empty when the level has no decoded background.
@@ -312,9 +344,19 @@ pub struct LevelTiles {
     /// Video-mode bands installed by the ROM's boss NMI/IRQ handlers.
     pub boss_scene: Option<crate::video::BossScene>,
     /// Layer 3 position and scroll behaviour, when the level shows
-    /// layer 3 on the main screen in Mode 1 (every ordinary level; boss
+    /// layer 3 on either screen in Mode 1 (every ordinary level; boss
     /// arenas draw theirs into `boss_scene`).
     pub layer3: Option<crate::video::Layer3>,
+    /// Main and sub screen designation and colour math, which decide how
+    /// the layers combine into the picture.
+    pub screen: crate::video::Screen,
+    /// Layer 1 position the level was entered at (`$1A`/`$1C`) and the
+    /// layer 2 position the first camera update derived for it (`$1E`/
+    /// `$20`). The two differ when the level's layer 2 scroll settings
+    /// offset or slow the layer (parallax); the renderer draws layer 2
+    /// where this camera sees it.
+    pub camera: [u16; 2],
+    pub layer2_position: [u16; 2],
     /// Layer 2 background tilemap planes, when the level uses a
     /// pre-built background instead of layer 2 objects. Raw tile numbers
     /// index `bg_map16`; `layer2_bg_tile` adds the legacy 0x200 display base.
@@ -355,6 +397,20 @@ impl LevelTiles {
         self.low[i] as u16 | ((self.high[i] as u16) << 8)
     }
 
+    /// The foreground definition of tile number `n` standing at level
+    /// tile position (`x`, `y`): the pipe tiles `133`-`13A` take the
+    /// variant the game's upload picked for that column (row in a vertical
+    /// level); everything else comes from `map16`.
+    pub fn map16_at(&self, n: u16, x: usize, y: usize) -> Option<&Map16Tile> {
+        if let Some(variants) = &self.pipe_map16
+            && PIPE_TILES.contains(&n)
+        {
+            let along = if self.vertical { y } else { x };
+            return Some(&variants[(along / 8) % PIPE_VARIANTS][(n - PIPE_TILES.start()) as usize]);
+        }
+        self.map16.get(&n)
+    }
+
     /// How this level's layer 2 objects are laid out, if it has any.
     /// Unknown for horizontal levels with an expanded height: their
     /// layer 1 screens fill the planes, so the layer 2 objects live
@@ -374,6 +430,15 @@ impl LevelTiles {
     pub fn layer2_object_tile(&self, x: usize, y: usize) -> Option<u16> {
         let i = self.layer2_objects()?.offset(x, y)?;
         Some(self.low[i] as u16 | ((self.high[i] as u16) << 8))
+    }
+
+    /// How far layer 2 content is displaced from the layer 1 grid, in
+    /// pixels: a layer 2 tile at column `c` shows at level x
+    /// `c * 16 + offset[0]`. Zero when both layers scroll together.
+    pub fn layer2_offset(&self) -> [i32; 2] {
+        std::array::from_fn(|axis| {
+            self.camera[axis].wrapping_sub(self.layer2_position[axis]) as i16 as i32
+        })
     }
 
     /// Palette bits the layer 2 object upload ORs into every tile: bit 2
@@ -488,7 +553,12 @@ pub fn expand_level_traced(
     // Run each phase with the game mode the real machine would be in.
     bus.set_wram_u8(ram::GAME_MODE, 0x11);
     run(&mut cpu, &mut bus, routines::LOAD_HEADER_POINTERS)?;
-    // Game mode $11 sets the maximum screen count before loading.
+    // Game mode $11 seeds the camera update's previous positions from the
+    // entrance and sets the maximum screen count before loading.
+    for i in 0..ram::LAYER_POSITIONS_LEN {
+        let value = bus.wram_u8(ram::LAYER1_X + i);
+        bus.set_wram_u8(ram::NEXT_LAYER1_X + i, value);
+    }
     bus.set_wram_u8(ram::LAST_SCREEN_HORIZ, 0x20);
     run(&mut cpu, &mut bus, routines::LOAD_LEVEL_DATA)?;
     // Boss preparation reuses the screen-count byte (level $1C7 ends
@@ -517,10 +587,29 @@ pub fn expand_level_traced(
     run_jsr(&mut cpu, &mut bus, routines::DECOMPRESS_PLAYER_GFX)?;
     run_jsr(&mut cpu, &mut bus, routines::INIT_LEVEL_RAM)?;
     run_jsr(&mut cpu, &mut bus, routines::INIT_LAYER2_SCROLL)?;
+    // Game mode $11 then runs the camera update once, which places layer 2
+    // for the entry camera. The game enables vertical scrolling at will
+    // first; that is left off so the camera stays at the entrance instead
+    // of starting to drift towards the player.
+    run(&mut cpu, &mut bus, routines::UPDATE_CAMERA)?;
     bus.set_wram_u8(ram::GAME_MODE, 0x12);
     run_jsr(&mut cpu, &mut bus, routines::PREPARE_LEVEL)?;
     let boss_scene = capture_boss_scene(&mut bus, level)?;
     let trace = cpu.trace_data_reads.take();
+    let read16 =
+        |bus: &SmwBus, addr: u32| u16::from_le_bytes([bus.wram_u8(addr), bus.wram_u8(addr + 1)]);
+    let camera = [read16(&bus, ram::LAYER1_X), read16(&bus, ram::LAYER1_Y)];
+    let layer2_position = [read16(&bus, ram::LAYER2_X), read16(&bus, ram::LAYER2_Y)];
+    let screen = crate::video::Screen {
+        main: bus.wram_u8(ram::MAIN_SCREEN),
+        sub: bus.wram_u8(ram::SUB_SCREEN),
+        color_math: bus.wram_u8(ram::COLOR_MATH),
+        math_select: bus.wram_u8(ram::COLOR_MATH_SELECT),
+        fixed_color: crate::palette::Color15(u16::from_le_bytes([
+            bus.wram_u8(ram::BACKGROUND_COLOR),
+            bus.wram_u8(ram::BACKGROUND_COLOR + 1),
+        ])),
+    };
     let layer3 = if boss_scene.is_some() {
         None
     } else {
@@ -532,6 +621,7 @@ pub fn expand_level_traced(
         None => (Vec::new(), SCREEN_LEN),
     };
     let map16 = lookup_map16(&mut cpu, &mut bus, level, lunar_magic)?;
+    let pipe_map16 = (!lunar_magic).then(|| read_pipe_map16(&mut bus));
     let tiles = LevelTiles {
         level,
         header,
@@ -551,8 +641,12 @@ pub fn expand_level_traced(
         object_select: bus.object_select,
         boss_scene,
         layer3,
+        screen,
+        camera,
+        layer2_position,
         wram: bus.wram,
         map16,
+        pipe_map16,
         bg_map16,
     };
     Ok((tiles, trace))
@@ -878,7 +972,7 @@ fn capture_boss_scene(
 /// the camera update hands it a frame's movement. Tides, the tileset
 /// backgrounds' half-speed parallax, autoscrolling fish, sprite-driven
 /// layers, and custom scroll code hooked into the routine all come out
-/// of the same measurement. `None` when layer 3 is not shown on the main
+/// of the same measurement. `None` when layer 3 is not shown on either
 /// screen in Mode 1.
 fn capture_layer3(
     cpu: &mut Cpu,
@@ -886,8 +980,8 @@ fn capture_layer3(
     level: u16,
 ) -> Result<Option<crate::video::Layer3>, ExpandError> {
     let bg_mode = bus.wram_u8(ram::BG_MODE);
-    let main_screen = bus.wram_u8(ram::MAIN_SCREEN);
-    if bg_mode & 0x07 != 1 || main_screen & 0x04 == 0 {
+    let shown = bus.wram_u8(ram::MAIN_SCREEN) | bus.wram_u8(ram::SUB_SCREEN);
+    if bg_mode & 0x07 != 1 || shown & 0x04 == 0 {
         return Ok(None);
     }
     let read16 =
@@ -931,9 +1025,6 @@ fn capture_layer3(
         tilemap: bus.bg_sc[2],
         character_base: bus.bg_character_base[2],
         bg_mode,
-        main_screen,
-        sub_screen: bus.wram_u8(ram::SUB_SCREEN),
-        color_math: bus.wram_u8(ram::COLOR_MATH),
     }))
 }
 
@@ -1000,10 +1091,21 @@ fn read_bg_map16(
     Ok((tiles, screen_len))
 }
 
+/// Reads a Map16 definition from ROM.
+fn read_map16(bus: &mut SmwBus, ptr: u32) -> Map16Tile {
+    let mut b = [0u8; 8];
+    for (i, byte) in b.iter_mut().enumerate() {
+        *byte = bus.read(ptr.wrapping_add(i as u32));
+    }
+    Map16Tile::from_bytes(b)
+}
+
 /// Resolves the Map16 definition of every tile number present in the
-/// loaded level's object grid. Pages 0 and 1 come from the pointer table
-/// the loader built in RAM, and all higher pages from Lunar Magic's
-/// foreground pointer routine. Background definitions stay separate:
+/// loaded level's object grid, the way the level's tilemap upload does.
+/// Vanilla reads pages 0 and 1 through the pointer table the loader built
+/// in RAM; Lunar Magic replaces that lookup (`$058A65`) with a call to its
+/// foreground pointer routine for every tile number, which is also the only
+/// way to reach pages 2 and up. Background definitions stay separate:
 /// their tile numbers overlap foreground pages 2 and 3.
 fn lookup_map16(
     cpu: &mut Cpu,
@@ -1021,10 +1123,7 @@ fn lookup_map16(
     numbers.dedup();
     let mut out = HashMap::with_capacity(numbers.len());
     for n in numbers {
-        let ptr: Option<u32> = if n < 0x200 {
-            let i = (ram::MAP16_POINTERS - 0x7E_0000) as usize + 2 * n as usize;
-            Some(0x0D_0000 | bus.wram[i] as u32 | ((bus.wram[i + 1] as u32) << 8))
-        } else if lunar_magic {
+        let ptr: Option<u32> = if lunar_magic {
             cpu.p &= !(crate::cpu::Flags::M | crate::cpu::Flags::X);
             cpu.a = n.wrapping_mul(2);
             cpu.db = 0;
@@ -1033,18 +1132,27 @@ fn lookup_map16(
                 .map_err(|source| ExpandError::Cpu { level, source })?;
             let bank = bus.wram_u8(ram::LM_MAP16_BANK) as u32;
             Some((bank << 16) | cpu.a as u32)
+        } else if n < 0x200 {
+            let i = (ram::MAP16_POINTERS - 0x7E_0000) as usize + 2 * n as usize;
+            Some(0x0D_0000 | bus.wram[i] as u32 | ((bus.wram[i + 1] as u32) << 8))
         } else {
             None
         };
         if let Some(ptr) = ptr {
-            let mut b = [0u8; 8];
-            for (i, byte) in b.iter_mut().enumerate() {
-                *byte = bus.read(ptr.wrapping_add(i as u32));
-            }
-            out.insert(n, Map16Tile::from_bytes(b));
+            out.insert(n, read_map16(bus, ptr));
         }
     }
     Ok(out)
+}
+
+/// The four position-dependent definitions of each vertical pipe tile,
+/// from `MAP16AppTable`.
+fn read_pipe_map16(bus: &mut SmwBus) -> [[Map16Tile; PIPE_TILE_COUNT]; PIPE_VARIANTS] {
+    std::array::from_fn(|variant| {
+        let entry = routines::PIPE_POINTER_TABLE + 2 * variant as u32;
+        let base = 0x0D_0000 | bus.read(entry) as u32 | ((bus.read(entry + 1) as u32) << 8);
+        std::array::from_fn(|tile| read_map16(bus, base + 8 * tile as u32))
+    })
 }
 
 #[cfg(test)]

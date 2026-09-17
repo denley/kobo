@@ -393,12 +393,11 @@ fn level_png(
     // Graphics and colours come from what the game uploaded to VRAM and
     // CGRAM, so ExGFX, custom palettes, and animated tiles are covered.
     let pal = tiles.palette();
-    let back = tiles.back_area_color().to_rgb8();
     let layer_tiles = LayerTiles::from_vram(&tiles.vram);
-    let (mut img, priorities) = render::level_render(&tiles, &layer_tiles, &pal, back);
+    let mut layers = render::level_layers(&tiles, &layer_tiles);
+    let mut marked: Vec<(usize, usize, u8)> = Vec::new();
     if with_sprites && tiles.boss_scene.is_none() {
         let list = sprites::read_sprites_at(rom, tiles.sprite_data_ptr())?;
-        let mut marked: Vec<(usize, usize, u8)> = Vec::new();
         if markers {
             marked.extend(list.sprites.iter().map(|s| {
                 let (x, y) = s.tile_position(tiles.vertical);
@@ -406,12 +405,13 @@ fn level_png(
             }));
         } else {
             let scene = expand::capture_sprites(rom, &tiles, &list)?;
-            render::draw_sprite_scene(&mut img, &priorities, &scene, &tiles.vram, &pal);
+            render::draw_sprite_scene(&mut layers, &scene, &tiles.vram);
             marked = scene.undrawn;
         }
-        for (x, y, id) in marked {
-            render::draw_sprite_marker(&mut img, x as u32 * 16, y as u32 * 16, id, &tiles.vram);
-        }
+    }
+    let mut img = render::compose_level(&tiles, &layers, &pal);
+    for (x, y, id) in marked {
+        render::draw_sprite_marker(&mut img, x as u32 * 16, y as u32 * 16, id, &tiles.vram);
     }
     img.write_png(out)?;
     println!(

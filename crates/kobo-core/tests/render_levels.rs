@@ -9,7 +9,7 @@ use kobo_core::level::PrimaryHeader;
 use kobo_core::map16::{BG_TILE_COUNT, Map16Tile, Tile8Ref};
 use kobo_core::palette::{Color15, Palette};
 use kobo_core::render::{self, LayerTiles};
-use kobo_core::video::Layer3;
+use kobo_core::video::{Layer3, Screen};
 use std::collections::HashMap;
 
 fn solid_tile(index: u16) -> Map16Tile {
@@ -22,6 +22,9 @@ fn solid_tile(index: u16) -> Map16Tile {
     }
 }
 
+/// A three-screen level whose screen setup is the vanilla one (layer 2
+/// on the subscreen, added to the backdrop) with a green back area
+/// colour, tile 1 solid red and tile 2 solid blue.
 fn scene() -> (LevelTiles, LayerTiles, Palette) {
     let tiles = LevelTiles {
         level: 0x105,
@@ -34,6 +37,7 @@ fn scene() -> (LevelTiles, LayerTiles, Palette) {
         high: vec![0; GRID_LEN],
         wram: vec![],
         map16: HashMap::from([(0, solid_tile(0)), (0x200, solid_tile(1))]),
+        pipe_map16: None,
         bg_map16: vec![solid_tile(2); BG_TILE_COUNT],
         vram: vec![],
         vram_written: vec![],
@@ -42,6 +46,9 @@ fn scene() -> (LevelTiles, LayerTiles, Palette) {
         object_select: 0,
         boss_scene: None,
         layer3: None,
+        screen: Screen::vanilla(Color15::from_rgb5(0, 31, 0)),
+        camera: [0, 0],
+        layer2_position: [0, 0],
         layer2_tilemap: Some((vec![0; LAYER2_TILEMAP_LEN], vec![0; LAYER2_TILEMAP_LEN])),
         layer2_screen_len: SCREEN_COLS * SCREEN_ROWS,
         rows: SCREEN_ROWS,
@@ -64,7 +71,7 @@ fn overlapping_map16_numbers_keep_foreground_and_background_art_separate() {
     let (mut tiles, mut gfx, palette) = scene();
     tiles.high[0] = 2; // Foreground tile $200 over background tile $200.
     gfx.tiles[1].pixels[0][0] = 0; // Transparent pixels reveal the background.
-    let image = render::level_image(&tiles, &gfx, &palette, [0, 255, 0]);
+    let image = render::level_image(&tiles, &gfx, &palette);
     assert_eq!(image.pixels[0], [0, 0, 255]);
     assert_eq!(image.pixels[1], [255, 0, 0]);
     assert_eq!(image.pixels[16], [0, 0, 255]);
@@ -93,25 +100,26 @@ fn layer2_objects_draw_under_layer_1_from_their_own_screens() {
     tiles.low[0x1B00 + SCREEN_COLS * SCREEN_ROWS + 5] = 1; // screen 1, x = 5
     tiles.low[0] = 2;
     gfx.tiles[1].pixels[0][0] = 0; // Layer 2 shows through layer 1's hole.
-    let image = render::level_image(&tiles, &gfx, &palette, back);
+    let image = render::level_image(&tiles, &gfx, &palette);
     assert_eq!(image.pixels[0], [0, 0, 255]);
     assert_eq!(image.pixels[1], [255, 0, 0]);
     assert_eq!(image.pixels[16], back);
     assert_eq!(image.pixels[(16 + 5) * 16], [0, 0, 255]);
     // The same bytes are not layer 2 objects in a background tilemap mode.
     tiles.level_mode = 0x00;
-    let image = render::level_image(&tiles, &gfx, &palette, back);
+    let image = render::level_image(&tiles, &gfx, &palette);
     assert_eq!(image.pixels[0], back);
 }
 
 #[test]
 fn vertical_modes_read_layer2_objects_from_the_vertical_buffer() {
     let (mut tiles, gfx, palette) = object_scene(0x07);
+    tiles.screen.fixed_color = Color15(0);
     tiles.vertical = true;
     tiles.screens = 2;
     // Screen 1, right half, row 0, column 0: level position (16, 16).
     tiles.low[0x1C00 + 0x200 + 0x100] = 1;
-    let image = render::level_image(&tiles, &gfx, &palette, [0; 3]);
+    let image = render::level_image(&tiles, &gfx, &palette);
     assert_eq!((image.width, image.height), (512, 512));
     let at = |x: usize, y: usize| image.pixels[y * 16 * 512 + x * 16];
     assert_eq!(at(16, 16), [0, 0, 255]);
@@ -119,7 +127,7 @@ fn vertical_modes_read_layer2_objects_from_the_vertical_buffer() {
     // Modes 3 and 4 pair a vertical layer 1 with a horizontal layer 2.
     tiles.level_mode = 0x03;
     tiles.low[0x1B00 + SCREEN_COLS] = 1; // row 1, column 0
-    let image = render::level_image(&tiles, &gfx, &palette, [0; 3]);
+    let image = render::level_image(&tiles, &gfx, &palette);
     let at = |x: usize, y: usize| image.pixels[y * 16 * 512 + x * 16];
     assert_eq!(at(16, 16), [0; 3]);
     assert_eq!(at(0, 1), [0, 0, 255]);
@@ -132,14 +140,17 @@ fn object_tileset_three_moves_layer2_palettes_up_four_rows() {
     palette.set(4, 2, Color15::from_rgb5(0, 31, 0));
     tiles.low[0x1B00] = 1;
     tiles.low[1] = 1; // Layer 1 keeps its own rows.
-    let image = render::level_image(&tiles, &gfx, &palette, [0; 3]);
+    let image = render::level_image(&tiles, &gfx, &palette);
     assert_eq!(image.pixels[0], [0, 255, 0]);
     assert_eq!(image.pixels[16], [0, 0, 255]);
 }
 
 #[test]
 fn priority_bits_interleave_layers_like_mode_1() {
-    let (mut tiles, gfx, palette) = object_scene(0x01);
+    // Level mode 2 puts layer 2 on the main screen with layer 1.
+    let (mut tiles, gfx, palette) = object_scene(0x02);
+    tiles.screen.main = 0x17;
+    tiles.screen.sub = 0x00;
     let r = Tile8Ref::new(2, 0, true, false, false);
     tiles.map16.insert(
         3,
@@ -152,10 +163,10 @@ fn priority_bits_interleave_layers_like_mode_1() {
     );
     tiles.low[0x1B00] = 3; // High-priority blue layer 2 tile...
     tiles.low[0] = 2; // ...over a low-priority red layer 1 tile.
-    let image = render::level_image(&tiles, &gfx, &palette, [0; 3]);
+    let image = render::level_image(&tiles, &gfx, &palette);
     assert_eq!(image.pixels[0], [0, 0, 255]);
     tiles.low[0x1B00] = 1; // Equal priorities put layer 1 in front.
-    let image = render::level_image(&tiles, &gfx, &palette, [0; 3]);
+    let image = render::level_image(&tiles, &gfx, &palette);
     assert_eq!(image.pixels[0], [255, 0, 0]);
 }
 
@@ -165,11 +176,11 @@ fn special_modes_do_not_draw_unused_background_buffers() {
     let back = [0, 255, 0];
     for mode in [0x09, 0x0B, 0x0F, 0x10] {
         tiles.level_mode = mode;
-        let image = render::level_image(&tiles, &gfx, &palette, back);
+        let image = render::level_image(&tiles, &gfx, &palette);
         assert!(image.pixels.iter().all(|&p| p == back), "mode {mode:02X}");
         // Suppressing the background must still leave foreground art visible.
         tiles.high[0] = 2;
-        let image = render::level_image(&tiles, &gfx, &palette, back);
+        let image = render::level_image(&tiles, &gfx, &palette);
         assert_eq!(image.pixels[0], [255, 0, 0], "mode {mode:02X}");
         assert_eq!(image.pixels[16], back, "mode {mode:02X}");
         tiles.high[0] = 0;
@@ -183,10 +194,52 @@ fn tall_background_uses_its_own_screen_stride() {
     tiles.bg_map16[1] = solid_tile(1);
     let (low, _) = tiles.layer2_tilemap.as_mut().unwrap();
     low[0x200] = 1;
-    let image = render::level_image(&tiles, &gfx, &palette, [0, 255, 0]);
+    let image = render::level_image(&tiles, &gfx, &palette);
     assert_eq!(image.pixels[0], [0, 0, 255]);
     assert_eq!(image.pixels[256], [255, 0, 0]);
     assert_eq!(image.pixels[512], [0, 0, 255]);
+}
+
+#[test]
+fn layer2_is_drawn_where_the_entry_camera_put_it() {
+    // Layer 2 sits 18 pixels above layer 1 (a ghost house's vertical
+    // scroll) and, with the camera two screens in, half a screen behind
+    // horizontally (half-speed parallax).
+    let (mut tiles, gfx, palette) = scene();
+    tiles.screens = 4;
+    tiles.bg_map16[1] = solid_tile(1);
+    let (low, _) = tiles.layer2_tilemap.as_mut().unwrap();
+    low[SCREEN_COLS] = 1; // screen 0, row 1, column 0 is red
+    tiles.camera = [0, 192];
+    tiles.layer2_position = [0, 174];
+    assert_eq!(tiles.layer2_offset(), [0, 18]);
+    let image = render::level_image(&tiles, &gfx, &palette);
+    let at = |x: usize, y: usize| image.pixels[y * 1024 + x];
+    assert_eq!(at(0, 33), [0, 0, 255]);
+    assert_eq!(at(0, 34), [255, 0, 0]);
+    assert_eq!(at(0, 49), [255, 0, 0]);
+    assert_eq!(at(0, 50), [0, 0, 255]);
+    assert_eq!(at(16, 40), [0, 0, 255]);
+    // The top 18 pixels show the buffer's last rows wrapped around.
+    assert_eq!(at(0, 0), [0, 0, 255]);
+    tiles.camera = [852, 192];
+    tiles.layer2_position = [426, 174];
+    assert_eq!(tiles.layer2_offset(), [426, 18]);
+    let image = render::level_image(&tiles, &gfx, &palette);
+    let at = |x: usize, y: usize| image.pixels[y * 1024 + x];
+    assert_eq!(at(426, 40), [255, 0, 0]);
+    assert_eq!(at(441, 40), [255, 0, 0]);
+    assert_eq!(at(442, 40), [0, 0, 255]);
+    assert_eq!(at(425, 40), [0, 0, 255]);
+    assert_eq!(at(426 + 512, 40), [255, 0, 0]); // repeats every two screens
+    // Layer 2 objects move with the same offset.
+    let (mut tiles, gfx, palette) = object_scene(0x01);
+    tiles.low[0x1B00] = 1;
+    tiles.camera = [0, 0];
+    tiles.layer2_position = [0, 8];
+    let image = render::level_image(&tiles, &gfx, &palette);
+    assert_eq!(image.pixels[8 * 768], [0, 255, 0]);
+    assert_eq!(image.pixels[7 * 768], [0, 0, 255]);
 }
 
 #[test]
@@ -198,9 +251,39 @@ fn background_indices_above_511_do_not_alias_lower_tiles() {
     lo[0] = 1;
     hi[0] = 2;
     assert_eq!(tiles.layer2_bg_tile(0, 0, 0), Some(0x401));
-    let image = render::level_image(&tiles, &gfx, &palette, [0; 3]);
+    let image = render::level_image(&tiles, &gfx, &palette);
     assert_eq!(image.pixels[0], [255, 0, 0]);
     assert_eq!(image.pixels[16], [0, 0, 255]);
+}
+
+#[test]
+fn subscreen_layer2_only_shows_through_the_backdrop() {
+    // Level mode 1 keeps layer 2 on the subscreen: even a high-priority
+    // layer 2 tile stays behind low-priority layer 1, and where layer 1
+    // is transparent the backdrop math shows layer 2 at full strength.
+    let (mut tiles, gfx, palette) = object_scene(0x01);
+    let r = Tile8Ref::new(2, 0, true, false, false);
+    tiles.map16.insert(
+        3,
+        Map16Tile {
+            top_left: r,
+            bottom_left: r,
+            top_right: r,
+            bottom_right: r,
+        },
+    );
+    tiles.low[0x1B00] = 3;
+    tiles.low[0] = 2;
+    tiles.low[0x1B00 + 1] = 3;
+    let image = render::level_image(&tiles, &gfx, &palette);
+    assert_eq!(image.pixels[0], [255, 0, 0]);
+    assert_eq!(image.pixels[16], [0, 0, 255]);
+    // Half-brightness modes ($0C/$0D) halve the backdrop's sum with layer
+    // 2, but not the fixed colour where layer 2 is transparent.
+    tiles.screen.color_math = 0x70;
+    let image = render::level_image(&tiles, &gfx, &palette);
+    assert_eq!(image.pixels[16], Color15::from_rgb5(0, 0, 15).to_rgb8());
+    assert_eq!(image.pixels[32], [0, 255, 0]);
 }
 
 #[test]
@@ -212,7 +295,7 @@ fn oversized_vertical_level_renders_only_the_captured_grid() {
     let last = GRID_LEN - 1;
     tiles.high[last] = 2;
     let back = [0, 255, 0];
-    let image = render::level_image(&tiles, &gfx, &palette, back);
+    let image = render::level_image(&tiles, &gfx, &palette);
     assert_eq!((image.width, image.height), (512, 7168));
     assert_eq!(image.pixels[0], back);
     assert_eq!(image.pixels.last(), Some(&[255, 0, 0]));
@@ -225,7 +308,7 @@ fn vertical_level_background_spans_the_width_and_tiles_downward() {
     tiles.vertical = true;
     tiles.screens = 4;
     tiles.rows = 16;
-    let image = render::level_image(&tiles, &gfx, &palette, [0, 255, 0]);
+    let image = render::level_image(&tiles, &gfx, &palette);
     assert_eq!((image.width, image.height), (512, 1024));
     // Background tile $200 (blue) everywhere: both background screens sit
     // side by side, and the 27 rows repeat below.
@@ -247,7 +330,7 @@ fn expanded_height_lays_screens_out_with_a_taller_stride() {
     assert_eq!(tiles.tile(1, 3, 30), 0x200);
     assert!(tiles.layer2_objects().is_none());
     let back = [0, 255, 0];
-    let image = render::level_image(&tiles, &gfx, &palette, back);
+    let image = render::level_image(&tiles, &gfx, &palette);
     assert_eq!((image.width, image.height), (512, 640));
     assert_eq!(image.pixels[30 * 16 * 512 + 19 * 16], [255, 0, 0]);
     assert_eq!(image.pixels[30 * 16 * 512 + 3 * 16], back);
@@ -256,7 +339,7 @@ fn expanded_height_lays_screens_out_with_a_taller_stride() {
 #[test]
 fn sprite_objects_respect_layer_priorities() {
     use kobo_core::video::{SpriteObject, SpriteScene};
-    let (mut tiles, mut gfx, palette) = scene();
+    let (mut tiles, gfx, palette) = scene();
     tiles.layer2_tilemap = None;
     tiles.screens = 1;
     // Layer 1: tile 1 (red) low priority at (0, 0), high priority at (1, 0).
@@ -264,7 +347,6 @@ fn sprite_objects_respect_layer_priorities() {
     tiles.low[0] = 1;
     tiles.low[1] = 3;
     tiles.map16.insert(1, solid_tile(1));
-    let (mut img, priorities) = render::level_render(&tiles, &gfx, &palette, [0, 255, 0]);
     // Sprite VRAM: object character 0 is solid colour 1 (16x16 in OBSEL 3).
     let mut vram = vec![0u8; 0x10000];
     for tile in [0usize, 1, 16, 17] {
@@ -274,7 +356,6 @@ fn sprite_objects_respect_layer_priorities() {
     }
     let mut pal = palette.clone();
     pal.set(8, 1, kobo_core::palette::Color15::from_rgb5(0, 31, 0));
-    gfx.tiles[1].pixels[0][0] = 0;
     let scene = SpriteScene {
         objects: vec![
             SpriteObject {
@@ -295,7 +376,9 @@ fn sprite_objects_respect_layer_priorities() {
         object_select: 0x03,
         undrawn: vec![],
     };
-    render::draw_sprite_scene(&mut img, &priorities, &scene, &vram, &pal);
+    let mut layers = render::level_layers(&tiles, &gfx);
+    render::draw_sprite_scene(&mut layers, &scene, &vram);
+    let img = render::compose_level(&tiles, &layers, &pal);
     assert_eq!(img.pixels[0], [0, 255, 0]); // priority 2 beats low-priority layer 1
     assert_eq!(img.pixels[16], [255, 0, 0]); // but not high-priority layer 1
 }
@@ -312,7 +395,6 @@ fn boss_preparation_does_not_replace_the_level_dimensions() {
         &tiles,
         &LayerTiles::from_vram(&tiles.vram),
         &tiles.palette(),
-        tiles.back_area_color().to_rgb8(),
     );
     assert_eq!((image.width, image.height), (256, 224));
     assert_eq!(image.pixels[0], [0; 3]);
@@ -388,10 +470,8 @@ fn layer3_scene(priority: bool) -> (LevelTiles, LayerTiles, Palette) {
         tilemap: 0x53,
         character_base: 0x8000,
         bg_mode: 1,
-        main_screen: 0x15,
-        sub_screen: 0x02,
-        color_math: 0x20,
     });
+    tiles.screen.color_math = 0x20;
     (tiles, gfx, palette)
 }
 
@@ -400,8 +480,9 @@ fn layer3_is_placed_where_the_entry_screen_shows_it() {
     let (mut tiles, gfx, palette) = layer3_scene(false);
     tiles.layer2_tilemap = None;
     tiles.bg_map16.clear();
+    tiles.screen.fixed_color = Color15(0);
     let back = [0, 0, 0];
-    let image = render::level_image(&tiles, &gfx, &palette, back);
+    let image = render::level_image(&tiles, &gfx, &palette);
     let at = |x: usize, y: usize| image.pixels[y * 768 + x];
     // Tilemap row 24 sits 128 pixels below the scroll position of 64, so
     // 128 pixels below the camera's top edge at 192.
@@ -412,29 +493,53 @@ fn layer3_is_placed_where_the_entry_screen_shows_it() {
     assert_eq!(at(16 + 256, 320), back); // Scrolls with the level: no repeat.
     // A fixed layer repeats the entry screen across the level.
     tiles.layer3.as_mut().unwrap().scroll_per_16 = [0, 0];
-    let image = render::level_image(&tiles, &gfx, &palette, back);
+    let image = render::level_image(&tiles, &gfx, &palette);
     assert_eq!(image.pixels[320 * 768 + 16 + 256], [0, 255, 0]);
 }
 
 #[test]
-fn layer3_stacks_under_layer_2_unless_the_priority_bit_lifts_it() {
-    let blue = [0, 0, 255];
+fn layer3_stacks_by_priority_and_blends_with_the_subscreen() {
+    let (blue, green, red) = ([0, 0, 255], [0, 255, 0], [255, 0, 0]);
+    let at = 320 * 768 + 16;
+    // Layer 2 (blue) is on the subscreen, so layer 3 covers it...
     let (tiles, gfx, palette) = layer3_scene(false);
-    let image = render::level_image(&tiles, &gfx, &palette, [0; 3]);
-    assert_eq!(image.pixels[320 * 768 + 16], blue);
+    assert_eq!(
+        render::level_image(&tiles, &gfx, &palette).pixels[at],
+        green
+    );
+    assert_eq!(
+        render::level_image(&tiles, &gfx, &palette).pixels[at + 8],
+        blue
+    );
+    // ...unless colour math adds the two, as the vanilla setting does.
+    let mut tiles = tiles;
+    tiles.screen.color_math = 0x24;
+    assert_eq!(
+        render::level_image(&tiles, &gfx, &palette).pixels[at],
+        [0, 255, 255]
+    );
+    // Low-priority layer 1 (red, tile position (1, 20)) covers low-priority layer 3.
+    tiles.high[20 * 16 + 1] = 2;
+    assert_eq!(render::level_image(&tiles, &gfx, &palette).pixels[at], red);
+    // A high-priority layer 3 tile stays behind it until the BG3 priority
+    // bit lifts it in front of everything.
     let (mut tiles, gfx, palette) = layer3_scene(true);
-    let image = render::level_image(&tiles, &gfx, &palette, [0; 3]);
-    assert_eq!(image.pixels[320 * 768 + 16], blue);
+    tiles.high[20 * 16 + 1] = 2;
+    assert_eq!(render::level_image(&tiles, &gfx, &palette).pixels[at], red);
     tiles.layer3.as_mut().unwrap().bg_mode = 0x09;
-    let image = render::level_image(&tiles, &gfx, &palette, [0; 3]);
-    assert_eq!(image.pixels[320 * 768 + 16], [0, 255, 0]);
-    // With colour math on, the pixel adds the subscreen's layer 2 to it.
-    tiles.layer3.as_mut().unwrap().color_math = 0x24;
-    let image = render::level_image(&tiles, &gfx, &palette, [0; 3]);
-    assert_eq!(image.pixels[320 * 768 + 16], [0, 255, 255]);
-    // Layer 3 alone on the main screen goes in front regardless.
+    assert_eq!(
+        render::level_image(&tiles, &gfx, &palette).pixels[at],
+        green
+    );
+    // Level mode $0E puts everything else on the subscreen and adds it to
+    // layer 3, so the layer 1 tile shows through the layer 3 pixel.
     let (mut tiles, gfx, palette) = layer3_scene(false);
-    tiles.layer3.as_mut().unwrap().main_screen = 0x04;
-    let image = render::level_image(&tiles, &gfx, &palette, [0; 3]);
-    assert_eq!(image.pixels[320 * 768 + 16], [0, 255, 0]);
+    tiles.high[20 * 16 + 1] = 2;
+    tiles.screen.main = 0x04;
+    tiles.screen.sub = 0x13;
+    tiles.screen.color_math = 0x24;
+    let image = render::level_image(&tiles, &gfx, &palette);
+    assert_eq!(image.pixels[at], [255, 255, 0]);
+    assert_eq!(image.pixels[at + 8], red);
+    assert_eq!(image.pixels[at + 16], blue);
 }

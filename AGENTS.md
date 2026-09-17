@@ -118,6 +118,14 @@ Windows, and macOS. Keep all three green.
   works. The loader override must only run in game mode `$11`: overriding the
   title-screen load in mode `$03` contaminates the graphics cache, and dumps made before
   that guard fail the boss comparison.
+  `tests/video_oracle.rs` compares whole rendered pictures (with sprites) against the
+  PPM frames of `KOBO_ORACLE_VIDEO=1` dumps listed in `KOBO_VIDEO_ORACLE_DIRS`
+  (`:`-separated), cropped at the camera from the dumped WRAM (`$1A`/`$1C`; the PPU
+  scroll registers keep ten bits, too few for vertical levels) and below the status bar.
+  Mesen's frame is 239 lines with the picture 6 rows down; the test tries paddings 4-9.
+  Agreement is 95-99.9% on most levels; tides that have moved and sprites that have
+  animated account for the rest, and the threshold is 85%. Captures live in
+  `~/.local/share/kobo/oracle/layer3-video/` and `colormath-video/`.
 - Lunar Magic exports (hashes in `tests/fixtures/`) are the oracle for GFX, palette, and Map16.
 - **Lunar Magic hacks**: `tests/layer2_background.rs` runs on every ROM listed in `KOBO_LM_ROMS`
   (`:`-separated paths) as well as the vanilla ROM. It rebuilds the layer 2 tilemap the game
@@ -199,7 +207,8 @@ Windows, and macOS. Keep all three green.
   tables and dumps the second level frame.
 - `expand::expand_level` seeds the RAM-resident OAM routine by running the reset code, then
   runs `CODE_05D796` (header pointers), `CODE_05801E` (clear buffers, `LoadLevel`), the rest
-  of game mode `$11` (`CODE_00B888` GFX32/33 to RAM, `CODE_00A635`, `CODE_00A796`), and all of
+  of game mode `$11` (`CODE_00B888` GFX32/33 to RAM, `CODE_00A635`, `CODE_00A796`, and one
+  `UpdateScreenPosition` after seeding `$1462`-`$1469` from `$1A`-`$21`), and all of
   game mode `$12` (`GM12PrepLevel`, `$00A59C`), which draws boss floors, sets up layer 3 (tides
   zero rows 16-26 of the layer 2 screens), and uploads GFX, palettes, and initial tilemaps.
   `$0100` is set to `$11` and then `$12` on the way: Lunar Magic's replacement for the initial
@@ -242,6 +251,49 @@ Windows, and macOS. Keep all three green.
   sprite code uses them constantly.
 - Level modes `$09`, `$0B`, `$0F`, and `$10` (boss arenas and the dark rooms sharing their
   tilemap) never upload the decoded background; the renderer skips it.
+- Screen designation and colour math come from three per-level-mode tables in `LoadLevel`
+  (`LevMainScrnTbl`, `LevSubScrnTbl`, `LevCGADSUBtable` at `$0581E0`, `$058200`, `$058220`;
+  mirrors `$0D9D`, `$0D9E`, `$40`), with `CGWSEL` (`$44`) at `$02` (add the subscreen, fixed
+  colour where it is transparent) and `COLDATA` fed from the back area colour `$0701`.
+  CGRAM colour 0 stays black: the "back area colour" is the fixed colour, added to the
+  backdrop. Most modes put layers 1 and 3 and objects on the main screen and layer 2 on
+  the subscreen with `$24` (backdrop and layer 3 add the subscreen), so layer 2 shows only
+  through transparent pixels whatever its priority bits, and a tide is translucent over
+  it. Mode `$02` (and `$06`, `$08`, `$11`) puts layer 2 on the main screen (`$17`/`$00`),
+  where priorities interleave. Modes `$0C`/`$0D` use `$70`: objects and the backdrop
+  half-add layer 2 (dark background, translucent Boos), except objects on sprite palettes
+  0-3, which never take part in colour math, and pixels over a transparent subscreen,
+  which take the fixed colour unhalved. Mode `$0E` shows only layer 3 on the main screen
+  and adds everything else from the subscreen (`$04`/`$13`/`$24`). Mode `$11` is the
+  spotlight room: `$FF` subtracts and halves everything against the fixed colour, and the
+  spotlight sprite (`C6`) sets `$44 = $20` (prevent math inside the colour window) and
+  drives the window by HDMA; no window is modelled, so the room renders dark throughout.
+  Modes `$1E`/`$1F` put only layer 1 or only layer 2 on the main screen and add the rest.
+  `render::LevelLayers` keeps BG1, BG2, BG3, and objects as separate colour-index layers
+  and composes them per pixel from `LevelTiles::screen` (`video::Screen`), which is also
+  how sprites end up in front of or behind layers. Colour windows (spotlight, keyhole,
+  message boxes) are not modelled.
+- Layer 2 position: the entry camera is `$1A`/`$1C` and layer 2 sits at `$1E`/`$20`, which
+  `UpdateScreenPosition` (`$00F6DB`) derives every frame from layer 1 and the layer 2 scroll
+  settings `$1413`/`$1414` (same, half, or a fraction plus the offset `CODE_00A796`
+  computes at load). Game mode `$11` copies `$1A`-`$21` to `$1462`-`$1469` right after
+  `CODE_05D796` and runs that update once before loading; `expand` does the same (without
+  enabling vertical scroll-at-will, which would start the camera drifting towards the
+  player). Ghost houses (`02`/`03`) end up with layer 2 18 pixels up and at half speed.
+  The renderer draws layer 2 and the scrolling axes of layer 3 where the entry camera sees
+  them and continues them unstretched across the level, so parallax layers keep the entry
+  screen's phase; an axis layer 3 does not scroll on repeats per screen horizontally and
+  stays in the entry band vertically.
+- Vertical pipe tiles `133`-`13A` have four definitions each: the initial tilemap upload
+  (`CODE_0580BD`) and the scroll setup (`CODE_05877E`) re-point them in the `$0FBE` table
+  from `MAP16AppTable` (`$058776`: `$8AB0`, `$84E0`, `$8AF0`, `$8B30` in bank `$0D`) for
+  every column they upload, variant `(column / 8) % 4` (rows in the initial upload of a
+  vertical level), so a pipe's colour depends on where it stands (the ghost ship's pipes
+  are grey, Yoshi's Island's green). `LevelTiles::map16_at` applies this; `map16` alone
+  holds the table's final state. Lunar Magic ROMs replace the pointer-table lookup in the
+  column upload (`$058A65`: `TAY : LDA $0FBE,Y` becomes `JSL $06F540`) with the pointer
+  routine for every tile number, so the re-pointing has no effect there and `expand`
+  resolves all tiles through `$06F540` in those ROMs.
 - Vertical levels with a background (mode `$0A`) keep layer 2 horizontal (`$5B` bit 1
   clear): `CODE_058955` dispatches to the same column upload as mode `$00`, so the two
   screens sit side by side across the level's 32-tile width, 27 rows tall, in a 64x64
@@ -344,11 +396,11 @@ Windows, and macOS. Keep all three green.
 
 ## Known gaps
 
-- Layer 3 is drawn as the entry screen shows it (see the layer 3 facts above); the status bar
-  is left out, and an axis the layer does not scroll along cannot be followed once the camera
-  moves. Colour math is modelled only for layer 3 (add/subtract with the subscreen), not for
-  the half-brightness level modes `$0C`/`$0D`, and objects on the subscreen (mode `$0E`)
-  are hidden under layer 3 rather than blended.
+- Layers 2 and 3 are drawn as the entry screen shows them and continued unstretched
+  (see the layer facts above); parallax is not reproduced away from the entry screen, the
+  status bar is left out, and an axis layer 3 does not scroll along cannot be followed once
+  the camera moves. Colour windows are not modelled: the spotlight rooms (mode `$11`) render
+  uniformly dark, and the keyhole and message box effects do not appear.
 - Sprites show their first drawn frame with Mario off the left screen edge and no scrolling,
   so anything that waits for Mario, spawns over time, or moves before it appears (Bullet
   Bill shooters, generators, Lakitu) is not what a player sees. Custom sprite loaders run
