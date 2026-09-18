@@ -22,7 +22,7 @@ impl Flags {
     pub const C: u8 = 0x01;
 }
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum CpuError {
     #[error("unsupported opcode ${opcode:02X} at ${pb:02X}:{pc:04X}")]
     Unsupported { opcode: u8, pb: u8, pc: u16 },
@@ -63,6 +63,13 @@ impl Default for Cpu {
     }
 }
 
+/// Tag on an operand address whose second byte stays in the same bank
+/// instead of carrying into the next: direct page and stack-relative
+/// operands (bank 0), immediate operands, and the pointers of indexed
+/// indirect jumps (the program bank). Bit 24 is outside the address bus;
+/// the memory helpers strip it.
+const WRAPS_IN_BANK: u32 = 1 << 24;
+
 /// Sentinel return address used by [`Cpu::call`].
 const RETURN_PB: u8 = 0xFF;
 const RETURN_PC: u16 = 0xFFFF;
@@ -87,6 +94,17 @@ impl Cpu {
             in_fetch: false,
             op_addr: 0,
         }
+    }
+
+    /// Puts the registers back to what [`Cpu::new`] gives, so a routine
+    /// starts from a known state whatever ran before it. The step count
+    /// and any read trace carry on.
+    pub fn reset_registers(&mut self) {
+        let steps = self.steps;
+        let trace = self.trace_data_reads.take();
+        *self = Self::new();
+        self.steps = steps;
+        self.trace_data_reads = trace;
     }
 
     // --- Flag helpers -------------------------------------------------
@@ -145,9 +163,19 @@ impl Cpu {
         bus.read(addr & 0xFF_FFFF)
     }
 
+    /// The address after `addr`. Absolute and indirect addresses carry
+    /// into the next bank; those tagged [`WRAPS_IN_BANK`] stay in theirs.
+    fn next_addr(addr: u32) -> u32 {
+        if addr & WRAPS_IN_BANK != 0 {
+            (addr & !0xFFFF) | (addr.wrapping_add(1) & 0xFFFF)
+        } else {
+            addr.wrapping_add(1)
+        }
+    }
+
     fn read16(&mut self, bus: &mut impl Bus, addr: u32) -> u16 {
         let lo = self.read8(bus, addr) as u16;
-        let hi = self.read8(bus, addr.wrapping_add(1)) as u16;
+        let hi = self.read8(bus, Self::next_addr(addr)) as u16;
         lo | (hi << 8)
     }
 
@@ -170,7 +198,7 @@ impl Cpu {
 
     fn write16(&self, bus: &mut impl Bus, addr: u32, value: u16) {
         self.write8(bus, addr, value as u8);
-        self.write8(bus, addr.wrapping_add(1), (value >> 8) as u8);
+        self.write8(bus, Self::next_addr(addr), (value >> 8) as u8);
     }
 
     /// Reads a value of the accumulator width.
@@ -295,15 +323,15 @@ impl Cpu {
     }
 
     fn am_dp(&mut self, bus: &mut impl Bus) -> u32 {
-        self.dp_base(bus) as u32
+        self.dp_base(bus) as u32 | WRAPS_IN_BANK
     }
 
     fn am_dp_x(&mut self, bus: &mut impl Bus) -> u32 {
-        self.dp_base(bus).wrapping_add(self.x) as u32
+        self.dp_base(bus).wrapping_add(self.x) as u32 | WRAPS_IN_BANK
     }
 
     fn am_dp_y(&mut self, bus: &mut impl Bus) -> u32 {
-        self.dp_base(bus).wrapping_add(self.y) as u32
+        self.dp_base(bus).wrapping_add(self.y) as u32 | WRAPS_IN_BANK
     }
 
     fn am_dp_ind(&mut self, bus: &mut impl Bus) -> u32 {
@@ -336,7 +364,7 @@ impl Cpu {
 
     fn am_sr(&mut self, bus: &mut impl Bus) -> u32 {
         let o = self.fetch8(bus) as u16;
-        self.sp.wrapping_add(o) as u32
+        self.sp.wrapping_add(o) as u32 | WRAPS_IN_BANK
     }
 
     fn am_sr_ind_y(&mut self, bus: &mut impl Bus) -> u32 {
@@ -346,13 +374,13 @@ impl Cpu {
     }
 
     fn am_imm_m(&mut self, _bus: &mut impl Bus) -> u32 {
-        let a = self.pc_addr();
+        let a = self.pc_addr() | WRAPS_IN_BANK;
         self.pc = self.pc.wrapping_add(if self.m8() { 1 } else { 2 });
         a
     }
 
     fn am_imm_x(&mut self, _bus: &mut impl Bus) -> u32 {
-        let a = self.pc_addr();
+        let a = self.pc_addr() | WRAPS_IN_BANK;
         self.pc = self.pc.wrapping_add(if self.x8() { 1 } else { 2 });
         a
     }
@@ -387,121 +415,65 @@ impl Cpu {
     }
 
     fn op_adc(&mut self, v: u16) {
-        let carry = self.flag(Flags::C) as u32;
-        if self.m8() {
-            let a = (self.a & 0xFF) as u32;
-            let v = (v & 0xFF) as u32;
-            let result = if self.flag(Flags::D) {
-                let mut lo = (a & 0x0F) + (v & 0x0F) + carry;
-                if lo > 9 {
-                    lo += 6;
-                }
-                let mut hi = (a & 0xF0) + (v & 0xF0) + if lo > 0x0F { 0x10 } else { 0 };
-                let lo = lo & 0x0F;
-                self.set_flag(Flags::V, (!(a ^ v) & (a ^ hi) & 0x80) != 0);
-                if hi > 0x9F {
-                    hi += 0x60;
-                }
-                hi | lo
-            } else {
-                let r = a + v + carry;
-                self.set_flag(Flags::V, (!(a ^ v) & (a ^ r) & 0x80) != 0);
-                r
-            };
-            self.set_flag(Flags::C, result > 0xFF);
-            self.a = (self.a & 0xFF00) | (result & 0xFF) as u16;
-            self.set_nz(self.a, true);
-        } else {
-            let a = self.a as u32;
-            let v = v as u32;
-            let result = if self.flag(Flags::D) {
-                let mut r = 0u32;
-                let mut c = carry;
-                for nibble in 0..4 {
-                    let shift = nibble * 4;
-                    let mut d = ((a >> shift) & 0xF) + ((v >> shift) & 0xF) + c;
-                    c = 0;
-                    if d > 9 {
-                        d += 6;
-                    }
-                    if d > 0xF {
-                        c = 1;
-                        d &= 0xF;
-                    }
-                    r |= d << shift;
-                }
-                self.set_flag(Flags::V, (!(a ^ v) & (a ^ r) & 0x8000) != 0);
-                r | (c << 16)
-            } else {
-                let r = a + v + carry;
-                self.set_flag(Flags::V, (!(a ^ v) & (a ^ r) & 0x8000) != 0);
-                r
-            };
-            self.set_flag(Flags::C, result > 0xFFFF);
-            self.a = result as u16;
-            self.set_nz(self.a, false);
-        }
+        self.add_to_a(v, false);
     }
 
+    /// A - M - !C is A + !M + C.
     fn op_sbc(&mut self, v: u16) {
-        if self.flag(Flags::D) {
-            // Decimal subtract: operate on the ten's complement.
-            let carry = self.flag(Flags::C) as i32;
-            if self.m8() {
-                let a = (self.a & 0xFF) as i32;
-                let v = (v & 0xFF) as i32;
-                let mut lo = (a & 0x0F) - (v & 0x0F) + carry - 1;
-                let mut hi = (a >> 4) - (v >> 4);
-                if lo < 0 {
-                    lo += 10;
-                    hi -= 1;
-                }
-                let bin = a - v + carry - 1;
-                self.set_flag(Flags::V, ((a ^ v) & (a ^ bin) & 0x80) != 0);
-                self.set_flag(Flags::C, hi >= 0);
-                if hi < 0 {
-                    hi += 10;
-                }
-                let r = ((hi as u16 & 0xF) << 4) | (lo as u16 & 0xF);
-                self.a = (self.a & 0xFF00) | r;
-                self.set_nz(self.a, true);
-            } else {
-                let a = self.a as i32;
-                let v = v as i32;
-                let mut r = 0i32;
-                let mut borrow = 1 - carry;
-                for nibble in 0..4 {
-                    let shift = nibble * 4;
-                    let mut d = ((a >> shift) & 0xF) - ((v >> shift) & 0xF) - borrow;
-                    borrow = 0;
-                    if d < 0 {
-                        d += 10;
-                        borrow = 1;
-                    }
-                    r |= d << shift;
-                }
-                let bin = a - v + carry - 1;
-                self.set_flag(Flags::V, ((a ^ v) & (a ^ bin) & 0x8000) != 0);
-                self.set_flag(Flags::C, borrow == 0);
-                self.a = r as u16;
-                self.set_nz(self.a, false);
-            }
-            return;
-        }
-        // Binary: A - M - !C == A + !M + C.
-        if self.m8() {
-            let inverted = (!v) & 0xFF;
-            let saved_d = self.p & Flags::D;
-            self.p &= !Flags::D;
-            self.op_adc(inverted);
-            self.p |= saved_d;
+        self.add_to_a(!v, true);
+    }
+
+    /// Adds `v` and the carry to the accumulator; `subtract` says `v` is
+    /// an inverted subtrahend. In decimal mode the ALU adds a digit at a
+    /// time and corrects each before carrying into the next: after an
+    /// addition a digit over 9 has 6 added, after a subtraction a digit
+    /// that produced no carry has 6 taken away. The overflow flag comes
+    /// from the sum before the top digit is corrected. Digits that are
+    /// not valid BCD come out as they do on the hardware.
+    fn add_to_a(&mut self, v: u16, subtract: bool) {
+        let width8 = self.m8();
+        let (mask, sign, digits) = if width8 {
+            (0xFF, 0x80, 2)
         } else {
-            let inverted = !v;
-            let saved_d = self.p & Flags::D;
-            self.p &= !Flags::D;
-            self.op_adc(inverted);
-            self.p |= saved_d;
+            (0xFFFF, 0x8000, 4)
+        };
+        let a = (self.a & mask) as i32;
+        let v = (v & mask) as i32;
+        let mut carry = self.flag(Flags::C) as i32;
+        let decimal = self.flag(Flags::D);
+        // Corrects the digit at `shift` of a sum whose higher digits are
+        // still to come.
+        let correct = |sum: i32, shift: u32| {
+            let digit_max = (0x10 << shift) - 1;
+            if subtract && sum <= digit_max {
+                sum - (6 << shift)
+            } else if !subtract && sum > digit_max - (6 << shift) {
+                sum + (6 << shift)
+            } else {
+                sum
+            }
+        };
+        let mut sum = a + v + carry;
+        if decimal {
+            sum = 0;
+            for digit in 0..digits {
+                let shift = 4 * digit;
+                let below = (1 << shift) - 1;
+                let nibble = 0xF << shift;
+                sum = (a & nibble) + (v & nibble) + (carry << shift) + (sum & below);
+                if digit + 1 < digits {
+                    sum = correct(sum, shift);
+                    carry = (sum > (nibble | below)) as i32;
+                }
+            }
         }
+        self.set_flag(Flags::V, !(a ^ v) & (a ^ sum) & sign != 0);
+        if decimal {
+            sum = correct(sum, 4 * (digits - 1));
+        }
+        self.set_flag(Flags::C, sum > mask as i32);
+        self.a = (self.a & !mask) | (sum as u16 & mask);
+        self.set_nz(self.a, width8);
     }
 
     fn op_cmp(&mut self, reg: u16, v: u16, width8: bool) {
@@ -1564,7 +1536,7 @@ impl Cpu {
             }
             0x7C => {
                 let p = self.fetch16(bus).wrapping_add(self.x);
-                let a = ((self.pb as u32) << 16) | p as u32;
+                let a = ((self.pb as u32) << 16) | p as u32 | WRAPS_IN_BANK;
                 self.pc = self.read16(bus, a);
             }
             0xDC => {
@@ -1591,7 +1563,7 @@ impl Cpu {
                 let p = self.fetch16(bus);
                 let ret = self.pc.wrapping_sub(1);
                 self.push16(bus, ret);
-                let a = ((self.pb as u32) << 16) | p.wrapping_add(self.x) as u32;
+                let a = ((self.pb as u32) << 16) | p.wrapping_add(self.x) as u32 | WRAPS_IN_BANK;
                 self.pc = self.read16(bus, a);
             }
             0x60 => {
@@ -1832,21 +1804,20 @@ impl Cpu {
         self.run_to_sentinel(bus, limit)
     }
 
-    /// Calls a subroutine in the current program bank as if by `JSR` and
-    /// runs until it returns with `RTS`. The sentinel lives in bank `$FF`,
-    /// so the program bank is switched there for the duration.
+    /// Calls a subroutine as if by `JSR` from its own bank and runs until
+    /// it returns with `RTS`. An `RTS` stays in the routine's bank, so it
+    /// cannot land on the bank `$FF` sentinel; the return is recognised
+    /// instead by the program counter reaching the sentinel offset with
+    /// the stack back where the call found it. A `JSL` frame sits under
+    /// the `JSR` one, so a routine that ends in `RTL` after all returns
+    /// to the sentinel proper.
     pub fn call_jsr(&mut self, bus: &mut impl Bus, addr: u32, limit: u64) -> Result<(), CpuError> {
-        // Fake a JSL frame beneath so a stray RTL still lands on the sentinel.
         self.push8(bus, RETURN_PB);
         self.push16(bus, RETURN_PC.wrapping_sub(1));
         self.pb = (addr >> 16) as u8;
         self.pc = addr as u16;
-        // A JSR-style return needs the sentinel in the same bank; place a
-        // second frame that returns to the JSL sentinel via an RTL there.
-        // Simpler: run until the JSR-level RTS pops the address below.
         let start = self.steps;
         let return_sp = self.sp;
-        // Push the RTS return address (sentinel - 1) on top.
         self.push16(bus, RETURN_PC.wrapping_sub(1));
         while !((self.pc == RETURN_PC && self.sp == return_sp)
             || (self.pb == RETURN_PB && self.pc == RETURN_PC))
@@ -1860,7 +1831,7 @@ impl Cpu {
             }
             self.step(bus)?;
         }
-        // Drop the fake JSL frame if the routine returned with RTS.
+        // An `RTS` leaves the `JSL` frame behind.
         if self.sp == return_sp {
             self.sp = self.sp.wrapping_add(3);
         }

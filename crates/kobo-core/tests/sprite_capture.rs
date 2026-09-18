@@ -6,7 +6,7 @@
 
 mod common;
 
-use kobo_core::{expand, sprites};
+use kobo_core::{expand, ram, sprites};
 
 /// Sprites with no graphics of their own: the invisible warp hole and the
 /// invisible mushroom.
@@ -151,6 +151,34 @@ fn candle_flames_ride_on_layer_2() {
     assert!(scene.layer2_objects.is_empty());
 }
 
+/// Invictus level 136 ends its per-level routine with `RTS` under a `JSL`,
+/// so every pass that runs the level loop goes off the rails. The level
+/// still loads, without a player and with markers, and says why.
+#[test]
+fn passes_the_cpu_gives_up_on_are_reported() {
+    use expand::Pass;
+    for (_, rom) in common::lunar_magic_roms() {
+        if rom.sha1_hex() != "6dd24c31b5d8c568aab0de6d68855f609cbe8f08" {
+            continue;
+        }
+        let tiles = expand::expand_level(&rom, 0x136).unwrap();
+        let (_, scene) = capture(&rom, 0x136);
+        assert!(tiles.player.is_empty());
+        assert!(matches!(tiles.diagnostics[..], [ref d] if d.pass == Pass::Player));
+        assert!(!scene.undrawn.is_empty());
+        assert!(
+            scene
+                .diagnostics
+                .iter()
+                .any(|d| matches!(d.pass, Pass::Sprite { .. }))
+        );
+    }
+    let Some(rom) = common::vanilla() else { return };
+    let tiles = expand::expand_level(&rom, 0x105).unwrap();
+    let (_, scene) = capture(&rom, 0x105);
+    assert!(tiles.diagnostics.is_empty() && scene.diagnostics.is_empty());
+}
+
 #[test]
 fn a_spread_of_vanilla_levels_captures_cleanly() {
     let Some(rom) = common::vanilla() else { return };
@@ -179,8 +207,10 @@ fn player_is_drawn_at_the_entrance() {
     let Some(rom) = common::vanilla() else { return };
     let tiles = expand::expand_level(&rom, 0x105).unwrap();
     let player = |tiles: &expand::LevelTiles| {
-        let at = |i: usize| i32::from(u16::from_le_bytes([tiles.wram[i], tiles.wram[i + 1]]));
-        (at(0x94), at(0x96))
+        (
+            i32::from(tiles.ram.u16(ram::PLAYER_X)),
+            i32::from(tiles.ram.u16(ram::PLAYER_Y)),
+        )
     };
     let (x, y) = player(&tiles);
     assert_eq!((x, y), (0x10, 0x160));
@@ -199,7 +229,11 @@ fn player_is_drawn_at_the_entrance() {
     // The cannon pipe fires him up and to the right of where he entered,
     // and the pass follows him until the launch ends.
     let tiles = expand::expand_level(&rom, 0x0D0).unwrap();
-    assert_eq!(tiles.wram[0x71], 7, "cannon pipe entrance");
+    assert_eq!(
+        tiles.ram.u8(ram::PLAYER_ANIMATION),
+        7,
+        "cannon pipe entrance"
+    );
     let (x, y) = player(&tiles);
     let (w, h) = tiles.size();
     assert!(!tiles.player.is_empty());

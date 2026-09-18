@@ -7,7 +7,7 @@
 mod common;
 
 use kobo_core::expand::{self, ExpandError, LevelTiles, SCREEN_COLS};
-use kobo_core::{Rom, map16};
+use kobo_core::{Rom, map16, ram};
 use sha1::{Digest, Sha1};
 use std::collections::HashMap;
 
@@ -27,9 +27,6 @@ fn vram_offset(bg_sc: u8, col8: usize, row8: usize) -> usize {
 /// The game does not upload the background tilemap for these.
 const MODES_WITHOUT_BACKGROUND: [u8; 4] = [0x09, 0x0B, 0x0F, 0x10];
 
-/// Direct page `$20`: the layer 2 Y position after loading.
-const LAYER2_Y: usize = 0x20;
-
 /// The background rows the game uploads. A 64-tall tilemap takes the whole
 /// two-screen background. Lunar Magic's 32-tall tilemap takes the 16 rows
 /// from one above the initial layer 2 position. The loader masks source
@@ -40,7 +37,7 @@ fn uploaded_rows(tiles: &LevelTiles) -> std::ops::Range<isize> {
     if tiles.bg_sc[1] & 0x02 != 0 {
         return 0..rows;
     }
-    let y = u16::from_le_bytes([tiles.wram[LAYER2_Y], tiles.wram[LAYER2_Y + 1]]) as isize;
+    let y = tiles.ram.u16(ram::LAYER2_Y) as isize;
     let first = y / 16 - 1;
     first..first + 16
 }

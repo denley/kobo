@@ -8,6 +8,7 @@ use kobo_core::gfx::Tile8;
 use kobo_core::level::PrimaryHeader;
 use kobo_core::map16::{BG_TILE_COUNT, Map16Tile, Tile8Ref};
 use kobo_core::palette::{Color15, Palette};
+use kobo_core::ram;
 use kobo_core::render::{self, LayerTiles};
 use kobo_core::video::{Layer3, Screen};
 use std::collections::HashMap;
@@ -35,7 +36,7 @@ fn scene() -> (LevelTiles, LayerTiles, Palette) {
         screens: 3,
         low: vec![0; GRID_LEN],
         high: vec![0; GRID_LEN],
-        wram: vec![],
+        ram: Default::default(),
         map16: HashMap::from([(0, solid_tile(0)), (0x200, solid_tile(1))]),
         pipe_map16: None,
         bg_map16: vec![solid_tile(2); BG_TILE_COUNT],
@@ -53,6 +54,7 @@ fn scene() -> (LevelTiles, LayerTiles, Palette) {
         layer2_tilemap: Some((vec![0; LAYER2_TILEMAP_LEN], vec![0; LAYER2_TILEMAP_LEN])),
         layer2_screen_len: SCREEN_COLS * SCREEN_ROWS,
         rows: SCREEN_ROWS,
+        diagnostics: vec![],
     };
     let mut gfx = LayerTiles::blank();
     gfx.tiles[1] = Tile8 {
@@ -376,6 +378,7 @@ fn sprite_objects_respect_layer_priorities() {
         object_select: 0x03,
         undrawn: vec![],
         layer2_objects: vec![],
+        diagnostics: vec![],
     };
     let mut layers = render::level_layers(&tiles, &gfx);
     render::draw_sprite_scene(&mut layers, &scene, [0, 0], &vram);
@@ -414,7 +417,7 @@ fn boss_preparation_does_not_replace_the_level_dimensions() {
     assert_eq!(tiles.screens, 1);
     assert_eq!(tiles.size(), (16, 27));
     // The raw dump still includes the boss routine's overwritten byte.
-    assert_eq!(tiles.wram[0x5D], 0xFF);
+    assert_eq!(tiles.ram.u8(ram::SCREENS), 0xFF);
     let image = render::level_image(
         &tiles,
         &LayerTiles::from_vram(&tiles.vram),
@@ -470,7 +473,8 @@ fn boss_arenas_capture_mode_switches_and_object_art() {
                 .iter()
                 .any(|o| o[1] < 224)
         );
-        assert_eq!(tiles.wram[0x13], 0); // Keep the frame counter from before the drawing pass.
+        // Keep the frame counter from before the drawing pass.
+        assert_eq!(tiles.ram.u8(ram::TRUE_FRAME), 0);
     }
 }
 

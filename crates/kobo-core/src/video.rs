@@ -145,6 +145,18 @@ pub struct SpriteObject {
     pub large: bool,
 }
 
+impl SpriteObject {
+    /// The object moved by (`dx`, `dy`): from screen to level coordinates,
+    /// given the camera.
+    pub fn translated(self, dx: i32, dy: i32) -> Self {
+        Self {
+            x: self.x + dx,
+            y: self.y + dy,
+            ..self
+        }
+    }
+}
+
 /// The sprites of an ordinary level as the game draws them on their first
 /// frame, front to back, plus the level sprite entries that produced no
 /// graphics at all (generators, scroll commands, and the like).
@@ -159,4 +171,7 @@ pub struct SpriteScene {
     /// in layer 2 pixels. The game keeps eight bits of their position, so
     /// they repeat every 256 pixels along the layer.
     pub layer2_objects: Vec<SpriteObject>,
+    /// Passes the CPU core gave up on; what they would have drawn is in
+    /// `undrawn` instead.
+    pub diagnostics: Vec<crate::expand::Diagnostic>,
 }

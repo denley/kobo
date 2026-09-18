@@ -11,6 +11,7 @@ use kobo_core::image::{grayscale, tile_sheet};
 use kobo_core::level::{self, Layer2Data};
 use kobo_core::map16;
 use kobo_core::palette::{self, LevelPaletteSelect};
+use kobo_core::ram::RamAddr;
 use kobo_core::render::{self, LayerTiles};
 use kobo_core::sprites;
 use kobo_core::{Mapping, PcAddr, Rom, SnesAddr, config};
@@ -400,6 +401,7 @@ fn level_png(
     let pal = tiles.palette();
     let layer_tiles = LayerTiles::from_vram(&tiles.vram);
     let mut layers = render::level_layers(&tiles, &layer_tiles);
+    let mut diagnostics = tiles.diagnostics.clone();
     let mut marked: Vec<(usize, usize, u8)> = Vec::new();
     if with_sprites && tiles.boss_scene.is_none() {
         let list = sprites::read_sprites_at(rom, tiles.sprite_data_ptr())?;
@@ -410,10 +412,12 @@ fn level_png(
             }));
         } else {
             let scene = expand::capture_sprites(rom, &tiles, &list)?;
+            diagnostics.extend(scene.diagnostics.iter().cloned());
             render::draw_sprite_scene(&mut layers, &scene, tiles.layer2_offset(), &tiles.vram);
             marked = scene.undrawn;
         }
     }
+    warn(level, &diagnostics);
     // The player's OAM slots follow the sprites', so he goes behind them.
     if with_player {
         render::draw_objects(&mut layers, &tiles.player, tiles.object_select, &tiles.vram);
@@ -432,6 +436,27 @@ fn level_png(
         out.display()
     );
     Ok(())
+}
+
+/// Reports the passes a capture gave up on. Broken per-level code fails
+/// every pass the same way, so each distinct error is reported once.
+fn warn(level: u16, diagnostics: &[expand::Diagnostic]) {
+    let mut reported: Vec<&kobo_core::cpu::CpuError> = Vec::new();
+    for diagnostic in diagnostics {
+        if reported.contains(&&diagnostic.error) {
+            continue;
+        }
+        reported.push(&diagnostic.error);
+        let others = diagnostics
+            .iter()
+            .filter(|other| other.error == diagnostic.error)
+            .count()
+            - 1;
+        match others {
+            0 => eprintln!("warning: level {level:03X}: {diagnostic}"),
+            n => eprintln!("warning: level {level:03X}: {diagnostic} (and {n} more passes)"),
+        }
+    }
 }
 
 fn level_dump(rom: &Rom, level: &str, dir: &PathBuf) -> Result<()> {
@@ -549,14 +574,11 @@ fn level_wram(rom: &Rom, level: &str, addr: &str, len: usize) -> Result<()> {
     let level = parse_level(level)?;
     let tiles = expand::expand_level(rom, level)?;
     let start = u32::from_str_radix(addr.trim_start_matches('$'), 16).context("bad address")?;
-    if !(0x7E_0000..0x80_0000).contains(&start) {
+    let Some(first) = RamAddr::checked(start) else {
         bail!("address must be in $7E0000-$7FFFFF");
-    }
-    let off = (start - 0x7E_0000) as usize;
-    for (i, chunk) in tiles.wram[off..(off + len).min(tiles.wram.len())]
-        .chunks(16)
-        .enumerate()
-    {
+    };
+    let len = len.min((0x80_0000 - start) as usize);
+    for (i, chunk) in tiles.ram.bytes(first, len).chunks(16).enumerate() {
         let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02X}")).collect();
         println!("${:06X}: {}", start as usize + i * 16, hex.join(" "));
     }

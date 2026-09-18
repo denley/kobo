@@ -1,0 +1,84 @@
+//! ROM routines the capture passes call, from the vanilla layout. Lunar
+//! Magic keeps these entry points in place.
+
+/// The reset vector and the main game loop it ends in.
+pub const RESET: u32 = 0x00_8000;
+pub const GAME_LOOP: u32 = 0x00_806B;
+/// `CODE_05D796`: resolves the level number and header pointers.
+pub const LOAD_HEADER_POINTERS: u32 = 0x05_D796;
+/// `CODE_05801E`: clears the buffers and runs `LoadLevel`.
+pub const LOAD_LEVEL_DATA: u32 = 0x05_801E;
+/// `CODE_00B888`: decompresses GFX32/GFX33 into RAM. The game runs it
+/// once during the "Nintendo Presents" screen; the animated tile
+/// uploads read from that RAM.
+pub const DECOMPRESS_PLAYER_GFX: u32 = 0x00_B888;
+/// `ClearOutLayer3`: DMA-fills the layer 3 tilemap. Its side effect of
+/// leaving the VRAM port in two-byte mode is what the upload below
+/// relies on.
+pub const CLEAR_LAYER3: u32 = 0x00_85FA;
+/// `CODE_00A993`: uploads GFX28-GFX2B (layer 3 tiles and the status bar
+/// font) to VRAM word `$4000` through the port. The game runs it once
+/// during the "Nintendo Presents" screen and level loads leave that
+/// region alone.
+pub const UPLOAD_LAYER3_GFX: u32 = 0x00_A993;
+/// `CODE_00A635`: initialises level RAM and the player's entrance.
+pub const INIT_LEVEL_RAM: u32 = 0x00_A635;
+/// `CODE_00A796`: initial layer 2 scroll positions.
+pub const INIT_LAYER2_SCROLL: u32 = 0x00_A796;
+/// `GM12PrepLevel`: game mode $12. Uploads GFX, palettes, and the
+/// initial tilemaps; draws boss arenas; sets up layer 3. Ends with RTS.
+pub const PREPARE_LEVEL: u32 = 0x00_A59C;
+/// Lunar Magic's Map16 tile pointer routine. Called with a 16-bit
+/// accumulator holding the tile number times two; returns the pointer's
+/// low word in A and its bank in direct page `$0C`. Its body encodes
+/// the Map16 page layout, which differs between Lunar Magic versions.
+pub const LM_MAP16_POINTER: u32 = 0x06_F540;
+/// Inside `CODE_058D7A` (initial layer 2 tilemap upload), where vanilla
+/// stores `#Map16BGTiles` to `$0A`. Lunar Magic 2.3 and later replace
+/// the store with a `JSL` to a routine that leaves the level's BG
+/// Map16 table pointer in `$0A`-`$0C`; the BG pages live in a separate
+/// block from the layer 1 pages, so `LM_MAP16_POINTER` cannot find
+/// them. Older versions keep the vanilla table.
+pub const BG_MAP16_BASE_HOOK: u32 = 0x05_8DA4;
+/// Inside the NMI handler: writes the Mode 7 boss arena's video
+/// registers (mode, tilemap, character base, scroll, matrix).
+pub const MODE7_NMI_REGISTERS: u32 = 0x00_82F7;
+/// Where the NMI handler arms the status bar IRQ; Y holds its scanline.
+pub const SET_STATUS_BAR_IRQ: u32 = 0x00_8294;
+/// The IRQ handler's boss-arena branch, which switches video modes at
+/// the ceiling and floor lines.
+pub const BOSS_IRQ: u32 = 0x00_83BA;
+/// Common exit of the IRQ handler.
+pub const EXIT_IRQ: u32 = 0x00_83B2;
+/// `CODE_00A1DA`: one game-mode `$14` drawing pass, which fills OAM
+/// with the player, boss, and sprite-based arena walls and floor.
+pub const DRAW_LEVEL_FRAME: u32 = 0x00_A1DA;
+/// `CODE_02A802`: the body of `LoadSprFromLevel`, after its
+/// every-other-frame check. Spawns the level sprites at the column the
+/// camera position and scroll direction select. Lunar Magic reroutes
+/// its inner loop but keeps this entry.
+pub const SPAWN_SPRITES: u32 = 0x02_A802;
+/// `CODE_0098A9`: uploads the boss's graphics to VRAM.
+pub const UPLOAD_BOSS_TILES: u32 = 0x00_98A9;
+/// `MarioGFXDMA` (`$00A300`): the NMI's per-frame upload of the
+/// player's tiles (VRAM words `$6000`-`$60FF`, `$6100`-`$61FF`, and
+/// `$67F0`) and palette (CGRAM `$86`-`$8F`), from the pointers the
+/// drawing routine left.
+pub const UPLOAD_PLAYER_TILES: u32 = 0x00_A300;
+/// `MAP16AppTable`: four pointers into bank `$0D`, one per 8-column
+/// stretch of the level, to alternative definitions of the vertical
+/// pipe tiles `133`-`13A`. The initial tilemap upload (`CODE_0580BD`)
+/// and the scroll setup (`CODE_05877E`) re-point those tiles from it
+/// as each column goes up, so a pipe's colour follows its position.
+pub const PIPE_POINTER_TABLE: u32 = 0x05_8776;
+/// `UpdateScreenPosition`: the level loop's per-frame camera update.
+/// It follows the player with layer 1 and derives the layer 2 position
+/// from it and the level's layer 2 scroll settings (`$1413`/`$1414`):
+/// the same position, half of it, or a fraction plus the offset
+/// `CODE_00A796` worked out at load time.
+pub const UPDATE_CAMERA: u32 = 0x00_F6DB;
+/// `ProcScreenScrollCmds`: the level loop's per-frame layer scroll
+/// update, run right after the camera update. It moves layer 2 and
+/// layer 3 according to the level's scroll settings (tides, parallax
+/// backgrounds, autoscroll) from the camera delta `$17BC`-`$17BD`.
+pub const SCROLL_LAYERS: u32 = 0x05_BC00;

@@ -66,6 +66,18 @@ Early stage: roadmap step 1 is in progress.
 - `kobo_core::addr` is the only place that knows how SNES addresses map to file offsets.
   Every ROM read takes a `SnesAddr` and goes through the ROM's `Mapping` (LoROM or SA-1).
   Conversions mirror Asar's conventions so addresses agree with the rest of the toolchain.
+- `kobo_core::ram` is the only place that knows where the game keeps its variables. A
+  `RamAddr` names a variable by its vanilla `$7E`/`$7F` address, a `RamMap` resolves it to a
+  bus address (only `Vanilla` exists; SA-1 Pack's remap is the variant to add, along with its
+  22 sprite slots), and `Ram` is the memory itself: `bus.ram.u8(ram::LEVEL_MODE)`, never
+  `wram[0x1925]`. Tables are indexed from their resolved start (`u8_at`). A `Ram` clone is a
+  snapshot; video memory is not part of it, since the game never reads it back.
+- `kobo_core::expand` runs ROM code. `machine` owns the CPU, the bus, and `Call` (the register
+  state a routine is entered with; every call starts from reset registers), `load` runs the
+  loader phases, and `sprite_capture`, `player`, `boss`, `layer3`, and `map16` are the passes
+  over the loaded level. `routines` holds the ROM addresses, `tiles` the `LevelTiles` result.
+  A pass the CPU core gives up on is recorded as a `Diagnostic` (`LevelTiles::diagnostics`,
+  `SpriteScene::diagnostics`) instead of failing the level; the CLI prints them as warnings.
 - `kobo_core::rom::Rom` strips and remembers the 512-byte copier header; `data()` is always
   headerless. Identity is by SHA-1 of the headerless image.
 
@@ -132,6 +144,14 @@ Windows, and macOS. Keep all three green.
   although the dumped OAM holds them where the player pass puts them; treat those
   two frames' object layer as unreliable.
 - Lunar Magic exports (hashes in `tests/fixtures/`) are the oracle for GFX, palette, and Map16.
+- **CPU suite**: `tests/cpu_single_step.rs` runs the 65816 core against SingleStepTests
+  (10,000 native-mode tests per opcode, about a second in release) when `KOBO_65816_TESTS`
+  points at the suite's `v1` directory. The native files are in
+  `~/.local/share/kobo/cpu-tests/65816/v1` (sparse clone of `SingleStepTests/65816`, 1.7 GiB,
+  no licence, never committed). `BRK`, `COP`, `WAI`, and `STP` are left out (the core stops
+  on them by design), and the suite's block moves are cut off after 100 cycles, so those
+  are compared over the bytes moved. All other opcodes pass in full. SMW itself never sets
+  decimal mode; custom code may.
 - **Lunar Magic hacks**: `tests/layer2_background.rs` runs on every ROM listed in `KOBO_LM_ROMS`
   (`:`-separated paths) as well as the vanilla ROM. It rebuilds the layer 2 tilemap the game
   uploaded to VRAM from the captured background buffer and BG Map16 table, which catches a
@@ -224,7 +244,8 @@ Windows, and macOS. Keep all three green.
   animated slots (frame-dependent) and tilemap areas filled on later frames; CGRAM matches
   except one per-frame colour.
 - The player (`expand::capture_player`, `LevelTiles::player`): from the prepared state, with
-  every sprite slot cleared, every `$1938` load flag set, and the generator `$18B9` zeroed,
+  every sprite slot cleared, every load flag set (whichever table the loader reads, as in
+  the sprite passes), and the generator `$18B9` zeroed,
   `GM14Level` frames run until the entrance action `$71` is zero (a cannon pipe takes a few
   dozen; pipes and doors in vanilla start at zero), then `MarioGFXDMA` (`$00A300`) uploads
   his tiles (VRAM words `$6000`, `$6100`, `$67F0`) and palette (CGRAM `$86`-`$8F`), which
@@ -287,7 +308,8 @@ Windows, and macOS. Keep all three green.
   UberASM routine with `RTS` under a `JSL`) counts as drawing nothing, and the player pass
   leaves the level without a player for the same reason. Sprites that leave OAM empty become
   ID markers; in vanilla those are `19`, `1F`, `54` (tiles until it turns), `6D`, `82`,
-  `89`, `8C`, `8E`, `C7`, and the slotless ones. Rendering stacks by Mode 1 priority:
+  `89`, `8C`, `8E`, `C7`, and the slotless ones. Every such pass is listed in
+  `SpriteScene::diagnostics` with the CPU error. Rendering stacks by Mode 1 priority:
   layer 2 low (5), layer 1 low (6), layer 2 high (8), layer 1 high (9), objects 2/4/7/10.
 - The bus models the CPU multiply/divide registers (`$4202`-`$4206`, `$4214`-`$4217`);
   sprite code uses them constantly.
@@ -472,6 +494,10 @@ Windows, and macOS. Keep all three green.
   ROM code; an undrawn-sprite census over every level of the corpus runs without errors
   apart from levels whose loader already fails, but nothing compares custom sprites to an
   emulator. Boss arenas show the OAM of the first drawing pass instead.
+- Sprites whose tiles are uploaded per frame into the player's dynamic tile area (the
+  Podoboo; VRAM bytes `$C0C0`-`$C305` were seen to matter) are drawn from whatever the
+  player pass left there: the sprite passes never run the NMI upload (`MarioGFXDMA`), and the
+  scene is drawn from the level's VRAM, not the pass's.
 - `GFX27`'s layout is unknown; `GFX32`/`GFX33` are not handled by the GFX tooling.
 
 ## Open decisions

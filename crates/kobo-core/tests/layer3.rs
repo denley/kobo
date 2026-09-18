@@ -7,7 +7,7 @@
 mod common;
 
 use kobo_core::addr::SnesAddr;
-use kobo_core::{expand, level};
+use kobo_core::{expand, level, ram};
 
 /// Per-level layer 3 setting: bits 7-6 of the secondary header byte at
 /// `$05F200`.
@@ -98,5 +98,5 @@ fn vanilla_scroll_rates_and_positions_follow_the_tileset_table() {
 
 /// `$0D9D` (main screen designation) bit 2 after loading.
 fn layer3_on_main(tiles: &expand::LevelTiles) -> bool {
-    tiles.wram[0x0D9D] & 0x04 != 0
+    tiles.ram.u8(ram::MAIN_SCREEN) & 0x04 != 0
 }

@@ -6,12 +6,11 @@
 //! else reads as zero and ignores writes.
 
 use crate::cpu::Bus;
+use crate::ram::{Ram, RamMap};
 use crate::rom::Rom;
 
-pub const WRAM_LEN: usize = 0x2_0000;
 pub const VRAM_LEN: usize = 0x1_0000;
 pub const CGRAM_LEN: usize = 0x200;
-const SRAM_LEN: usize = 0x8000;
 
 #[derive(Clone, Copy, Default, Debug)]
 struct DmaChannel {
@@ -21,12 +20,12 @@ struct DmaChannel {
     size: u16,
 }
 
-/// ROM, 128 KiB of WRAM, VRAM, CGRAM, a scratch SRAM, and enough register
-/// state to follow uploads.
+/// ROM, the game's RAM, VRAM, CGRAM, and enough register state to follow
+/// uploads. The game can write video memory but never reads it back here,
+/// so a routine's outcome depends on `ram` alone.
 pub struct SmwBus<'a> {
     pub rom: &'a Rom,
-    pub wram: Vec<u8>,
-    pub sram: Vec<u8>,
+    pub ram: Ram,
     pub vram: Vec<u8>,
     /// Which VRAM bytes have been written since reset, so callers can
     /// tell uploaded data from the untouched zero fill.
@@ -84,8 +83,7 @@ impl<'a> SmwBus<'a> {
     pub fn new(rom: &'a Rom) -> Self {
         Self {
             rom,
-            wram: vec![0; WRAM_LEN],
-            sram: vec![0; SRAM_LEN],
+            ram: Ram::new(RamMap::Vanilla),
             vram: vec![0; VRAM_LEN],
             vram_written: vec![false; VRAM_LEN],
             cgram: vec![0; CGRAM_LEN],
@@ -119,18 +117,41 @@ impl<'a> SmwBus<'a> {
         }
     }
 
-    /// Reads a slice of WRAM by its `$7Exxxx` / `$7Fxxxx` address.
-    pub fn wram_slice(&self, addr: u32, len: usize) -> &[u8] {
-        let start = (addr - 0x7E_0000) as usize;
-        &self.wram[start..start + len]
+    /// Reads a 24-bit little-endian pointer from the bus.
+    pub fn read_u24(&mut self, addr: u32) -> u32 {
+        (0..3).fold(0, |value, i| {
+            value | (self.read(addr + i) as u32) << (8 * i)
+        })
     }
 
-    pub fn wram_u8(&self, addr: u32) -> u8 {
-        self.wram[(addr - 0x7E_0000) as usize]
-    }
-
-    pub fn set_wram_u8(&mut self, addr: u32, value: u8) {
-        self.wram[(addr - 0x7E_0000) as usize] = value;
+    fn read_register(&mut self, reg: u16) -> u8 {
+        match reg {
+            0x2140..=0x2143 => {
+                let i = (reg & 3) as usize;
+                if self.apu_in_transfer || i >= 2 {
+                    self.apu_ports[i]
+                } else if i == 0 && self.apu_jump_echo.is_some() {
+                    self.apu_jump_echo.take().unwrap()
+                } else {
+                    [0xAA, 0xBB][i]
+                }
+            }
+            0x4214 => self.quotient as u8,
+            0x4215 => (self.quotient >> 8) as u8,
+            0x4216 => self.product as u8,
+            0x4217 => (self.product >> 8) as u8,
+            0x4212 => {
+                // Let the ROM's wait-for-HBlank handshake finish.
+                // This is a headless loader, not a cycle-timed PPU.
+                let value = if self.hblank { 0x40 } else { 0 };
+                self.hblank = !self.hblank;
+                value
+            }
+            _ => {
+                self.unmapped_reads += 1;
+                0
+            }
+        }
     }
 
     fn rom_read(&mut self, addr: u32) -> u8 {
@@ -341,52 +362,27 @@ impl<'a> SmwBus<'a> {
 
 impl Bus for SmwBus<'_> {
     fn read(&mut self, addr: u32) -> u8 {
-        let bank = (addr >> 16) as u8;
-        let off = addr as u16;
-        match bank {
-            0x7E | 0x7F => self.wram[(addr - 0x7E_0000) as usize],
-            0x00..=0x3F | 0x80..=0xBF => match off {
-                0x0000..=0x1FFF => self.wram[off as usize],
-                0x2140..=0x2143 => {
-                    let i = (off & 3) as usize;
-                    if self.apu_in_transfer || i >= 2 {
-                        self.apu_ports[i]
-                    } else if i == 0 && self.apu_jump_echo.is_some() {
-                        self.apu_jump_echo.take().unwrap()
-                    } else {
-                        [0xAA, 0xBB][i]
-                    }
-                }
-                0x4214 => self.quotient as u8,
-                0x4215 => (self.quotient >> 8) as u8,
-                0x4216 => self.product as u8,
-                0x4217 => (self.product >> 8) as u8,
-                0x4212 => {
-                    // Let the ROM's wait-for-HBlank handshake finish.
-                    // This is a headless loader, not a cycle-timed PPU.
-                    let value = if self.hblank { 0x40 } else { 0 };
-                    self.hblank = !self.hblank;
-                    value
-                }
-                0x2000..=0x7FFF => {
-                    self.unmapped_reads += 1;
-                    0
-                }
-                _ => self.rom_read(addr),
-            },
-            0x70..=0x7D if off < 0x8000 => self.sram[(off as usize) % SRAM_LEN],
+        // Most reads are instruction fetches from the upper half of a
+        // bank, which is ROM everywhere but in the work RAM banks.
+        let work_ram_bank = addr >> 17 == 0x7E >> 1;
+        if addr & 0x8000 != 0 && !work_ram_bank {
+            return self.rom_read(addr);
+        }
+        if let Some(value) = self.ram.read(addr) {
+            return value;
+        }
+        match ((addr >> 16) as u8, addr as u16) {
+            (0x00..=0x3F | 0x80..=0xBF, reg @ 0x2000..=0x7FFF) => self.read_register(reg),
             _ => self.rom_read(addr),
         }
     }
 
     fn write(&mut self, addr: u32, value: u8) {
-        let bank = (addr >> 16) as u8;
-        let off = addr as u16;
-        match bank {
-            0x7E | 0x7F => self.wram[(addr - 0x7E_0000) as usize] = value,
-            0x00..=0x3F | 0x80..=0xBF if off < 0x2000 => self.wram[off as usize] = value,
-            0x00..=0x3F | 0x80..=0xBF if off < 0x8000 => self.write_register(off, value),
-            0x70..=0x7D if off < 0x8000 => self.sram[(off as usize) % SRAM_LEN] = value,
+        if self.ram.write(addr, value) {
+            return;
+        }
+        match ((addr >> 16) as u8, addr as u16) {
+            (0x00..=0x3F | 0x80..=0xBF, reg @ 0x2000..=0x7FFF) => self.write_register(reg, value),
             _ => self.unmapped_writes += 1,
         }
     }
@@ -464,7 +460,9 @@ mod tests {
             &[0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17]
         );
         // VRAM: mode 1 to $2118/$2119, 6 bytes from WRAM $7E1000 via channel 1.
-        bus.wram[0x1000..0x1006].copy_from_slice(&[1, 2, 3, 4, 5, 6]);
+        for (i, value) in (1..=6).enumerate() {
+            bus.ram.poke(0x7E_1000 + i as u32, value);
+        }
         bus.write(0x002115, 0x80);
         bus.write(0x002116, 0x00);
         bus.write(0x002117, 0x20);
@@ -480,7 +478,7 @@ mod tests {
         // Fixed-source fill: 4 bytes of the same value.
         bus.write(0x002116, 0x00);
         bus.write(0x002117, 0x30);
-        bus.wram[0x1100] = 0x25;
+        bus.ram.poke(0x7E_1100, 0x25);
         bus.write(0x004310, 0x09);
         bus.write(0x004312, 0x00);
         bus.write(0x004313, 0x11);
