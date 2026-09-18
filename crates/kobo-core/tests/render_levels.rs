@@ -375,12 +375,36 @@ fn sprite_objects_respect_layer_priorities() {
         ],
         object_select: 0x03,
         undrawn: vec![],
+        layer2_objects: vec![],
     };
     let mut layers = render::level_layers(&tiles, &gfx);
-    render::draw_sprite_scene(&mut layers, &scene, &vram);
+    render::draw_sprite_scene(&mut layers, &scene, [0, 0], &vram);
     let img = render::compose_level(&tiles, &layers, &pal);
     assert_eq!(img.pixels[0], [0, 255, 0]); // priority 2 beats low-priority layer 1
     assert_eq!(img.pixels[16], [255, 0, 0]); // but not high-priority layer 1
+
+    // An object riding on layer 2 shows wherever that layer is drawn,
+    // once per 256 pixels: at x = 40 + 16 - 256k with the layer 16 right.
+    let riding = SpriteScene {
+        objects: vec![],
+        layer2_objects: vec![SpriteObject {
+            x: 40,
+            y: 64,
+            tile: 0,
+            attr: 0x20,
+            large: true,
+        }],
+        ..scene
+    };
+    tiles.screens = 2;
+    let mut layers = render::level_layers(&tiles, &gfx);
+    render::draw_sprite_scene(&mut layers, &riding, [16, 8], &vram);
+    pal.set(8, 1, kobo_core::palette::Color15::from_rgb5(31, 31, 0));
+    let img = render::compose_level(&tiles, &layers, &pal);
+    let at = |x: usize, y: usize| img.pixels[y * 512 + x];
+    assert_eq!(at(56, 72), [255, 255, 0]);
+    assert_eq!(at(56 + 256, 72), [255, 255, 0]);
+    assert_ne!(at(40, 64), [255, 255, 0]);
 }
 
 #[test]

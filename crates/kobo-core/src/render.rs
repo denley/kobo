@@ -503,8 +503,31 @@ fn layer3_pixel(vram: &[u8], layer3: &crate::video::Layer3, x: i32, y: i32) -> O
 /// Draws captured sprite objects into the object layer, front to back:
 /// the first opaque object at a pixel wins, and carries its OAM priority
 /// against the background layers.
-pub fn draw_sprite_scene(layers: &mut LevelLayers, scene: &crate::video::SpriteScene, vram: &[u8]) {
+///
+/// Objects riding on layer 2 go wherever `layer2_offset` (see
+/// [`crate::expand::LevelTiles::layer2_offset`]) puts that layer, once per
+/// 256 pixels across the level.
+pub fn draw_sprite_scene(
+    layers: &mut LevelLayers,
+    scene: &crate::video::SpriteScene,
+    layer2_offset: [i32; 2],
+    vram: &[u8],
+) {
     draw_objects(layers, &scene.objects, scene.object_select, vram);
+    let [dx, dy] = layer2_offset;
+    let repeated: Vec<_> = (0..=layers.width as i32 / 256 + 1)
+        .flat_map(|screen| {
+            scene
+                .layer2_objects
+                .iter()
+                .map(move |o| crate::video::SpriteObject {
+                    x: (o.x + dx).rem_euclid(256) + (screen - 1) * 256,
+                    y: o.y + dy,
+                    ..*o
+                })
+        })
+        .collect();
+    draw_objects(layers, &repeated, scene.object_select, vram);
 }
 
 /// Draws OAM objects (in level coordinates) into the object layer, front

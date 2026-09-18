@@ -87,6 +87,7 @@ cargo run -- level png 105 out.png --no-player # leave Mario out of the entrance
 cargo run -- level tiles|dump 105 [dir]      # the expanded Map16 grid as hex, or raw planes
 cargo run -- level sprites|map16|wram|reads  # sprite list, resolved Map16, RAM dump, read trace
 cargo run -- addr '$05E000' [--sa1]          # SNES <-> file offset
+cargo run --release --example sprite_census -- rom.smc  # sprite numbers that draw nothing, by level
 ```
 
 Lunar Magic runs headlessly under Wine for reference exports, e.g.
@@ -229,9 +230,9 @@ Windows, and macOS. Keep all three green.
   his tiles (VRAM words `$6000`, `$6100`, `$67F0`) and palette (CGRAM `$86`-`$8F`), which
   stay in `vram`/`cgram`. Only OAM slots 64-71 (`$0300`-`$031F`, what `DrawMarioAndYoshi`
   writes) are kept, in level coordinates from the camera the pass ended with. The other
-  objects in that pass are cluster sprites the loader itself spawned (castle candle flames,
-  ghost house Boo ceilings); the sprite passes subtract those as part of their baseline and
-  capture the ones level sprites respawn, so keeping them here doubled the Boos. Boss
+  objects in that pass are cluster sprites the entrance screen's level sprites spawned
+  (castle candle flames, ghost house Boo ceilings); the sprite passes clear the cluster
+  tables and capture the ones their entries respawn, so keeping them here doubled the Boos. Boss
   arenas leave the field empty; their drawing pass already includes him. The CLI draws him
   behind the sprites (his slots follow most of theirs).
 - Tile grid layout: horizontal levels are 16x27 per screen, screen after screen. Vertical
@@ -250,18 +251,44 @@ Windows, and macOS. Keep all three green.
   uploaded the tilemap to VRAM by then and does not notice.
 - Sprite graphics (`expand::capture_sprites`): for each camera position that puts a sprite
   entry's column at the screen's left edge (horizontal: `$1A = column*16`; vertical: `$1C =
-  row*16`), restore the loaded level with the sprite tables (`$14C8`) and load flags (`$1938`)
-  cleared, park Mario at `$1A - 64` with `$1411`/`$1412` zero so the camera stays, set `$55`
-  to 1 so the loader's column offset is zero, and call `CODE_02A802` (the body of
-  `LoadSprFromLevel`) with the data bank at 2, since it reads its slot tables through the
-  bank its callers set. Then run `GM14Level` (`$00A1DA`) frames until every spawned slot has
-  left status 1 (init) and drawn once, at most 8, and read `$0200`-`$043F` starting from
-  `$3F`. A second pass without the spawn at the same camera and frame count gives Mario's
-  objects to subtract. Y `$F0` is the hidden marker; objects past the bottom wrap negative.
-  Mario must sit left of the sprites: a Banzai Bill erases itself in `InitBanzai` when he is
-  to its right. Sprites that leave OAM empty in their pass become ID markers; in vanilla those
-  are the invisible sprites (`8E`, `C7`, `DB`). Rendering stacks by Mode 1 priority: layer 2
-  low (5), layer 1 low (6), layer 2 high (8), layer 1 high (9), objects 2/4/7/10.
+  row*16`), restore the loaded level with the sprite tables (`$14C8`), cluster sprites
+  (`$1892`), and load flags cleared, set `$55` to 1 so the loader's column offset is zero,
+  and call `CODE_02A802` (the body of `LoadSprFromLevel`) with the data bank at 2, since it
+  reads its slot tables through the bank its callers set. The loader returns after a scroll
+  sprite and skips entries it has no free slot for (the game calls it every other frame), so
+  it is called again with the slots freed until a call loads nothing new. Each spot the
+  loader filled (slot statuses 1 and 8-B; sprites sharing a spot stay together, since the
+  flying platform `9C` draws the Hammer Bro `9B` placed on it) then gets its own pass: the
+  other slots and the generator `$18B9` are cleared, every load flag is set so the level
+  loop loads nothing else, the camera is centred on the sprite with `$1411`/`$1412` zero,
+  and `GM14Level` (`$00A1DA`) frames run until the slots have left status 1 (init) and at
+  least two frames have passed, at most 8, reading `$0200`-`$043F` starting from `$3F`. A
+  sprite that has drawn nothing by then gets up to 160 frames while it lives (a Podoboo
+  waits under the lava), and the camera follows a sprite that leaves the screen, up to
+  three times (a line-guided chainsaw's init moves it 320 pixels left). A pass without any
+  sprite at the same camera and frame count gives the objects to subtract; its load flags
+  are all set, because the level loop calls the loader too and a baseline that spawns the
+  sprite subtracts it (shells, which skip the init frame, vanished that way). Y `$F0` is
+  the hidden marker; objects past the bottom wrap negative. Mario is parked 64 pixels left
+  of the screen before every frame with `$185C` set (no tile interaction): a Banzai Bill
+  erases itself in `InitBanzai` when he is to its right, and parked inside a wall he is
+  crushed, which locks every sprite (`$9D = $30`). The scroll commands `$143E`/`$143F` are
+  zeroed before and after the loader call: an autoscroll command (`E8` in level `009`)
+  copies the layer 2 position over `$1462` every frame and drags the camera off the sprite.
+  The spawn position is matched to its entry by low nibbles and screen number only: the
+  vanilla loader leaves the entry's extra bits in the other axis's high byte for the init
+  routine (a goal tape starts 1280 pixels down). Entries that filled no slot (shooters
+  `C9`-`CA`, generators `CB`-`D9`, scroll commands `E7`-`F5`, cluster spawners) share a
+  two-frame pass from the loader's camera. The castle candle flames (`E6`: cluster sprite 5
+  in slots 0-3, OAM objects 124-127) are positioned in the low eight bits of layer 2
+  (`CODE_02FA16` subtracts `$1E`/`$20`), so they go in `SpriteScene::layer2_objects` and the
+  renderer repeats them every 256 pixels along layer 2. A pass the CPU core gives up on
+  (a crashing custom sprite, or broken per-level code: Invictus level `136` ends its
+  UberASM routine with `RTS` under a `JSL`) counts as drawing nothing, and the player pass
+  leaves the level without a player for the same reason. Sprites that leave OAM empty become
+  ID markers; in vanilla those are `19`, `1F`, `54` (tiles until it turns), `6D`, `82`,
+  `89`, `8C`, `8E`, `C7`, and the slotless ones. Rendering stacks by Mode 1 priority:
+  layer 2 low (5), layer 1 low (6), layer 2 high (8), layer 1 high (9), objects 2/4/7/10.
 - The bus models the CPU multiply/divide registers (`$4202`-`$4206`, `$4214`-`$4217`);
   sprite code uses them constantly.
 - Level modes `$09`, `$0B`, `$0F`, and `$10` (boss arenas and the dark rooms sharing their
@@ -410,6 +437,11 @@ Windows, and macOS. Keep all three green.
   resolved at `$7E00CE` after loading rather than the vanilla table. `tests/sprite_lists.rs`
   checks every parsed list's length against the RATS tag preceding it, on every ROM in
   `KOBO_LM_ROMS`.
+- Sprite load flags: vanilla keeps one per entry at `$1938` (128). ROMs where Lunar Magic 3
+  installed its 255-sprites-per-level patch have a `JML` over the loader's flag check at
+  `$02A856` into code that uses `$7FAF00` (256 entries) instead; `capture_sprites` detects
+  that and clears or sets whichever table the loader reads. With only `$1938` cleared, the
+  entrance screen's sprites never respawned in those hacks and came out as markers.
 - SA-1 hacks do not run yet: the SA-1 registers and its CPU are not modelled.
 
 ## Decisions
@@ -427,15 +459,19 @@ Windows, and macOS. Keep all three green.
   (see the layer facts above); parallax is not reproduced away from the entry screen, the
   status bar is left out, and an axis layer 3 does not scroll along cannot be followed once
   the camera moves. Colour windows are not modelled: the spotlight rooms (mode `$11`) render
-  uniformly dark, and the keyhole and message box effects do not appear.
-- Sprites show their first drawn frame with Mario off the left screen edge and no scrolling,
-  so anything that waits for Mario, spawns over time, or moves before it appears (Bullet
-  Bill shooters, generators, Lakitu) is not what a player sees. Cluster sprites the loader
-  spawns without a level sprite (the castle candle flames) are not drawn. Mario himself is
-  drawn where his entrance action leaves him. Custom sprite loaders run as ROM code; a
-  sweep of 12 levels in each of 41 corpus hacks (PIXI and Lunar Magic 3 sprites included)
-  rendered without errors or visible glitches, but nothing compares them to an emulator.
-  Boss arenas show the OAM of the first drawing pass instead.
+  uniformly dark, which is what the game shows until the light switch is hit (the spotlight
+  sprite writes an empty window to `$04A0` while its `$C2` is zero), and the keyhole and
+  message box effects do not appear.
+- Sprites show their first drawn frame, each alone on a camera centred on it, with Mario
+  off the left screen edge and no scrolling, so anything that waits for Mario or spawns
+  over time (Bullet Bill shooters, generators, Lakitu's Spinies, a Magikoopa, Monty Moles
+  in some hacks) is a marker or not what a player sees, and sprites that interact with one
+  another only do so when they share a spot. A sprite that stays hidden at first is drawn
+  where it first appears (a Podoboo at the lava's surface). Cluster sprites are captured
+  from their spawner's camera only, except the candle flames. Custom sprite loaders run as
+  ROM code; an undrawn-sprite census over every level of the corpus runs without errors
+  apart from levels whose loader already fails, but nothing compares custom sprites to an
+  emulator. Boss arenas show the OAM of the first drawing pass instead.
 - `GFX27`'s layout is unknown; `GFX32`/`GFX33` are not handled by the GFX tooling.
 
 ## Open decisions

@@ -83,7 +83,7 @@ fn rendered_levels_match_emulator_frames() {
             if tiles.boss_scene.is_none() {
                 let list = sprites::read_sprites_at(&rom, tiles.sprite_data_ptr()).unwrap();
                 let scene = expand::capture_sprites(&rom, &tiles, &list).unwrap();
-                render::draw_sprite_scene(&mut layers, &scene, &tiles.vram);
+                render::draw_sprite_scene(&mut layers, &scene, tiles.layer2_offset(), &tiles.vram);
             }
             render::draw_objects(&mut layers, &tiles.player, tiles.object_select, &tiles.vram);
             let img = render::compose_level(&tiles, &layers, &pal);

@@ -155,4 +155,8 @@ pub struct SpriteScene {
     pub object_select: u8,
     /// Level tile positions and sprite numbers of entries with no graphics.
     pub undrawn: Vec<(usize, usize, u8)>,
+    /// Objects that ride on layer 2 (the castle candle flames), positioned
+    /// in layer 2 pixels. The game keeps eight bits of their position, so
+    /// they repeat every 256 pixels along the layer.
+    pub layer2_objects: Vec<SpriteObject>,
 }

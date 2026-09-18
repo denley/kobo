@@ -410,7 +410,7 @@ fn level_png(
             }));
         } else {
             let scene = expand::capture_sprites(rom, &tiles, &list)?;
-            render::draw_sprite_scene(&mut layers, &scene, &tiles.vram);
+            render::draw_sprite_scene(&mut layers, &scene, tiles.layer2_offset(), &tiles.vram);
             marked = scene.undrawn;
         }
     }

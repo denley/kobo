@@ -115,6 +115,28 @@ mod ram {
     /// `$18B9`: the active sprite generator, which keeps spawning sprites
     /// after its own sprite slot is cleared.
     pub const SPRITE_GENERATOR: u32 = 0x7E_18B9;
+    /// `$9E`, `$E4`/`$14E0`, `$D8`/`$14D4`: sprite number and position
+    /// tables, one byte per slot.
+    pub const SPRITE_NUMBER: u32 = 0x7E_009E;
+    pub const SPRITE_X_LOW: u32 = 0x7E_00E4;
+    pub const SPRITE_X_HIGH: u32 = 0x7E_14E0;
+    pub const SPRITE_Y_LOW: u32 = 0x7E_00D8;
+    pub const SPRITE_Y_HIGH: u32 = 0x7E_14D4;
+    /// `$1892`: cluster sprite numbers (0 = free), `$1E16`/`$1E02`: the
+    /// low bytes of their positions.
+    pub const CLUSTER_NUMBER: u32 = 0x7E_1892;
+    pub const CLUSTER_X_LOW: u32 = 0x7E_1E16;
+    pub const CLUSTER_Y_LOW: u32 = 0x7E_1E02;
+    /// `$7B`/`$7D`: the player's speed.
+    pub const PLAYER_X_SPEED: u32 = 0x7E_007B;
+    pub const PLAYER_Y_SPEED: u32 = 0x7E_007D;
+    /// `$185C`: non-zero skips the player's interaction with tiles.
+    pub const PLAYER_NO_TILE_INTERACTION: u32 = 0x7E_185C;
+    /// `$143E`/`$143F`: the layer 1 and layer 2 scroll commands a scroll
+    /// sprite (`E7`-`F5`) installed; zero when the level has none.
+    /// Autoscroll commands drive the camera every frame.
+    pub const LAYER1_SCROLL_CMD: u32 = 0x7E_143E;
+    pub const LAYER2_SCROLL_CMD: u32 = 0x7E_143F;
     /// `$3E`: `BGMODE` mirror; `$40`: `CGADSUB` mirror; `$44`: `CGWSEL`
     /// mirror; `$0D9D`/`$0D9E`: main and sub screen designation mirrors.
     pub const BG_MODE: u32 = 0x7E_003E;
@@ -127,8 +149,21 @@ mod ram {
 /// Vanilla sprite slots and level sprite entries the loader tracks.
 const SPRITE_SLOTS: u32 = 12;
 const SPRITE_LOAD_FLAGS: u32 = 0x80;
-/// Most frames a sprite pass runs waiting for the sprites to draw.
+/// Most frames a sprite pass runs waiting for the sprite to initialise.
 const SPRITE_FRAMES: usize = 8;
+/// Most frames a sprite pass runs for a sprite that has drawn nothing yet.
+pub const LATE_SPRITE_FRAMES: usize = 160;
+/// Most times the sprite loader is called for one column.
+const SPAWN_ROUNDS: usize = 8;
+/// Most times a sprite pass moves the camera after a sprite.
+const CAMERA_MOVES: usize = 3;
+/// Cluster sprite slots, and the castle candle flame among them: cluster
+/// sprite 5 in slots 0-3, drawn by `CODE_02FA16` into OAM objects 124-127
+/// at its position minus layer 2's, both in eight bits.
+const CLUSTER_SLOTS: u32 = 20;
+const CANDLE_FLAME: u8 = 5;
+const CANDLE_FLAMES: u32 = 4;
+const CANDLE_FLAME_OAM: usize = 124;
 /// Most frames the player pass runs waiting for an entrance action to end.
 const PLAYER_FRAMES: usize = 128;
 /// The OAM slots `DrawMarioAndYoshi` (`CODE_01EA70`) fills, at `$0300`-
@@ -711,7 +746,7 @@ pub fn expand_level_traced(
     } else {
         (
             capture_layer3(&mut cpu, &mut bus, level)?,
-            capture_player(&mut bus, level)?,
+            capture_player(&mut bus),
         )
     };
     let lunar_magic = rom.lunar_magic_version().is_some();
@@ -774,14 +809,130 @@ const SCREEN_H: i32 = 224;
 /// The Y position the game parks unused OAM objects at.
 const HIDDEN_Y: u8 = 0xF0;
 
-/// Draws the level's sprites the way the game does: for each camera
-/// position that puts a sprite entry's column at the screen edge, it
-/// restores the loaded level, runs the ROM's own sprite loader (so custom
-/// sprite tools' loaders and extension bytes apply), runs two frames of
-/// the level loop (sprite initialisation, then the first drawing frame),
-/// and reads OAM back in level coordinates. Mario is parked in the middle
-/// of the screen with scrolling disabled, and his objects (the same on
-/// every pass) are subtracted using a pass without sprites.
+/// A captured object on the screen: (x, y, tile, attribute, large).
+type ScreenObject = (i32, i32, u8, u8, bool);
+
+/// Where the ROM's sprite loader keeps its per-entry "already loaded"
+/// flags: `$1938` (128 entries) in vanilla, or `$7FAF00` (256 entries)
+/// when Lunar Magic 3's 255-sprites-per-level patch has replaced the
+/// loader's flag check at `$02A856` with a jump to its own code.
+fn sprite_load_flags(bus: &mut SmwBus) -> (u32, u32) {
+    const FLAG_CHECK: u32 = 0x02_A856;
+    const LM_FLAGS: u32 = 0x7F_AF00;
+    if bus.read(FLAG_CHECK) == 0x5C {
+        let target = (0..3).fold(0, |a, i| {
+            a | (bus.read(FLAG_CHECK + 1 + i) as u32) << (8 * i)
+        });
+        let code: Vec<u8> = (0..0x60).map(|i| bus.read(target + i)).collect();
+        if code.windows(3).any(|w| *w == LM_FLAGS.to_le_bytes()[..3]) {
+            return (LM_FLAGS, 0x100);
+        }
+    }
+    (ram::SPRITE_LOAD_STATUS, SPRITE_LOAD_FLAGS)
+}
+
+/// One run of the level loop from a restored state with the camera held
+/// still and the player parked out of the way.
+struct SpritePass<'b, 'r> {
+    bus: &'b mut SmwBus<'r>,
+    level: u16,
+    camera: (i32, i32),
+    sizes: [(i32, i32); 2],
+    /// Frames run so far.
+    frames: usize,
+}
+
+impl<'b, 'r> SpritePass<'b, 'r> {
+    fn set16(&mut self, addr: u32, v: i32) {
+        self.bus.set_wram_u8(addr, v as u8);
+        self.bus.set_wram_u8(addr + 1, (v >> 8) as u8);
+    }
+
+    /// Holds the camera at `camera` and parks Mario just off the left
+    /// edge, where most sprites expect to meet him (a Banzai Bill erases
+    /// itself if he is to its right) and where his own objects stay out
+    /// of OAM.
+    fn place_camera(&mut self, camera: (i32, i32)) {
+        self.camera = camera;
+        for addr in [ram::LAYER1_X, ram::NEXT_LAYER1_X] {
+            self.set16(addr, camera.0);
+        }
+        for addr in [ram::LAYER1_Y, ram::NEXT_LAYER1_Y] {
+            self.set16(addr, camera.1);
+        }
+        self.park_player();
+    }
+
+    /// Mario does not interact with tiles (parked inside a wall he would
+    /// be crushed, and his death locks every sprite), so he is put back
+    /// before every frame instead of being left to fall.
+    fn park_player(&mut self) {
+        let (x, y) = (self.camera.0 - 64, self.camera.1 + SCREEN_H / 2 - 16);
+        self.set16(ram::PLAYER_X, x);
+        self.set16(ram::PLAYER_Y, y);
+        self.bus.set_wram_u8(ram::PLAYER_X_SPEED, 0);
+        self.bus.set_wram_u8(ram::PLAYER_Y_SPEED, 0);
+        self.bus.set_wram_u8(ram::PLAYER_NO_TILE_INTERACTION, 1);
+    }
+
+    /// Scroll commands move the camera (autoscroll) or tie it to layer 2,
+    /// away from what is being captured.
+    fn stop_scrolling(&mut self) {
+        self.bus.set_wram_u8(ram::LAYER1_SCROLL_CMD, 0);
+        self.bus.set_wram_u8(ram::LAYER2_SCROLL_CMD, 0);
+    }
+
+    fn call(&mut self, routine: u32, data_bank: u8) -> Result<(), ExpandError> {
+        let mut cpu = Cpu::new();
+        cpu.db = data_bank;
+        let level = self.level;
+        cpu.call_jsr(self.bus, routine, STEP_LIMIT)
+            .map_err(|source| ExpandError::Cpu { level, source })
+    }
+
+    /// Runs one frame of the level loop and returns what it drew.
+    fn frame(&mut self) -> Result<Vec<ScreenObject>, ExpandError> {
+        self.park_player();
+        self.call(routines::DRAW_LEVEL_FRAME, 0)?;
+        self.frames += 1;
+        let mut oam = self.bus.wram_slice(ram::OAM, 0x240).to_vec();
+        oam.push(self.bus.wram_u8(ram::OAM_ADDRESS) / 2);
+        Ok(screen_objects(&oam, self.sizes))
+    }
+
+    fn status(&self, slot: usize) -> u8 {
+        self.bus.wram_u8(ram::SPRITE_STATUS + slot as u32)
+    }
+
+    /// Position of the sprite in `slot`, in level pixels.
+    fn position(&self, slot: usize) -> (i32, i32) {
+        let at = |low: u32, high: u32| {
+            i16::from_le_bytes([
+                self.bus.wram_u8(low + slot as u32),
+                self.bus.wram_u8(high + slot as u32),
+            ]) as i32
+        };
+        (
+            at(ram::SPRITE_X_LOW, ram::SPRITE_X_HIGH),
+            at(ram::SPRITE_Y_LOW, ram::SPRITE_Y_HIGH),
+        )
+    }
+}
+
+/// Draws the level's sprites the way the game does. For each camera
+/// position that puts a sprite entry's column where the ROM's sprite
+/// loader looks, it restores the loaded level and runs that loader (so
+/// custom sprite tools' loaders and extension bytes apply). Every spot
+/// the loader put sprites at then gets a pass of its own: the other slots
+/// are cleared, the camera is centred on the sprite, and the level loop
+/// runs until the sprite has left its initialisation state and drawn
+/// (sprites that stay hidden at first, like a Podoboo under the lava,
+/// get up to [`LATE_SPRITE_FRAMES`]). OAM is read back in level
+/// coordinates, less whatever a pass without the sprite draws from the
+/// same camera. Entries that filled no slot (shooters, generators,
+/// scroll commands, cluster sprite spawners) share one more pass from
+/// the loader's camera. A pass that crashes the CPU core draws nothing;
+/// what draws nothing is listed in `undrawn` for the caller to mark.
 ///
 /// Boss arenas draw their sprites in `boss_scene` instead and get an empty
 /// scene here.
@@ -790,14 +941,15 @@ pub fn capture_sprites(
     tiles: &LevelTiles,
     list: &crate::sprites::SpriteList,
 ) -> Result<crate::video::SpriteScene, ExpandError> {
-    use crate::video::SpriteScene;
+    use crate::video::{SpriteObject, SpriteScene};
     use std::collections::{BTreeMap, HashSet};
     let level = tiles.level;
+    let mut scene = SpriteScene {
+        object_select: tiles.object_select,
+        ..Default::default()
+    };
     if tiles.boss_scene.is_some() {
-        return Ok(SpriteScene {
-            object_select: tiles.object_select,
-            ..Default::default()
-        });
+        return Ok(scene);
     }
     let mut bus = SmwBus::new(rom);
     bus.wram = tiles.wram.clone();
@@ -805,120 +957,73 @@ pub fn capture_sprites(
     bus.cgram = tiles.cgram.clone();
     bus.bg_sc = tiles.bg_sc;
     bus.object_select = tiles.object_select;
-    // Start from an empty sprite table: the entrance screen's sprites were
+    // Start from empty sprite tables: the entrance screen's sprites were
     // spawned during level preparation, and each pass respawns what it
     // needs from the level data.
     for slot in 0..SPRITE_SLOTS {
         bus.set_wram_u8(ram::SPRITE_STATUS + slot, 0);
     }
-    for i in 0..SPRITE_LOAD_FLAGS {
-        bus.set_wram_u8(ram::SPRITE_LOAD_STATUS + i, 0);
+    for slot in 0..CLUSTER_SLOTS {
+        bus.set_wram_u8(ram::CLUSTER_NUMBER + slot, 0);
     }
+    let (load_flags, load_flag_count) = sprite_load_flags(&mut bus);
+    for i in 0..load_flag_count {
+        bus.set_wram_u8(load_flags + i, 0);
+    }
+    bus.set_wram_u8(ram::LAYER1_SCROLL_DIR, 1);
+    bus.set_wram_u8(ram::HORIZ_SCROLL_SETTING, 0);
+    bus.set_wram_u8(ram::VERT_SCROLL_SETTING, 0);
+    bus.set_wram_u8(ram::GAME_MODE, 0x14);
     let saved = bus.wram.clone();
     let (w, h) = tiles.size();
     let (level_w, level_h) = (w as i32 * 16, h as i32 * 16);
+    let clamp_x = |x: i32| x.clamp(0, (level_w - SCREEN_W).max(0));
+    let clamp_y = |y: i32| y.clamp(0, (level_h - SCREEN_H).max(0));
     // Camera position whose loading column is the entry's, keeping the
     // sprite inside the screen on the other axis.
-    let camera = |e: &crate::sprites::SpriteEntry| -> (i32, i32) {
+    let loader_camera = |e: &crate::sprites::SpriteEntry| -> (i32, i32) {
         let (x, y) = e.tile_position(tiles.vertical);
         let (x, y) = (x as i32 * 16, y as i32 * 16);
         if tiles.vertical {
-            ((x - SCREEN_W / 2).clamp(0, (level_w - SCREEN_W).max(0)), y)
+            (clamp_x(x - SCREEN_W / 2), y)
         } else {
-            (x, (y - SCREEN_H / 2).clamp(0, (level_h - SCREEN_H).max(0)))
+            (x, clamp_y(y - SCREEN_H / 2))
         }
     };
     let mut groups: BTreeMap<(i32, i32), Vec<&crate::sprites::SpriteEntry>> = BTreeMap::new();
     for e in &list.sprites {
-        groups.entry(camera(e)).or_default().push(e);
+        groups.entry(loader_camera(e)).or_default().push(e);
     }
     let sizes = object_sizes(tiles.object_select);
-    // Runs one pass: restore the level, place the camera and player, spawn
-    // the column's sprites (unless `frames` fixes the frame count for a
-    // player-only baseline), and run frames until every spawned slot has
-    // left its initialisation state and drawn once. Returns the final OAM
-    // and the number of frames run.
-    let run_pass = |bus: &mut SmwBus,
-                    cam: (i32, i32),
-                    frames: Option<usize>|
-     -> Result<(Vec<u8>, usize), ExpandError> {
-        bus.wram.copy_from_slice(&saved);
-        let set16 = |bus: &mut SmwBus, addr: u32, v: i32| {
-            bus.set_wram_u8(addr, v as u8);
-            bus.set_wram_u8(addr + 1, (v >> 8) as u8);
-        };
-        for addr in [ram::LAYER1_X, ram::NEXT_LAYER1_X] {
-            set16(bus, addr, cam.0);
+    let mut pass = SpritePass {
+        bus: &mut bus,
+        level,
+        camera: (0, 0),
+        sizes,
+        frames: 0,
+    };
+    // What the level draws by itself from a camera, frame by frame.
+    let baseline = |pass: &mut SpritePass,
+                    camera: (i32, i32),
+                    frames: usize|
+     -> Result<Vec<HashSet<ScreenObject>>, ExpandError> {
+        pass.bus.wram.copy_from_slice(&saved);
+        // The level loop runs the sprite loader too.
+        for i in 0..load_flag_count {
+            pass.bus.set_wram_u8(load_flags + i, 1);
         }
-        for addr in [ram::LAYER1_Y, ram::NEXT_LAYER1_Y] {
-            set16(bus, addr, cam.1);
-        }
-        // Mario waits just off the left edge, where most sprites expect
-        // to meet him (a Banzai Bill erases itself if he is to its right)
-        // and where his own objects stay out of OAM.
-        set16(bus, ram::PLAYER_X, cam.0 - 64);
-        set16(bus, ram::PLAYER_Y, cam.1 + SCREEN_H / 2 - 16);
-        bus.set_wram_u8(ram::LAYER1_SCROLL_DIR, 1);
-        bus.set_wram_u8(ram::HORIZ_SCROLL_SETTING, 0);
-        bus.set_wram_u8(ram::VERT_SCROLL_SETTING, 0);
-        bus.set_wram_u8(ram::GAME_MODE, 0x14);
-        let status = |bus: &SmwBus| {
-            bus.wram_slice(ram::SPRITE_STATUS, SPRITE_SLOTS as usize)
-                .to_vec()
-        };
-        let mut spawned = Vec::new();
-        if frames.is_none() {
-            // The loader reads its slot tables through the data bank its
-            // bank 2 callers set.
-            let mut cpu = Cpu::new();
-            cpu.db = 0x02;
-            cpu.call_jsr(bus, routines::SPAWN_SPRITES, STEP_LIMIT)
-                .map_err(|source| ExpandError::Cpu { level, source })?;
-            spawned = status(bus)
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| **s != 0)
-                .map(|(slot, _)| slot)
-                .collect();
-        }
-        // Initialisation takes the first frame and drawing the second;
-        // some sprites wait a few more frames before they first appear.
-        let mut oam = Vec::new();
-        let mut run = 0;
-        for frame in 0..frames.unwrap_or(SPRITE_FRAMES) {
-            let mut cpu = Cpu::new();
-            cpu.call_jsr(bus, routines::DRAW_LEVEL_FRAME, STEP_LIMIT)
-                .map_err(|source| ExpandError::Cpu { level, source })?;
-            let first = bus.wram_u8(ram::OAM_ADDRESS) as usize / 2;
-            oam = bus.wram_slice(ram::OAM, 0x240).to_vec();
-            oam.push(first as u8);
-            run = frame + 1;
-            let status = status(bus);
-            if frames.is_none() && frame >= 1 && spawned.iter().all(|&slot| status[slot] != 1) {
-                break;
-            }
-        }
-        Ok((oam, run))
+        pass.stop_scrolling();
+        pass.place_camera(camera);
+        (0..frames)
+            .map(|_| Ok(pass.frame()?.into_iter().collect()))
+            .collect()
     };
     let mut seen = HashSet::new();
-    let mut scene = SpriteScene {
-        object_select: tiles.object_select,
-        ..Default::default()
-    };
-    for (cam, entries) in &groups {
-        let (oam, frames) = run_pass(&mut bus, *cam, None)?;
-        // The player's objects after the same frames from the same spot.
-        let (baseline, _) = run_pass(&mut bus, *cam, Some(frames))?;
-        let player: HashSet<_> = screen_objects(&baseline, sizes).into_iter().collect();
-        let mut drew = false;
-        for (sx, sy, tile, attr, large) in screen_objects(&oam, sizes) {
-            if player.contains(&(sx, sy, tile, attr, large)) {
-                continue;
-            }
-            drew = true;
-            let object = crate::video::SpriteObject {
-                x: cam.0 + sx,
-                y: cam.1 + sy,
+    let mut keep = |scene: &mut SpriteScene, camera: (i32, i32), objects: &[ScreenObject]| {
+        for &(sx, sy, tile, attr, large) in objects {
+            let object = SpriteObject {
+                x: camera.0 + sx,
+                y: camera.1 + sy,
                 tile,
                 attr,
                 large,
@@ -927,13 +1032,242 @@ pub fn capture_sprites(
                 scene.objects.push(object);
             }
         }
-        if !drew {
-            for e in entries {
+    };
+    // What the level draws by itself from the same camera.
+    let own = |objects: Vec<ScreenObject>, empty: &HashSet<ScreenObject>| {
+        objects
+            .into_iter()
+            .filter(|o| !empty.contains(o))
+            .collect::<Vec<_>>()
+    };
+    let centre =
+        |(x, y): (i32, i32)| (clamp_x(x + 8 - SCREEN_W / 2), clamp_y(y + 8 - SCREEN_H / 2));
+    // The entry a freshly loaded sprite came from. Only the low nibbles
+    // and the screen number are compared: the vanilla loader leaves the
+    // entry's extra bits in the high byte of the other axis for the
+    // sprite's initialisation to collect (a goal tape starts out 1280
+    // pixels down).
+    let mut matched = HashSet::new();
+    let mut entry_for = |(x, y): (i32, i32)| {
+        let found = list.sprites.iter().enumerate().find(|(i, e)| {
+            let (ex, ey) = e.tile_position(tiles.vertical);
+            let (ex, ey) = (ex as i32, ey as i32);
+            let screen = if tiles.vertical {
+                ey / 16 == y >> 8
+            } else {
+                ex / 16 == x >> 8
+            };
+            screen && ex % 16 == (x >> 4) & 15 && ey % 16 == (y >> 4) & 15 && !matched.contains(i)
+        });
+        found.map(|(i, e)| {
+            matched.insert(i);
+            e
+        })
+    };
+    // Sprites already captured, by number and spawn position: the loader
+    // fills the whole column whichever of its entries the camera was
+    // chosen for.
+    let mut captured: HashSet<(u8, i32, i32)> = HashSet::new();
+    // Tile positions the loader has put a sprite at.
+    let mut spawned_at: HashSet<(i32, i32)> = HashSet::new();
+    for (camera, entries) in &groups {
+        pass.bus.wram.copy_from_slice(&saved);
+        pass.place_camera(*camera);
+        // The loader stops after a scroll sprite and skips sprites it has
+        // no free slot for; the game calls it again every other frame.
+        // Each round here captures what it spawned and frees the slots.
+        for _ in 0..SPAWN_ROUNDS {
+            pass.stop_scrolling();
+            let flags_before = pass
+                .bus
+                .wram_slice(load_flags, load_flag_count as usize)
+                .to_vec();
+            // The loader reads its slot tables through the data bank its
+            // bank 2 callers set.
+            if pass.call(routines::SPAWN_SPRITES, 0x02).is_err() {
+                // Whatever this column holds that crashes the loader
+                // leaves its entries as markers.
+                pass.bus.wram.copy_from_slice(&saved);
+                break;
+            }
+            // A scroll sprite in this column has just installed its command.
+            pass.stop_scrolling();
+            let loaded = pass.bus.wram.clone();
+            // Initialising, alive, or carryable: the states a loader
+            // leaves a sprite in. (The handlers of slotless sprites
+            // scribble on the status table; `E6` leaves a 7.)
+            let slots: Vec<usize> = (0..SPRITE_SLOTS as usize)
+                .filter(|&slot| matches!(pass.status(slot), 0x01 | 0x08..=0x0B))
+                .collect();
+            // Sprites sharing a spot stay together: the flying platform
+            // (`9C`) carries and draws the Hammer Bro (`9B`) placed on it.
+            let mut spots: BTreeMap<(i32, i32), (Vec<usize>, u8)> = BTreeMap::new();
+            let mut fresh =
+                flags_before != pass.bus.wram_slice(load_flags, load_flag_count as usize);
+            for &slot in &slots {
+                let (x, y) = pass.position(slot);
+                let number = pass.bus.wram_u8(ram::SPRITE_NUMBER + slot as u32);
+                if captured.insert((number, x, y)) {
+                    fresh = true;
+                    let (spot, id) = match entry_for((x, y)) {
+                        Some(e) => {
+                            let (ex, ey) = e.tile_position(tiles.vertical);
+                            ((ex as i32 * 16, ey as i32 * 16), e.id)
+                        }
+                        None => ((x, y), number),
+                    };
+                    spawned_at.insert((spot.0.div_euclid(16), spot.1.div_euclid(16)));
+                    spots.entry(spot).or_insert((Vec::new(), id)).0.push(slot);
+                }
+            }
+            // The level loop must not load anything else.
+            for i in 0..load_flag_count {
+                pass.bus.set_wram_u8(load_flags + i, 1);
+            }
+            pass.bus.set_wram_u8(ram::SPRITE_GENERATOR, 0);
+            let spawned = pass.bus.wram.clone();
+            for (&spot, (together, id)) in &spots {
+                pass.bus.wram.copy_from_slice(&spawned);
+                for other in (0..SPRITE_SLOTS).filter(|&o| !together.contains(&(o as usize))) {
+                    pass.bus.set_wram_u8(ram::SPRITE_STATUS + other, 0);
+                }
+                let slot = together[0];
+                pass.place_camera(centre(spot));
+                pass.frames = 0;
+                // Initialisation takes the first frame and drawing the
+                // second; some sprites wait a few more frames before they
+                // first appear, and some start by moving a long way from
+                // their entry (a line-guided chainsaw goes 320 pixels
+                // left), so the camera follows a sprite that has left the
+                // screen.
+                let mut moves = 0;
+                let mut follow = |pass: &mut SpritePass| {
+                    let (x, y) = pass.position(slot);
+                    let on_screen = (0..SCREEN_W).contains(&(x + 8 - pass.camera.0))
+                        && (0..SCREEN_H).contains(&(y + 8 - pass.camera.1));
+                    let moved = !on_screen
+                        && moves < CAMERA_MOVES
+                        && pass.status(slot) != 0
+                        && centre((x, y)) != pass.camera;
+                    if moved {
+                        moves += 1;
+                        pass.place_camera(centre((x, y)));
+                    }
+                    moved
+                };
+                let mut run = |pass: &mut SpritePass| -> Result<Vec<ScreenObject>, ExpandError> {
+                    let mut objects = Vec::new();
+                    while pass.frames < SPRITE_FRAMES {
+                        objects = pass.frame()?;
+                        let ready = together.iter().all(|&slot| pass.status(slot) != 1);
+                        if !follow(pass) && pass.frames >= 2 && ready {
+                            break;
+                        }
+                    }
+                    let resume = pass.bus.wram.clone();
+                    let (camera_now, frames) = (pass.camera, pass.frames);
+                    let empty = baseline(pass, camera_now, frames)?.pop().unwrap();
+                    let mut drawn = own(objects, &empty);
+                    if drawn.is_empty() {
+                        // Hidden so far: keep going while the sprite lives.
+                        pass.bus.wram.copy_from_slice(&resume);
+                        pass.camera = camera_now;
+                        while drawn.is_empty()
+                            && pass.frames < LATE_SPRITE_FRAMES
+                            && together.iter().any(|&slot| pass.status(slot) != 0)
+                        {
+                            let objects = pass.frame()?;
+                            if !follow(pass) {
+                                drawn = own(objects, &empty);
+                            }
+                        }
+                    }
+                    Ok(drawn)
+                };
+                // A sprite whose code crashes the CPU (or a level whose
+                // own per-frame code does) gets a marker.
+                let drawn = run(&mut pass).unwrap_or_default();
+                keep(&mut scene, pass.camera, &drawn);
+                if drawn.is_empty() {
+                    let tile = (spot.0.div_euclid(16), spot.1.div_euclid(16));
+                    scene
+                        .undrawn
+                        .push((tile.0.max(0) as usize, tile.1.max(0) as usize, *id));
+                }
+            }
+            pass.bus.wram.copy_from_slice(&loaded);
+            for slot in 0..SPRITE_SLOTS {
+                pass.bus.set_wram_u8(ram::SPRITE_STATUS + slot, 0);
+            }
+            pass.place_camera(*camera);
+            if !fresh {
+                break;
+            }
+        }
+        // What is left took no sprite slot: shooters, generators, scroll
+        // commands, and the spawners of cluster sprites.
+        let slotless: Vec<_> = entries
+            .iter()
+            .filter(|e| {
+                let (x, y) = e.tile_position(tiles.vertical);
+                !spawned_at.contains(&(x as i32, y as i32))
+            })
+            .collect();
+        if slotless.is_empty() {
+            continue;
+        }
+        for i in 0..load_flag_count {
+            pass.bus.set_wram_u8(load_flags + i, 1);
+        }
+        pass.frames = 0;
+        let mut objects = Vec::new();
+        for _ in 0..2 {
+            objects = pass.frame().unwrap_or_default();
+        }
+        // Castle candle flames ride on layer 2, in its low eight bits.
+        let mut flames = false;
+        for slot in 0..CANDLE_FLAMES {
+            if pass.bus.wram_u8(ram::CLUSTER_NUMBER + slot) != CANDLE_FLAME {
+                continue;
+            }
+            flames = true;
+            let object = CANDLE_FLAME_OAM + slot as usize;
+            let bytes = pass
+                .bus
+                .wram_slice(ram::OAM + object as u32 * 4, 4)
+                .to_vec();
+            let high = pass.bus.wram_u8(ram::OAM + 0x200 + object as u32 / 4) >> (2 * (object % 4));
+            let flame = SpriteObject {
+                x: pass.bus.wram_u8(ram::CLUSTER_X_LOW + slot) as i32,
+                y: pass.bus.wram_u8(ram::CLUSTER_Y_LOW + slot) as i32,
+                tile: bytes[2],
+                attr: bytes[3],
+                large: high & 2 != 0,
+            };
+            if !scene
+                .layer2_objects
+                .iter()
+                .any(|o| (o.x, o.y) == (flame.x, flame.y))
+            {
+                scene.layer2_objects.push(flame);
+            }
+            objects.retain(|o| (o.2, o.3) != (bytes[2], bytes[3]));
+        }
+        let empty = baseline(&mut pass, *camera, 2)
+            .ok()
+            .and_then(|mut frames| frames.pop())
+            .unwrap_or_default();
+        let drawn = own(objects, &empty);
+        keep(&mut scene, *camera, &drawn);
+        if drawn.is_empty() && !flames {
+            for e in slotless {
                 let (x, y) = e.tile_position(tiles.vertical);
                 scene.undrawn.push((x, y, e.id));
             }
         }
     }
+    let mut marked = HashSet::new();
+    scene.undrawn.retain(|entry| marked.insert(*entry));
     Ok(scene)
 }
 
@@ -993,10 +1327,7 @@ fn screen_objects(oam: &[u8], sizes: [(i32, i32); 2]) -> Vec<(i32, i32, u8, u8, 
 /// still drawn in this pass, and the sprite passes already capture them.
 /// The objects come back in level coordinates from the camera the pass
 /// ended with.
-fn capture_player(
-    bus: &mut SmwBus,
-    level: u16,
-) -> Result<Vec<crate::video::SpriteObject>, ExpandError> {
+fn capture_player(bus: &mut SmwBus) -> Vec<crate::video::SpriteObject> {
     let saved = bus.wram.clone();
     for slot in 0..SPRITE_SLOTS {
         bus.set_wram_u8(ram::SPRITE_STATUS + slot, 0);
@@ -1006,17 +1337,22 @@ fn capture_player(
     }
     bus.set_wram_u8(ram::SPRITE_GENERATOR, 0);
     bus.set_wram_u8(ram::GAME_MODE, 0x14);
-    for _ in 0..PLAYER_FRAMES {
-        let mut cpu = Cpu::new();
-        cpu.call_jsr(bus, routines::DRAW_LEVEL_FRAME, STEP_LIMIT)
-            .map_err(|source| ExpandError::Cpu { level, source })?;
-        if bus.wram_u8(ram::PLAYER_ANIMATION) == 0 {
-            break;
+    let mut frames = || {
+        for _ in 0..PLAYER_FRAMES {
+            Cpu::new().call_jsr(bus, routines::DRAW_LEVEL_FRAME, STEP_LIMIT)?;
+            if bus.wram_u8(ram::PLAYER_ANIMATION) == 0 {
+                break;
+            }
         }
+        Cpu::new().call_jsr(bus, routines::UPLOAD_PLAYER_TILES, STEP_LIMIT)
+    };
+    // The level loop runs the hack's per-level code, which can be broken
+    // (Invictus level 136 returns with RTS from a JSL). The level itself
+    // has loaded by now; it just goes without a player.
+    if frames().is_err() {
+        bus.wram = saved;
+        return Vec::new();
     }
-    let mut cpu = Cpu::new();
-    cpu.call_jsr(bus, routines::UPLOAD_PLAYER_TILES, STEP_LIMIT)
-        .map_err(|source| ExpandError::Cpu { level, source })?;
     let mut oam = bus.wram_slice(ram::OAM, 0x240).to_vec();
     for slot in (0..128).filter(|slot| !PLAYER_OAM_SLOTS.contains(slot)) {
         oam[slot * 4 + 1] = HIDDEN_Y;
@@ -1036,7 +1372,7 @@ fn capture_player(
         })
         .collect();
     bus.wram = saved;
-    Ok(objects)
+    objects
 }
 
 /// Run just the video-register portions of the boss interrupt handlers.
@@ -1385,6 +1721,41 @@ mod sprite_capture_tests {
         assert_eq!(layout.offset(17, 3), Some(0x1D60 + 0x2F0 + 3 * 16 + 1));
         assert_eq!(layout.offset(9 * 16, 0), None);
         assert_eq!(layout.offset(0, 47), None);
+    }
+
+    #[test]
+    fn load_flags_follow_lunar_magics_255_sprite_patch() {
+        use crate::addr::{Mapping, SnesAddr};
+        let mut bytes = vec![0; 0x10_0000];
+        let pc = |addr: u32| {
+            Mapping::LoRom
+                .snes_to_pc(SnesAddr::new(addr))
+                .unwrap()
+                .as_usize()
+        };
+        bytes[0x7FD5] = 0x20; // LoROM
+        // Vanilla: `LDA $1938,X`.
+        bytes[pc(0x02_A856)..][..3].copy_from_slice(&[0xBD, 0x38, 0x19]);
+        let rom = crate::Rom::from_bytes(bytes.clone()).unwrap();
+        assert_eq!(
+            sprite_load_flags(&mut SmwBus::new(&rom)),
+            (ram::SPRITE_LOAD_STATUS, SPRITE_LOAD_FLAGS)
+        );
+        // Patched: `JML $128000`, which does `LDA $7FAF00,X`.
+        bytes[pc(0x02_A856)..][..4].copy_from_slice(&[0x5C, 0x00, 0x80, 0x12]);
+        bytes[pc(0x12_8000)..][..4].copy_from_slice(&[0xBF, 0x00, 0xAF, 0x7F]);
+        let rom = crate::Rom::from_bytes(bytes.clone()).unwrap();
+        assert_eq!(
+            sprite_load_flags(&mut SmwBus::new(&rom)),
+            (0x7F_AF00, 0x100)
+        );
+        // Some other patch at the same place keeps the vanilla table.
+        bytes[pc(0x12_8000)..][..4].copy_from_slice(&[0xBD, 0x38, 0x19, 0x6B]);
+        let rom = crate::Rom::from_bytes(bytes).unwrap();
+        assert_eq!(
+            sprite_load_flags(&mut SmwBus::new(&rom)),
+            (ram::SPRITE_LOAD_STATUS, SPRITE_LOAD_FLAGS)
+        );
     }
 
     #[test]

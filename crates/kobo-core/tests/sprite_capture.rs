@@ -8,9 +8,33 @@ mod common;
 
 use kobo_core::{expand, sprites};
 
-/// Sprites that draw nothing on their first frame: invisible warp blocks,
-/// invisible mushrooms, and the level-end "Yoshi egg in the ground" wing.
-const INVISIBLE: [u8; 3] = [0x8E, 0xC7, 0xDB];
+/// Sprites with no graphics of their own: the invisible warp hole and the
+/// invisible mushroom.
+const INVISIBLE: [u8; 2] = [0x8E, 0xC7];
+
+/// Every sprite number that draws nothing anywhere in the vanilla game:
+/// the message box trigger (`19`), a Magikoopa that has not appeared yet
+/// (`1F`), the climbing net door, which is tiles until it turns (`54`),
+/// the invisible solid block (`6D`), the bonus game (`82`), the layer 3
+/// smasher (`89`), the side exit enabler (`8C`), the invisible ones above,
+/// and the slotless sprites: shooters (`C9`-`CA`), generators (`CB`-`D9`),
+/// and scroll commands (`E7`-`F5`).
+fn draws_nothing(id: u8) -> bool {
+    matches!(
+        id,
+        0x19 | 0x1F | 0x54 | 0x6D | 0x82 | 0x89 | 0x8C | 0x8E | 0xC7 | 0xC9..=0xD9 | 0xE7..=0xF5
+    )
+}
+
+fn capture(
+    rom: &kobo_core::Rom,
+    level: u16,
+) -> (sprites::SpriteList, kobo_core::video::SpriteScene) {
+    let tiles = expand::expand_level(rom, level).unwrap();
+    let list = sprites::read_sprites_at(rom, tiles.sprite_data_ptr()).unwrap();
+    let scene = expand::capture_sprites(rom, &tiles, &list).unwrap();
+    (list, scene)
+}
 
 #[test]
 fn yoshis_island_1_sprites_all_draw_near_their_entries() {
@@ -68,6 +92,65 @@ fn vertical_level_sprites_draw_where_their_entries_are() {
     }
 }
 
+/// Autoscroll commands drive the camera; the capture holds it still, so
+/// the Buzzy Beetles and Swoopers of Vanilla Secret 2's layer 2 cave draw.
+#[test]
+fn sprites_draw_in_autoscrolling_levels() {
+    let Some(rom) = common::vanilla() else { return };
+    let (list, scene) = capture(&rom, 0x009);
+    for e in list.sprites.iter().filter(|e| !draws_nothing(e.id)) {
+        let (x, y) = e.tile_position(false);
+        let (x, y) = (x as i32 * 16, y as i32 * 16);
+        assert!(
+            scene
+                .objects
+                .iter()
+                .any(|o| (o.x - x).abs() <= 48 && (o.y - y).abs() <= 48),
+            "sprite {:02X} at ({x}, {y}) has no object nearby",
+            e.id
+        );
+    }
+}
+
+/// The loader is called until the column is exhausted (it stops after a
+/// scroll sprite, and a stack of Boos outnumbers the free slots), sprites
+/// on one spot stay together (the flying platform draws its Hammer Bro),
+/// the camera follows a line-guided chainsaw to where its initialisation
+/// sends it, and a Podoboo is waited for until it leaves the lava.
+#[test]
+fn awkward_sprites_draw() {
+    let Some(rom) = common::vanilla() else { return };
+    for (level, id) in [
+        (0x1CF, 0x26),
+        (0x11D, 0x37),
+        (0x1C0, 0x9B),
+        (0x1C0, 0x9C),
+        (0x00F, 0x65),
+        (0x00F, 0x7B),
+        (0x101, 0x33),
+        (0x105, 0xDB),
+    ] {
+        let (list, scene) = capture(&rom, level);
+        assert!(list.sprites.iter().any(|e| e.id == id));
+        assert!(
+            !scene.undrawn.iter().any(|&(_, _, undrawn)| undrawn == id),
+            "level {level:03X}: sprite {id:02X} drew nothing"
+        );
+    }
+}
+
+/// The castle candle flames are cluster sprites the `E6` entry spawns,
+/// positioned on layer 2.
+#[test]
+fn candle_flames_ride_on_layer_2() {
+    let Some(rom) = common::vanilla() else { return };
+    let (_, scene) = capture(&rom, 0x101);
+    assert_eq!(scene.layer2_objects.len(), 4);
+    assert!(!scene.undrawn.iter().any(|&(_, _, id)| id == 0xE6));
+    let (_, scene) = capture(&rom, 0x105);
+    assert!(scene.layer2_objects.is_empty());
+}
+
 #[test]
 fn a_spread_of_vanilla_levels_captures_cleanly() {
     let Some(rom) = common::vanilla() else { return };
@@ -77,6 +160,12 @@ fn a_spread_of_vanilla_levels_captures_cleanly() {
         let list = sprites::read_sprites_at(&rom, tiles.sprite_data_ptr()).unwrap();
         let scene = expand::capture_sprites(&rom, &tiles, &list)
             .unwrap_or_else(|e| panic!("level {level:03X}: {e}"));
+        for (x, y, id) in &scene.undrawn {
+            assert!(
+                draws_nothing(*id),
+                "level {level:03X}: sprite {id:02X} at ({x}, {y}) drew nothing"
+            );
+        }
         captured += scene.objects.len();
     }
     assert!(captured > 0);
