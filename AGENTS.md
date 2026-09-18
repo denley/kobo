@@ -58,6 +58,56 @@ Early stage: roadmap step 1 is in progress.
 4. Overworld, Layer 3, graphics and palette editing, emulator integration
    (play-from-level, Mesen-S / bsnes-plus debugging).
 
+### Structural work owed
+
+From a review of the renderer's code once it worked. Each item names the roadmap point it
+should land before; later steps would otherwise build on the shape it fixes.
+
+Before finishing step 1 (SA-1):
+
+- **SA-1 itself.** A second `Cpu` instance, not a second core: the SA-1 is a 65816. Needs its
+  register block, I-RAM and BW-RAM in `Ram`, its arithmetic registers, a synchronous hand-off
+  between the processors (run the other to completion when one triggers it and waits), a
+  `RamMap` variant for SA-1 Pack's remap with 22 sprite slots, and a processor choice on
+  `expand::machine::Call`. `tools/oracle/dump_levels.lua` reads `$7E` addresses directly and
+  needs the same map before Mesen can be the oracle for SA-1 ROMs.
+
+Before step 2 (the build pipeline will depend on these types):
+
+- **One render entry point in the core.** `level_png` in the CLI decides the drawing order
+  (layers, sprite scene, player behind the sprites, compose, markers on top, boss arenas
+  skip sprites), `tests/video_oracle.rs` repeats it by hand, and a GUI would be the third
+  copy. Add `render_level(rom, level, options) -> RgbImage` beside the pieces; the CLI's
+  grouping of diagnostics into warnings belongs with it. This breaks principle 3 today.
+- **Split `LevelTiles`.** It is one struct of 26 public fields holding three things: the
+  machine state after loading (`ram`, `vram`, `cgram`, registers), the decoded level (grid,
+  Map16, layer layouts), and render inputs (screen, camera, layer 3, player). The build
+  pipeline wants the decoded level without the emulator residue, and tests should not have
+  to write out every field to make one.
+
+Before step 3 (the GUI will draw through these):
+
+- **One set of PPU primitives in `render`.** Two tilemap pixel fetchers (`layer3_pixel`,
+  `tilemap_pixel`), two object rasterisers (`draw_objects`, `draw_boss_objects`, the latter
+  also walking OAM itself instead of using `expand`'s `screen_objects`), two tile drawers,
+  and a boss path that bypasses `LevelLayers` and colour math. Passing a `SpriteObject` or
+  `Tile8Ref` instead of unpacked fields removes all three `too_many_arguments` allows.
+- **A `LevelMode` type.** What a level mode means is spread over literal lists: backgrounds
+  (`BACKGROUND_MODES` in `expand::load`), layer 2 object layouts (`Layer2Objects::for_level`),
+  and modes that never upload their background (`draw_layer2`). One type with methods, per
+  the "game facts are data-driven" guardrail.
+
+Whenever convenient:
+
+- `SpriteScene::undrawn` is a `(usize, usize, u8)` tuple; give it a named type.
+- `examples/census.rs` is a rougher duplicate of `sprite_census.rs`; delete it.
+- The castle candle flames are still a special case inside the general slotless pass
+  (`SpriteCapture::take_candle_flames`). Fine for one; find a general form before adding
+  a second layer-2-riding sprite.
+- This file has become the knowledge base. Move the SMW and Lunar Magic facts into `docs/`
+  or module documentation and keep this file to rules, layout, and pointers: it is loaded
+  into every agent context, and much of it restates doc comments that will drift from it.
+
 ## Stack and layout
 
 - **Rust** (pinned in `rust-toolchain.toml` and `mise.toml`), edition 2024, cargo workspace.
