@@ -227,8 +227,7 @@ Windows, and macOS. Keep all three green.
   vertical layer 1 with a horizontal layer 2. The upload resolves the tile numbers through
   the layer 1 Map16 pointer table (`$0FBE`), not the BG table, and ORs `$1000` (palette
   row + 4) into every word when the object tileset is 3. `expand::Layer2Objects` and
-  `LevelTiles::layer2_object_tile` encode this; the renderer stacks layers in Mode 1 order
-  (layer 2 low priority, layer 1 low, layer 2 high, layer 1 high). The layer 2 background tilemap is decoded into
+  `LevelTiles::layer2_object_tile` encode this. The layer 2 background tilemap is decoded into
   `$7EB900`/`$7EBD00` (two screens); its tile numbers index the BG Map16 (`200+`). The buffer
   is captured right after `LoadLevel`: game mode `$12` decompresses GFX into `$7EAD00`, and a
   4bpp file (Lunar Magic) overruns the 3bpp-sized buffer into `$7EB900`. The game has
@@ -318,8 +317,9 @@ Windows, and macOS. Keep all three green.
   through the transparent main screen (`$0D9D`) by colour math; `CGADSUB` (`$40`) bit 2
   blends layer 3 with it in the fish and fog levels (mode `$0E` puts only layer 3 on the main
   screen). Level modes `$1E`/`$1F` have no layer 3 on the main screen. The renderer draws
-  layer 3 at its entry position, tiled at its scroll rate: a non-scrolling axis repeats the
-  entry screen every 256 pixels horizontally and stays in the entry 224-pixel band vertically.
+  layer 3 at its entry position, continued unstretched along the axes it scrolls on: a
+  non-scrolling axis repeats the entry screen every 256 pixels horizontally and stays in the
+  entry 224-pixel band vertically.
 - Mode 7 boss arenas render a 256x224 scene from captured video registers, with the ROM's
   NMI/IRQ handlers selecting the Mode 1 ceiling/floor bands and Mode 7 transform. One
   game drawing pass supplies packed OAM (including arena walls and Bowser's floor) and
