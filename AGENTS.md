@@ -133,7 +133,7 @@ Windows, and macOS. Keep all three green.
   clobbered buffer or a table read from the wrong place without external data. Hacks whose
   headerless SHA-1 is in `fixtures/lunar_magic_map16_bg_export.txt` also have their BG table
   hashed against Lunar Magic's `-ExportAllMap16` output (file tile index `8000`-`81FF`).
-  Known exceptions in the corpus: `Smb2dx` (LM 1.63; 134 levels fail, its mode `$00`
+  Known exceptions in the corpus: `Smb2dx` (LM 1.63; 173 levels fail, its mode `$00`
   levels carry object layer 2 pointers) and `Super Hark Bros 2` level `00A` (mode `$0C`,
   896 of 2048 words), both failing before the vertical-level checks were added.
 
