@@ -109,6 +109,12 @@ mod ram {
     pub const LAYER1_DY: u32 = 0x7E_17BC;
     /// `$9D`: sprite lock, which also pauses layer 3 autoscroll.
     pub const SPRITE_LOCK: u32 = 0x7E_009D;
+    /// `$71`: the player's animation state; non-zero while an entrance
+    /// action (pipe, cannon pipe, door) is still playing.
+    pub const PLAYER_ANIMATION: u32 = 0x7E_0071;
+    /// `$18B9`: the active sprite generator, which keeps spawning sprites
+    /// after its own sprite slot is cleared.
+    pub const SPRITE_GENERATOR: u32 = 0x7E_18B9;
     /// `$3E`: `BGMODE` mirror; `$40`: `CGADSUB` mirror; `$44`: `CGWSEL`
     /// mirror; `$0D9D`/`$0D9E`: main and sub screen designation mirrors.
     pub const BG_MODE: u32 = 0x7E_003E;
@@ -123,6 +129,13 @@ const SPRITE_SLOTS: u32 = 12;
 const SPRITE_LOAD_FLAGS: u32 = 0x80;
 /// Most frames a sprite pass runs waiting for the sprites to draw.
 const SPRITE_FRAMES: usize = 8;
+/// Most frames the player pass runs waiting for an entrance action to end.
+const PLAYER_FRAMES: usize = 128;
+/// The OAM slots `DrawMarioAndYoshi` (`CODE_01EA70`) fills, at `$0300`-
+/// `$031F`: the player and, when he rides, Yoshi. Everything else the game
+/// draws in a frame (cluster sprites such as the castle candle flames and
+/// the ghost house Boo ceilings the loader spawns) uses other slots.
+const PLAYER_OAM_SLOTS: std::ops::Range<usize> = 64..72;
 
 /// Lunar Magic 3's level sizes (Vitor Vilela's dynamic level patch):
 /// the height in pixels of each horizontal level mode and how many
@@ -300,7 +313,10 @@ mod routines {
     pub const SPAWN_SPRITES: u32 = 0x02_A802;
     /// `CODE_0098A9`: uploads the boss's graphics to VRAM.
     pub const UPLOAD_BOSS_TILES: u32 = 0x00_98A9;
-    /// `CODE_00A300`: uploads the player's graphics to VRAM.
+    /// `MarioGFXDMA` (`$00A300`): the NMI's per-frame upload of the
+    /// player's tiles (VRAM words `$6000`-`$60FF`, `$6100`-`$61FF`, and
+    /// `$67F0`) and palette (CGRAM `$86`-`$8F`), from the pointers the
+    /// drawing routine left.
     pub const UPLOAD_PLAYER_TILES: u32 = 0x00_A300;
     /// `MAP16AppTable`: four pointers into bank `$0D`, one per 8-column
     /// stretch of the level, to alternative definitions of the vertical
@@ -411,6 +427,12 @@ pub struct LevelTiles {
     pub bg_sc: [u8; 4],
     /// `OBSEL`: object sizes and character base as level preparation set it.
     pub object_select: u8,
+    /// The player's OAM objects at the level's entrance, in level
+    /// coordinates, as the game draws him once any entrance action (pipe,
+    /// cannon pipe, door) has finished. His per-frame tile and palette
+    /// uploads are applied to `vram` and `cgram`. Empty for boss arenas,
+    /// whose drawing pass already includes him.
+    pub player: Vec<crate::video::SpriteObject>,
     /// Video-mode bands installed by the ROM's boss NMI/IRQ handlers.
     pub boss_scene: Option<crate::video::BossScene>,
     /// Layer 3 position and scroll behaviour, when the level shows
@@ -684,10 +706,13 @@ pub fn expand_level_traced(
             bus.wram_u8(ram::BACKGROUND_COLOR + 1),
         ])),
     };
-    let layer3 = if boss_scene.is_some() {
-        None
+    let (layer3, player) = if boss_scene.is_some() {
+        (None, Vec::new())
     } else {
-        capture_layer3(&mut cpu, &mut bus, level)?
+        (
+            capture_layer3(&mut cpu, &mut bus, level)?,
+            capture_player(&mut bus, level)?,
+        )
     };
     let lunar_magic = rom.lunar_magic_version().is_some();
     let (bg_map16, layer2_screen_len) = match &layer2_tilemap {
@@ -713,6 +738,7 @@ pub fn expand_level_traced(
         cgram: bus.cgram,
         bg_sc: bus.bg_sc,
         object_select: bus.object_select,
+        player,
         boss_scene,
         layer3,
         screen,
@@ -745,6 +771,8 @@ fn level_rows(bus: &SmwBus, vertical: bool) -> usize {
 /// Screen size the sprite engine draws within.
 const SCREEN_W: i32 = 256;
 const SCREEN_H: i32 = 224;
+/// The Y position the game parks unused OAM objects at.
+const HIDDEN_Y: u8 = 0xF0;
 
 /// Draws the level's sprites the way the game does: for each camera
 /// position that puts a sprite entry's column at the screen edge, it
@@ -939,7 +967,7 @@ fn screen_objects(oam: &[u8], sizes: [(i32, i32); 2]) -> Vec<(i32, i32, u8, u8, 
         let (width, height) = sizes[large as usize];
         let x = bytes[0] as i32 - if high & 1 != 0 { 256 } else { 0 };
         let y = bytes[1];
-        if y == 0xF0 {
+        if y == HIDDEN_Y {
             continue;
         }
         let y = if y as i32 >= SCREEN_H {
@@ -953,6 +981,62 @@ fn screen_objects(oam: &[u8], sizes: [(i32, i32); 2]) -> Vec<(i32, i32, u8, u8, 
         out.push((x, y, bytes[2], bytes[3], large));
     }
     out
+}
+
+/// The player as the game draws him at the entrance: one level frame
+/// after another from the prepared state, with every sprite slot cleared
+/// and every level sprite marked as already loaded so nothing else
+/// spawns, until his entrance action (`$71`) has finished. The NMI's
+/// player tile and palette upload then runs so the objects' graphics are
+/// in VRAM and CGRAM (the bus keeps those; work RAM is restored). Only
+/// his own OAM slots are read: the cluster sprites the loader spawned are
+/// still drawn in this pass, and the sprite passes already capture them.
+/// The objects come back in level coordinates from the camera the pass
+/// ended with.
+fn capture_player(
+    bus: &mut SmwBus,
+    level: u16,
+) -> Result<Vec<crate::video::SpriteObject>, ExpandError> {
+    let saved = bus.wram.clone();
+    for slot in 0..SPRITE_SLOTS {
+        bus.set_wram_u8(ram::SPRITE_STATUS + slot, 0);
+    }
+    for i in 0..SPRITE_LOAD_FLAGS {
+        bus.set_wram_u8(ram::SPRITE_LOAD_STATUS + i, 1);
+    }
+    bus.set_wram_u8(ram::SPRITE_GENERATOR, 0);
+    bus.set_wram_u8(ram::GAME_MODE, 0x14);
+    for _ in 0..PLAYER_FRAMES {
+        let mut cpu = Cpu::new();
+        cpu.call_jsr(bus, routines::DRAW_LEVEL_FRAME, STEP_LIMIT)
+            .map_err(|source| ExpandError::Cpu { level, source })?;
+        if bus.wram_u8(ram::PLAYER_ANIMATION) == 0 {
+            break;
+        }
+    }
+    let mut cpu = Cpu::new();
+    cpu.call_jsr(bus, routines::UPLOAD_PLAYER_TILES, STEP_LIMIT)
+        .map_err(|source| ExpandError::Cpu { level, source })?;
+    let mut oam = bus.wram_slice(ram::OAM, 0x240).to_vec();
+    for slot in (0..128).filter(|slot| !PLAYER_OAM_SLOTS.contains(slot)) {
+        oam[slot * 4 + 1] = HIDDEN_Y;
+    }
+    oam.push(bus.wram_u8(ram::OAM_ADDRESS) / 2);
+    let read16 =
+        |bus: &SmwBus, addr: u32| u16::from_le_bytes([bus.wram_u8(addr), bus.wram_u8(addr + 1)]);
+    let camera = [read16(bus, ram::LAYER1_X), read16(bus, ram::LAYER1_Y)];
+    let objects = screen_objects(&oam, object_sizes(bus.object_select))
+        .into_iter()
+        .map(|(sx, sy, tile, attr, large)| crate::video::SpriteObject {
+            x: camera[0] as i16 as i32 + sx,
+            y: camera[1] as i16 as i32 + sy,
+            tile,
+            attr,
+            large,
+        })
+        .collect();
+    bus.wram = saved;
+    Ok(objects)
 }
 
 /// Run just the video-register portions of the boss interrupt handlers.

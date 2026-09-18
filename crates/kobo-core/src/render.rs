@@ -504,8 +504,20 @@ fn layer3_pixel(vram: &[u8], layer3: &crate::video::Layer3, x: i32, y: i32) -> O
 /// the first opaque object at a pixel wins, and carries its OAM priority
 /// against the background layers.
 pub fn draw_sprite_scene(layers: &mut LevelLayers, scene: &crate::video::SpriteScene, vram: &[u8]) {
-    let sizes = crate::expand::object_sizes(scene.object_select);
-    for object in &scene.objects {
+    draw_objects(layers, &scene.objects, scene.object_select, vram);
+}
+
+/// Draws OAM objects (in level coordinates) into the object layer, front
+/// to back, with the sizes and character base `object_select` selects.
+/// Objects already in the layer stay in front of these.
+pub fn draw_objects(
+    layers: &mut LevelLayers,
+    objects: &[crate::video::SpriteObject],
+    object_select: u8,
+    vram: &[u8],
+) {
+    let sizes = crate::expand::object_sizes(object_select);
+    for object in objects {
         let (width, height) = sizes[object.large as usize];
         let priority = OBJECT_PRIORITIES[(object.attr >> 4 & 3) as usize];
         let color_base = 128 + (object.attr >> 1 & 7) * 16;
@@ -516,7 +528,7 @@ pub fn draw_sprite_scene(layers: &mut LevelLayers, scene: &crate::video::SpriteS
                 };
                 let Some(color) = object_pixel(
                     vram,
-                    scene.object_select,
+                    object_select,
                     object.tile,
                     object.attr,
                     dx,

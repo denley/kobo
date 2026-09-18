@@ -2,9 +2,9 @@
 //! lists (`:`-separated) directories of `KOBO_ORACLE_VIDEO=1` dumps of the
 //! vanilla ROM. Each level is rendered with sprites, cropped to the
 //! emulator's camera, and compared pixel by pixel below the status bar.
-//! Sprites animate and move, tides and animated tiles cycle, and Mario is
-//! on the emulator's screen, so agreement is high rather than total; the
-//! threshold catches layers, palettes, and colour math going wrong.
+//! Sprites animate and move and tides and animated tiles cycle, so
+//! agreement is high rather than total; the threshold catches layers,
+//! palettes, colour math, and the player's placement going wrong.
 
 mod common;
 
@@ -85,6 +85,7 @@ fn rendered_levels_match_emulator_frames() {
                 let scene = expand::capture_sprites(&rom, &tiles, &list).unwrap();
                 render::draw_sprite_scene(&mut layers, &scene, &tiles.vram);
             }
+            render::draw_objects(&mut layers, &tiles.player, tiles.object_select, &tiles.vram);
             let img = render::compose_level(&tiles, &layers, &pal);
             let (rate, pad) = FRAME_PADDING
                 .map(|pad| (match_rate(&frame, &img, pad), pad))

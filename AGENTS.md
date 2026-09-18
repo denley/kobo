@@ -83,6 +83,7 @@ cargo run -- palette png --level 105 out.png # 16x16 swatch of the assembled lev
 cargo run -- map16 png --level 105 out.png   # all 0x400 Map16 tiles in colour
 cargo run -- level png 105 out.png           # render a level by running the ROM's own loader
 cargo run -- level png 105 out.png --markers # ID boxes instead of sprite graphics (--no-sprites: none)
+cargo run -- level png 105 out.png --no-player # leave Mario out of the entrance
 cargo run -- level tiles|dump 105 [dir]      # the expanded Map16 grid as hex, or raw planes
 cargo run -- level sprites|map16|wram|reads  # sprite list, resolved Map16, RAM dump, read trace
 cargo run -- addr '$05E000' [--sa1]          # SNES <-> file offset
@@ -125,7 +126,10 @@ Windows, and macOS. Keep all three green.
   Mesen's frame is 239 lines with the picture 6 rows down; the test tries paddings 4-9.
   Agreement is 95-99.9% on most levels; tides that have moved and sprites that have
   animated account for the rest, and the threshold is 85%. Captures live in
-  `~/.local/share/kobo/oracle/layer3-video/` and `colormath-video/`.
+  `~/.local/share/kobo/oracle/layer3-video/` and `colormath-video/`. In the `1D4` and
+  `1D9` captures the picture shows no OAM object at all (no Mario, no candle flames)
+  although the dumped OAM holds them where the player pass puts them; treat those
+  two frames' object layer as unreliable.
 - Lunar Magic exports (hashes in `tests/fixtures/`) are the oracle for GFX, palette, and Map16.
 - **Lunar Magic hacks**: `tests/layer2_background.rs` runs on every ROM listed in `KOBO_LM_ROMS`
   (`:`-separated paths) as well as the vanilla ROM. It rebuilds the layer 2 tilemap the game
@@ -217,7 +221,19 @@ Windows, and macOS. Keep all three green.
   The bus captures VRAM/CGRAM port and DMA writes, so rendering uses what the game uploaded:
   ExGFX, custom palettes, and animated tiles come for free. VRAM matches the emulator except
   animated slots (frame-dependent) and tilemap areas filled on later frames; CGRAM matches
-  except Mario's row 8 and one per-frame colour.
+  except one per-frame colour.
+- The player (`expand::capture_player`, `LevelTiles::player`): from the prepared state, with
+  every sprite slot cleared, every `$1938` load flag set, and the generator `$18B9` zeroed,
+  `GM14Level` frames run until the entrance action `$71` is zero (a cannon pipe takes a few
+  dozen; pipes and doors in vanilla start at zero), then `MarioGFXDMA` (`$00A300`) uploads
+  his tiles (VRAM words `$6000`, `$6100`, `$67F0`) and palette (CGRAM `$86`-`$8F`), which
+  stay in `vram`/`cgram`. Only OAM slots 64-71 (`$0300`-`$031F`, what `DrawMarioAndYoshi`
+  writes) are kept, in level coordinates from the camera the pass ended with. The other
+  objects in that pass are cluster sprites the loader itself spawned (castle candle flames,
+  ghost house Boo ceilings); the sprite passes subtract those as part of their baseline and
+  capture the ones level sprites respawn, so keeping them here doubled the Boos. Boss
+  arenas leave the field empty; their drawing pass already includes him. The CLI draws him
+  behind the sprites (his slots follow most of theirs).
 - Tile grid layout: horizontal levels are 16x27 per screen, screen after screen. Vertical
   levels are 32 wide; each screen is 16 rows stored as a left and a right 16x16 half.
 - Layer 2 objects live in the upper part of the same grid planes, with a layout chosen by
@@ -374,6 +390,10 @@ Windows, and macOS. Keep all three green.
   dynamic tilemap upload (`$1F8000`, 20 unrolled column slots per layer, reading from the
   row above the camera) was traced to find this, and its BG2 tilemap cells agree with
   `LevelTiles::layer2_object_tile` on every corpus level checked.
+- Lunar Magic 3's loader sets the screen count `$5D` independently of the header byte:
+  Grand Poo World 2's never-saved levels all point at `$068000` (3 screens) yet load with
+  2 to 17 screens, and level `109` with `$FF`. `LevelTiles::size()` bounds the grid, and
+  `tests/sprite_lists.rs` tolerates the `$FF`.
 - Custom level palettes: 3-byte pointers at `$0EF600` per level to `$202` bytes (back area
   colour, then 256 colours); `$000000`/`$FFFFFF` = none. Game mode `$12` loads them itself.
 - ExGFX and Lunar Magic's 4bpp re-inserted GFX are handled by the game's own upload code, so
@@ -410,9 +430,12 @@ Windows, and macOS. Keep all three green.
   uniformly dark, and the keyhole and message box effects do not appear.
 - Sprites show their first drawn frame with Mario off the left screen edge and no scrolling,
   so anything that waits for Mario, spawns over time, or moves before it appears (Bullet
-  Bill shooters, generators, Lakitu) is not what a player sees. Custom sprite loaders run
-  as ROM code, but nothing has checked PIXI or Lunar Magic 3 sprite output yet. Boss arenas
-  show the OAM of the first drawing pass instead.
+  Bill shooters, generators, Lakitu) is not what a player sees. Cluster sprites the loader
+  spawns without a level sprite (the castle candle flames) are not drawn. Mario himself is
+  drawn where his entrance action leaves him. Custom sprite loaders run as ROM code; a
+  sweep of 12 levels in each of 41 corpus hacks (PIXI and Lunar Magic 3 sprites included)
+  rendered without errors or visible glitches, but nothing compares them to an emulator.
+  Boss arenas show the OAM of the first drawing pass instead.
 - `GFX27`'s layout is unknown; `GFX32`/`GFX33` are not handled by the GFX tooling.
 
 ## Open decisions

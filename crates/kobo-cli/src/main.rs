@@ -125,6 +125,9 @@ enum LevelCommand {
         /// Leave out sprites entirely.
         #[arg(long)]
         no_sprites: bool,
+        /// Leave out the player at the level's entrance.
+        #[arg(long)]
+        no_player: bool,
         /// Draw every sprite as an ID marker instead of running the game's
         /// sprite engine for its graphics.
         #[arg(long)]
@@ -308,8 +311,9 @@ fn main() -> Result<()> {
                 level,
                 out,
                 no_sprites,
+                no_player,
                 markers,
-            } => level_png(&rom.load()?, &level, &out, !no_sprites, markers),
+            } => level_png(&rom.load()?, &level, &out, !no_sprites, !no_player, markers),
             LevelCommand::Sprites { rom, level } => level_sprites(&rom.load()?, &level),
             LevelCommand::Tiles { rom, level } => level_tiles(&rom.load()?, &level),
             LevelCommand::Dump { rom, level, dir } => level_dump(&rom.load()?, &level, &dir),
@@ -386,6 +390,7 @@ fn level_png(
     level: &str,
     out: &PathBuf,
     with_sprites: bool,
+    with_player: bool,
     markers: bool,
 ) -> Result<()> {
     let level = parse_level(level)?;
@@ -408,6 +413,10 @@ fn level_png(
             render::draw_sprite_scene(&mut layers, &scene, &tiles.vram);
             marked = scene.undrawn;
         }
+    }
+    // The player's OAM slots follow the sprites', so he goes behind them.
+    if with_player {
+        render::draw_objects(&mut layers, &tiles.player, tiles.object_select, &tiles.vram);
     }
     let mut img = render::compose_level(&tiles, &layers, &pal);
     for (x, y, id) in marked {

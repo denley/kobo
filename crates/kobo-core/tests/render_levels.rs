@@ -44,6 +44,7 @@ fn scene() -> (LevelTiles, LayerTiles, Palette) {
         cgram: vec![],
         bg_sc: [0; 4],
         object_select: 0,
+        player: vec![],
         boss_scene: None,
         layer3: None,
         screen: Screen::vanilla(Color15::from_rgb5(0, 31, 0)),

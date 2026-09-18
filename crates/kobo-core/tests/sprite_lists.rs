@@ -45,8 +45,13 @@ fn check_rom(name: &str, rom: &Rom) -> (usize, usize) {
             .unwrap_or_else(|e| panic!("{name} level {level:03X}: {e}"));
         parsed += 1;
         let (w, h) = tiles.size();
+        // Lunar Magic 3 sets the screen count from its own per-level table
+        // rather than the header; a level it never saved can come out as
+        // `$FF` (Grand Poo World 2's 109), which `size()` bounds.
         assert!(
-            tiles.rows * tiles.screens * 16 <= expand::GRID_LEN || tiles.vertical,
+            tiles.rows * tiles.screens * 16 <= expand::GRID_LEN
+                || tiles.vertical
+                || tiles.screens == 0xFF,
             "{name} level {level:03X}: {} screens of {} rows overflow the planes",
             tiles.screens,
             tiles.rows

@@ -81,3 +81,48 @@ fn a_spread_of_vanilla_levels_captures_cleanly() {
     }
     assert!(captured > 0);
 }
+
+/// The player is captured by his own drawing pass: standing at the
+/// entrance in Yoshi's Island 1, shot out of the cannon pipe that level
+/// 0D0 starts with, and left to the arena's own pass in boss rooms.
+#[test]
+fn player_is_drawn_at_the_entrance() {
+    let Some(rom) = common::vanilla() else { return };
+    let tiles = expand::expand_level(&rom, 0x105).unwrap();
+    let player = |tiles: &expand::LevelTiles| {
+        let at = |i: usize| i32::from(u16::from_le_bytes([tiles.wram[i], tiles.wram[i + 1]]));
+        (at(0x94), at(0x96))
+    };
+    let (x, y) = player(&tiles);
+    assert_eq!((x, y), (0x10, 0x160));
+    assert!(!tiles.player.is_empty());
+    for o in &tiles.player {
+        assert!(
+            (o.x - x).abs() <= 16 && (o.y - y).abs() <= 32,
+            "object at ({}, {}) is not the player at ({x}, {y})",
+            o.x,
+            o.y
+        );
+    }
+    // Mario's palette (row 8, colours 6-F) is uploaded with his tiles.
+    assert_ne!(tiles.palette().get(8, 8).0, 0);
+
+    // The cannon pipe fires him up and to the right of where he entered,
+    // and the pass follows him until the launch ends.
+    let tiles = expand::expand_level(&rom, 0x0D0).unwrap();
+    assert_eq!(tiles.wram[0x71], 7, "cannon pipe entrance");
+    let (x, y) = player(&tiles);
+    let (w, h) = tiles.size();
+    assert!(!tiles.player.is_empty());
+    for o in &tiles.player {
+        assert!(
+            o.x > x && o.y < y && o.x < w as i32 * 16 && o.y >= 0 && o.y < h as i32 * 16,
+            "object at ({}, {}) after launching from ({x}, {y})",
+            o.x,
+            o.y
+        );
+    }
+
+    let tiles = expand::expand_level(&rom, 0x1C7).unwrap();
+    assert!(tiles.player.is_empty());
+}
