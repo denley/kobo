@@ -1,12 +1,10 @@
-//! A loaded level: the tile grid the game expanded its objects into, and
-//! what level preparation left in video memory and RAM around it.
+//! The tile grid the game expanded a level's objects into, with the Map16
+//! definitions its tile numbers resolve to.
 
 use std::collections::HashMap;
 
-use super::Diagnostic;
 use crate::level::PrimaryHeader;
 use crate::map16::Map16Tile;
-use crate::ram::{self, Ram};
 
 /// Bytes per plane of the tile grid.
 pub const GRID_LEN: usize = 0x3800;
@@ -131,7 +129,8 @@ pub const PIPE_VARIANTS: usize = 4;
 /// Bytes per screen of a Lunar Magic 32-row background (16x32 tiles).
 pub(super) const LM_TALL_SCREEN_LEN: usize = 0x200;
 
-/// A level's expanded tile grid.
+/// A level's expanded tile grid: what the level is, apart from how the
+/// machine that loaded it was left (see [`super::LoadedLevel`]).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct LevelTiles {
     pub level: u16,
@@ -151,9 +150,6 @@ pub struct LevelTiles {
     pub rows: usize,
     pub low: Vec<u8>,
     pub high: Vec<u8>,
-    /// The game's RAM after level preparation: what the sprite passes
-    /// start from, and open to inspection through [`crate::ram`].
-    pub ram: Ram,
     /// Foreground Map16 definitions for tile numbers in the object grid.
     /// Lunar Magic pages 2 and 3 are distinct from the same-numbered BG
     /// tiles, which live in `bg_map16`. Prefer [`LevelTiles::map16_at`],
@@ -170,44 +166,6 @@ pub struct LevelTiles {
     /// Vanilla has 0x200 definitions; Lunar Magic backgrounds can use
     /// higher indices. Empty when the level has no decoded background.
     pub bg_map16: Vec<Map16Tile>,
-    /// VRAM as uploaded by level preparation: layer tiles at `$0000`,
-    /// sprite tiles at `$C000`, tilemaps in between. Boss arenas also
-    /// include the first drawing pass's player and boss graphics uploads.
-    pub vram: Vec<u8>,
-    /// Which VRAM bytes level preparation actually wrote.
-    pub vram_written: Vec<bool>,
-    /// CGRAM as uploaded by level preparation.
-    pub cgram: Vec<u8>,
-    /// `BG1SC`-`BG4SC` as level preparation set them: bits 7-2 are the
-    /// tilemap's VRAM word address divided by `$400`, bit 1 selects 64
-    /// tiles tall, bit 0 selects 64 tiles wide. Vanilla puts layer 1 at
-    /// `$2000` and layer 2 at `$3000`, both 64x64; Lunar Magic uses
-    /// `$3000` and `$3800`, 64x32.
-    pub bg_sc: [u8; 4],
-    /// `OBSEL`: object sizes and character base as level preparation set it.
-    pub object_select: u8,
-    /// The player's OAM objects at the level's entrance, in level
-    /// coordinates, as the game draws him once any entrance action (pipe,
-    /// cannon pipe, door) has finished. His per-frame tile and palette
-    /// uploads are applied to `vram` and `cgram`. Empty for boss arenas,
-    /// whose drawing pass already includes him.
-    pub player: Vec<crate::video::SpriteObject>,
-    /// Video-mode bands installed by the ROM's boss NMI/IRQ handlers.
-    pub boss_scene: Option<crate::video::BossScene>,
-    /// Layer 3 position and scroll behaviour, when the level shows
-    /// layer 3 on either screen in Mode 1 (every ordinary level; boss
-    /// arenas draw theirs into `boss_scene`).
-    pub layer3: Option<crate::video::Layer3>,
-    /// Main and sub screen designation and colour math, which decide how
-    /// the layers combine into the picture.
-    pub screen: crate::video::Screen,
-    /// Layer 1 position the level was entered at (`$1A`/`$1C`) and the
-    /// layer 2 position the first camera update derived for it (`$1E`/
-    /// `$20`). The two differ when the level's layer 2 scroll settings
-    /// offset or slow the layer (parallax); the renderer draws layer 2
-    /// where this camera sees it.
-    pub camera: [u16; 2],
-    pub layer2_position: [u16; 2],
     /// Layer 2 background tilemap planes, when the level uses a
     /// pre-built background instead of layer 2 objects. Raw tile numbers
     /// index `bg_map16`; `layer2_bg_tile` adds the legacy 0x200 display base.
@@ -215,9 +173,6 @@ pub struct LevelTiles {
     /// Bytes per screen of the background planes: `0x1B0` (16x27, vanilla)
     /// or `0x200` (16x32, Lunar Magic's taller backgrounds).
     pub layer2_screen_len: usize,
-    /// What went wrong without stopping the level from loading: the
-    /// player's entrance pass giving up leaves `player` empty.
-    pub diagnostics: Vec<Diagnostic>,
 }
 
 impl LevelTiles {
@@ -290,36 +245,11 @@ impl LevelTiles {
         Some(self.low[i] as u16 | ((self.high[i] as u16) << 8))
     }
 
-    /// How far layer 2 content is displaced from the layer 1 grid, in
-    /// pixels: a layer 2 tile at column `c` shows at level x
-    /// `c * 16 + offset[0]`. Zero when both layers scroll together.
-    pub fn layer2_offset(&self) -> [i32; 2] {
-        std::array::from_fn(|axis| {
-            self.camera[axis].wrapping_sub(self.layer2_position[axis]) as i16 as i32
-        })
-    }
-
     /// Palette bits the layer 2 object upload ORs into every tile: bit 2
     /// (rows 4-7) in object tileset 3, where `CODE_058B8D` ORs `$1000`
     /// into the tilemap words; nothing otherwise.
     pub fn layer2_palette_mask(&self) -> u8 {
         if self.object_tileset == 3 { 4 } else { 0 }
-    }
-
-    /// Where the game found the level's sprite data, honouring any Lunar
-    /// Magic relocation.
-    pub fn sprite_data_ptr(&self) -> crate::addr::SnesAddr {
-        crate::addr::SnesAddr::new(self.ram.u24(ram::SPRITE_DATA_PTR))
-    }
-
-    /// The back area colour the game settled on.
-    pub fn back_area_color(&self) -> crate::palette::Color15 {
-        crate::palette::Color15(self.ram.u16(ram::BACKGROUND_COLOR))
-    }
-
-    /// The palette as uploaded to CGRAM.
-    pub fn palette(&self) -> crate::palette::Palette {
-        crate::palette::Palette::from_cgram(&self.cgram)
     }
 
     /// Width and height of the captured level in tiles. Some headers

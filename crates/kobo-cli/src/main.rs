@@ -12,7 +12,7 @@ use kobo_core::level::{self, Layer2Data};
 use kobo_core::map16;
 use kobo_core::palette::{self, LevelPaletteSelect};
 use kobo_core::ram::RamAddr;
-use kobo_core::render::{self, LayerTiles};
+use kobo_core::render::{self, LayerTiles, RenderOptions, Sprites};
 use kobo_core::sprites;
 use kobo_core::{Mapping, PcAddr, Rom, SnesAddr, config};
 
@@ -395,80 +395,49 @@ fn level_png(
     markers: bool,
 ) -> Result<()> {
     let level = parse_level(level)?;
-    let tiles = expand::expand_level(rom, level)?;
-    // Graphics and colours come from what the game uploaded to VRAM and
-    // CGRAM, so ExGFX, custom palettes, and animated tiles are covered.
-    let pal = tiles.palette();
-    let layer_tiles = LayerTiles::from_vram(&tiles.vram);
-    let mut layers = render::level_layers(&tiles, &layer_tiles);
-    let mut diagnostics = tiles.diagnostics.clone();
-    let mut marked: Vec<(usize, usize, u8)> = Vec::new();
-    if with_sprites && tiles.boss_scene.is_none() {
-        let list = sprites::read_sprites_at(rom, tiles.sprite_data_ptr())?;
-        if markers {
-            marked.extend(list.sprites.iter().map(|s| {
-                let (x, y) = s.tile_position(tiles.vertical);
-                (x, y, s.id)
-            }));
-        } else {
-            let scene = expand::capture_sprites(rom, &tiles, &list)?;
-            diagnostics.extend(scene.diagnostics.iter().cloned());
-            render::draw_sprite_scene(&mut layers, &scene, tiles.layer2_offset(), &tiles.vram);
-            marked = scene.undrawn;
-        }
+    let options = RenderOptions {
+        sprites: match (with_sprites, markers) {
+            (false, _) => Sprites::Hidden,
+            (true, true) => Sprites::Markers,
+            (true, false) => Sprites::Drawn,
+        },
+        player: with_player,
+    };
+    let rendered = render::render_level(rom, level, options)?;
+    for line in expand::summarize(&rendered.diagnostics) {
+        eprintln!("warning: level {level:03X}: {line}");
     }
-    warn(level, &diagnostics);
-    // The player's OAM slots follow the sprites', so he goes behind them.
-    if with_player {
-        render::draw_objects(&mut layers, &tiles.player, tiles.object_select, &tiles.vram);
-    }
-    let mut img = render::compose_level(&tiles, &layers, &pal);
-    for (x, y, id) in marked {
-        render::draw_sprite_marker(&mut img, x as u32 * 16, y as u32 * 16, id, &tiles.vram);
-    }
-    img.write_png(out)?;
+    rendered.image.write_png(out)?;
     println!(
         "level {level:03X}: {} screens, mode ${:02X}, {}x{} -> {}",
-        tiles.screens,
-        tiles.level_mode,
-        img.width,
-        img.height,
+        rendered.level.tiles.screens,
+        rendered.level.tiles.level_mode,
+        rendered.image.width,
+        rendered.image.height,
         out.display()
     );
     Ok(())
 }
 
-/// Reports the passes a capture gave up on. Broken per-level code fails
-/// every pass the same way, so each distinct error is reported once.
-fn warn(level: u16, diagnostics: &[expand::Diagnostic]) {
-    let mut reported: Vec<&kobo_core::cpu::CpuError> = Vec::new();
-    for diagnostic in diagnostics {
-        if reported.contains(&&diagnostic.error) {
-            continue;
-        }
-        reported.push(&diagnostic.error);
-        let others = diagnostics
-            .iter()
-            .filter(|other| other.error == diagnostic.error)
-            .count()
-            - 1;
-        match others {
-            0 => eprintln!("warning: level {level:03X}: {diagnostic}"),
-            n => eprintln!("warning: level {level:03X}: {diagnostic} (and {n} more passes)"),
-        }
-    }
-}
-
 fn level_dump(rom: &Rom, level: &str, dir: &PathBuf) -> Result<()> {
     let level = parse_level(level)?;
-    let tiles = expand::expand_level(rom, level)?;
+    let loaded = expand::expand_level(rom, level)?;
     fs::create_dir_all(dir)?;
-    fs::write(dir.join(format!("level_{level:03X}.l1lo.bin")), &tiles.low)?;
-    fs::write(dir.join(format!("level_{level:03X}.l1hi.bin")), &tiles.high)?;
-    fs::write(dir.join(format!("level_{level:03X}.vram.bin")), &tiles.vram)?;
+    fs::write(
+        dir.join(format!("level_{level:03X}.l1lo.bin")),
+        &loaded.tiles.low,
+    )?;
+    fs::write(
+        dir.join(format!("level_{level:03X}.l1hi.bin")),
+        &loaded.tiles.high,
+    )?;
+    fs::write(
+        dir.join(format!("level_{level:03X}.vram.bin")),
+        &loaded.video.vram,
+    )?;
     fs::write(
         dir.join(format!("level_{level:03X}.cgram.bin")),
-        &tiles.cgram,
+        &loaded.video.cgram,
     )?;
     println!("level {level:03X}: wrote planes to {}", dir.display());
     Ok(())
@@ -534,8 +503,8 @@ fn level_reads(rom: &Rom, level: &str, from: &str, near_bank: Option<&str>) -> R
 
 fn level_sprites(rom: &Rom, level: &str) -> Result<()> {
     let level = parse_level(level)?;
-    let tiles = expand::expand_level(rom, level)?;
-    let start = tiles.sprite_data_ptr();
+    let loaded = expand::expand_level(rom, level)?;
+    let start = loaded.sprite_data_ptr();
     let list = sprites::read_sprites_at(rom, start)?;
     println!(
         "level {level:03X}: sprite data at {start}, {} bytes, memory {}, buoyancy {}, new system {}",
@@ -559,11 +528,11 @@ fn level_sprites(rom: &Rom, level: &str) -> Result<()> {
 
 fn level_map16(rom: &Rom, level: &str) -> Result<()> {
     let level = parse_level(level)?;
-    let tiles = expand::expand_level(rom, level)?;
-    let mut numbers: Vec<_> = tiles.map16.keys().copied().collect();
+    let loaded = expand::expand_level(rom, level)?;
+    let mut numbers: Vec<_> = loaded.tiles.map16.keys().copied().collect();
     numbers.sort_unstable();
     for n in numbers {
-        let b = tiles.map16[&n].to_bytes();
+        let b = loaded.tiles.map16[&n].to_bytes();
         let hex: Vec<String> = b.iter().map(|x| format!("{x:02X}")).collect();
         println!("{n:04X}: {}", hex.join(" "));
     }
@@ -572,13 +541,13 @@ fn level_map16(rom: &Rom, level: &str) -> Result<()> {
 
 fn level_wram(rom: &Rom, level: &str, addr: &str, len: usize) -> Result<()> {
     let level = parse_level(level)?;
-    let tiles = expand::expand_level(rom, level)?;
+    let loaded = expand::expand_level(rom, level)?;
     let start = u32::from_str_radix(addr.trim_start_matches('$'), 16).context("bad address")?;
     let Some(first) = RamAddr::checked(start) else {
         bail!("address must be in $7E0000-$7FFFFF");
     };
     let len = len.min((0x80_0000 - start) as usize);
-    for (i, chunk) in tiles.ram.bytes(first, len).chunks(16).enumerate() {
+    for (i, chunk) in loaded.ram.bytes(first, len).chunks(16).enumerate() {
         let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02X}")).collect();
         println!("${:06X}: {}", start as usize + i * 16, hex.join(" "));
     }
@@ -587,15 +556,15 @@ fn level_wram(rom: &Rom, level: &str, addr: &str, len: usize) -> Result<()> {
 
 fn level_tiles(rom: &Rom, level: &str) -> Result<()> {
     let level = parse_level(level)?;
-    let tiles = expand::expand_level(rom, level)?;
+    let loaded = expand::expand_level(rom, level)?;
     println!(
         "level {level:03X}: {} screens, mode ${:02X}, vertical {}",
-        tiles.screens, tiles.level_mode, tiles.vertical
+        loaded.tiles.screens, loaded.tiles.level_mode, loaded.tiles.vertical
     );
-    let (w, h) = tiles.size();
+    let (w, h) = loaded.tiles.size();
     for y in 0..h {
         let row: Vec<String> = (0..w)
-            .map(|x| format!("{:03X}", tiles.tile_at(x, y)))
+            .map(|x| format!("{:03X}", loaded.tiles.tile_at(x, y)))
             .collect();
         println!("{}", row.join(" "));
     }

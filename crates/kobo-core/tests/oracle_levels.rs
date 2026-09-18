@@ -38,9 +38,11 @@ fn tile_grids_match_emulator_dumps() {
         let want_lo = fs::read(&lo_path).unwrap();
         let want_hi = fs::read(&hi_path).unwrap();
         match expand::expand_level(&rom, level) {
-            Ok(tiles) => {
+            Ok(loaded) => {
                 let bad = (0..expand::GRID_LEN)
-                    .filter(|&i| tiles.low[i] != want_lo[i] || tiles.high[i] != want_hi[i])
+                    .filter(|&i| {
+                        loaded.tiles.low[i] != want_lo[i] || loaded.tiles.high[i] != want_hi[i]
+                    })
                     .count();
                 if bad != 0 {
                     failures.push(format!("level {level:03X}: {bad} bytes differ"));
@@ -66,7 +68,7 @@ fn boss_graphics_match_emulator_dumps() {
     for level in [0x096, 0x0CC, 0x0D9, 0x1C7] {
         let want = fs::read(dir.join(format!("level_{level:03X}.vram.bin"))).unwrap();
         assert_eq!(want.len(), 0x10000);
-        let tiles = expand::expand_level(&rom, level).unwrap();
+        let loaded = expand::expand_level(&rom, level).unwrap();
         for (name, addresses) in [
             (
                 "Mode 7 characters",
@@ -78,7 +80,7 @@ fn boss_graphics_match_emulator_dumps() {
         ] {
             for address in addresses {
                 assert_eq!(
-                    tiles.vram[address], want[address],
+                    loaded.video.vram[address], want[address],
                     "level {level:03X} {name} at {address:04X}"
                 );
             }
@@ -98,18 +100,24 @@ fn layer3_tilemaps_match_emulator_dumps() {
         let Ok(want) = fs::read(dir.join(format!("level_{level:03X}.vram.bin"))) else {
             continue;
         };
-        let tiles = expand::expand_level(&rom, level).unwrap();
-        if tiles.boss_scene.is_some() {
+        let loaded = expand::expand_level(&rom, level).unwrap();
+        if loaded.scene.boss.is_some() {
             continue;
         }
         checked += 1;
         let region = 0xA140..0xC000;
-        let bad = region.clone().filter(|&i| tiles.vram[i] != want[i]).count();
+        let bad = region
+            .clone()
+            .filter(|&i| loaded.video.vram[i] != want[i])
+            .count();
         if bad != 0 {
-            let first = region.clone().find(|&i| tiles.vram[i] != want[i]).unwrap();
+            let first = region
+                .clone()
+                .find(|&i| loaded.video.vram[i] != want[i])
+                .unwrap();
             failures.push(format!(
                 "level {level:03X}: {bad} bytes differ, first at {first:04X}: {:02X} vs {:02X}",
-                tiles.vram[first], want[first]
+                loaded.video.vram[first], want[first]
             ));
         }
     }

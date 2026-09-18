@@ -18,8 +18,7 @@ use super::diagnostics::{Diagnostic, Pass};
 use super::load_flags::LoadFlags;
 use super::machine::{Call, Machine};
 use super::oam::{self, SCREEN_H, SCREEN_W};
-use super::tiles::LevelTiles;
-use super::{ExpandError, routines};
+use super::{ExpandError, LoadedLevel, routines};
 use crate::cpu::CpuError;
 use crate::ram::{self, Ram};
 use crate::rom::Rom;
@@ -36,12 +35,22 @@ const SLOTLESS_FRAMES: usize = 2;
 const SPAWN_ROUNDS: usize = 8;
 /// Most times a sprite pass moves the camera after a sprite.
 const CAMERA_MOVES: usize = 3;
-/// The castle candle flame: cluster sprite 5 in cluster slots 0-3, drawn
-/// by `CODE_02FA16` into OAM objects 124-127 at its position minus
-/// layer 2's, both in eight bits.
-const CANDLE_FLAME: u8 = 5;
-const CANDLE_FLAMES: u32 = 4;
-const CANDLE_FLAME_OAM: usize = 124;
+/// A cluster sprite the game draws at its position minus layer 2's, both
+/// in eight bits, so that it rides on layer 2 and repeats every 256
+/// pixels along it. Its OAM objects are fixed: cluster slot
+/// `slots.start + n` draws object `first_object + n`.
+struct Layer2Cluster {
+    number: u8,
+    slots: std::ops::Range<u32>,
+    first_object: usize,
+}
+
+/// The castle candle flame (`CODE_02FA16`) is the only one in the game.
+const LAYER2_CLUSTERS: [Layer2Cluster; 1] = [Layer2Cluster {
+    number: 5,
+    slots: 0..4,
+    first_object: 124,
+}];
 
 /// Sprite slot statuses a loader leaves a sprite in: initialising, and
 /// alive or carryable. (The handlers of slotless sprites scribble on the
@@ -184,20 +193,20 @@ impl LevelLoop<'_> {
 /// and is listed in `diagnostics`; what draws nothing is listed in
 /// `undrawn` for the caller to mark.
 ///
-/// Boss arenas draw their sprites in `boss_scene` instead and get an empty
+/// Boss arenas draw their sprites in `LevelScene::boss` instead and get an empty
 /// scene here.
 pub fn capture_sprites(
     rom: &Rom,
-    tiles: &LevelTiles,
+    level: &LoadedLevel,
     list: &SpriteList,
 ) -> Result<SpriteScene, ExpandError> {
-    if tiles.boss_scene.is_some() {
+    if level.scene.boss.is_some() {
         return Ok(SpriteScene {
-            object_select: tiles.object_select,
+            object_select: level.video.object_select,
             ..Default::default()
         });
     }
-    let mut capture = SpriteCapture::new(rom, tiles, list);
+    let mut capture = SpriteCapture::new(rom, level, list);
     // Columns go in camera order, so the scene does not depend on the
     // order of the level's sprite list.
     let mut columns: BTreeMap<(i32, i32), Vec<&SpriteEntry>> = BTreeMap::new();
@@ -215,7 +224,7 @@ pub fn capture_sprites(
 
 struct SpriteCapture<'a, 'r> {
     level_loop: LevelLoop<'r>,
-    tiles: &'a LevelTiles,
+    vertical: bool,
     list: &'a SpriteList,
     bounds: Bounds,
     load_flags: LoadFlags,
@@ -236,9 +245,9 @@ struct SpriteCapture<'a, 'r> {
 }
 
 impl<'a, 'r> SpriteCapture<'a, 'r> {
-    fn new(rom: &'r Rom, tiles: &'a LevelTiles, list: &'a SpriteList) -> Self {
-        let mut machine = Machine::new(rom, tiles.level);
-        machine.bus.ram = tiles.ram.clone();
+    fn new(rom: &'r Rom, level: &LoadedLevel, list: &'a SpriteList) -> Self {
+        let mut machine = Machine::new(rom, level.tiles.level);
+        machine.bus.ram = level.ram.clone();
         let load_flags = LoadFlags::detect(&mut machine.bus);
         // Start from empty sprite tables: the entrance screen's sprites
         // were spawned during level preparation, and each pass respawns
@@ -252,15 +261,15 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
         ram.set_u8(ram::VERT_SCROLL_SETTING, 0);
         ram.set_u8(ram::GAME_MODE, 0x14);
         let loaded_level = ram.clone();
-        let (w, h) = tiles.size();
+        let (w, h) = level.tiles.size();
         Self {
             level_loop: LevelLoop {
                 machine,
                 camera: (0, 0),
-                sizes: oam::object_sizes(tiles.object_select),
+                sizes: oam::object_sizes(level.video.object_select),
                 frames: 0,
             },
-            tiles,
+            vertical: level.tiles.vertical,
             list,
             bounds: Bounds {
                 width: w as i32 * 16,
@@ -269,7 +278,7 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
             load_flags,
             loaded_level,
             scene: SpriteScene {
-                object_select: tiles.object_select,
+                object_select: level.video.object_select,
                 ..Default::default()
             },
             seen: HashSet::new(),
@@ -287,7 +296,7 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
 
     /// Entry position in level pixels.
     fn entry_position(&self, entry: &SpriteEntry) -> (i32, i32) {
-        let (x, y) = entry.tile_position(self.tiles.vertical);
+        let (x, y) = entry.tile_position(self.vertical);
         (x as i32 * 16, y as i32 * 16)
     }
 
@@ -295,7 +304,7 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
     /// sprite inside the screen on the other axis.
     fn loader_camera(&self, entry: &SpriteEntry) -> (i32, i32) {
         let (x, y) = self.entry_position(entry);
-        if self.tiles.vertical {
+        if self.vertical {
             (self.bounds.clamp_x(x - SCREEN_W / 2), y)
         } else {
             (x, self.bounds.clamp_y(y - SCREEN_H / 2))
@@ -322,7 +331,7 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
     /// for the sprite's initialisation to collect (a goal tape starts out
     /// 1280 pixels down).
     fn entry_for(&mut self, (x, y): (i32, i32)) -> Option<&'a SpriteEntry> {
-        let vertical = self.tiles.vertical;
+        let vertical = self.vertical;
         let (index, entry) = self
             .list
             .sprites
@@ -514,7 +523,7 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
     /// shooters, generators, scroll commands, and the spawners of cluster
     /// sprites. Runs from wherever the spawn rounds left the level loop.
     fn capture_slotless(&mut self, camera: (i32, i32), entries: &[&SpriteEntry]) {
-        let vertical = self.tiles.vertical;
+        let vertical = self.vertical;
         let slotless: Vec<_> = entries
             .iter()
             .map(|entry| (entry.tile_position(vertical), entry.id))
@@ -535,7 +544,7 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
                 Vec::new()
             });
         }
-        let flames = self.take_candle_flames(&mut objects);
+        let riding = self.take_layer2_clusters(&mut objects);
         let level_draws = self
             .baseline(camera, SLOTLESS_FRAMES)
             .unwrap_or_else(|error| {
@@ -547,42 +556,45 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
         }
         objects.retain(|object| !level_draws.contains(object));
         self.keep(camera, &objects);
-        if objects.is_empty() && !flames {
+        if objects.is_empty() && !riding {
             self.scene
                 .undrawn
                 .extend(slotless.into_iter().map(|((x, y), id)| (x, y, id)));
         }
     }
 
-    /// Moves the castle candle flames the level loop has just drawn out of
-    /// `objects` and into the scene's layer 2 objects: they ride on
-    /// layer 2, in its low eight bits. True if there were any.
-    fn take_candle_flames(&mut self, objects: &mut Vec<SpriteObject>) -> bool {
+    /// Moves the objects of layer-2-riding cluster sprites (see
+    /// [`LAYER2_CLUSTERS`]) that the level loop has just drawn out of
+    /// `objects` and into the scene's layer 2 objects, positioned on that
+    /// layer. True if there were any.
+    fn take_layer2_clusters(&mut self, objects: &mut Vec<SpriteObject>) -> bool {
         let ram = &self.level_loop.machine.bus.ram;
         let (image, _) = oam::read_oam(ram);
-        let mut flames = false;
-        for slot in 0..CANDLE_FLAMES {
-            if ram.u8_at(ram::CLUSTER_NUMBER, slot) != CANDLE_FLAME {
-                continue;
+        let mut found = false;
+        for cluster in &LAYER2_CLUSTERS {
+            for slot in cluster.slots.clone() {
+                if ram.u8_at(ram::CLUSTER_NUMBER, slot) != cluster.number {
+                    continue;
+                }
+                found = true;
+                let object = cluster.first_object + (slot - cluster.slots.start) as usize;
+                let (tile, attr) = (image[object * 4 + 2], image[object * 4 + 3]);
+                let high = image[oam::OAM_OBJECTS * 4 + object / 4] >> (2 * (object % 4));
+                let riding = SpriteObject {
+                    x: ram.u8_at(ram::CLUSTER_X_LOW, slot) as i32,
+                    y: ram.u8_at(ram::CLUSTER_Y_LOW, slot) as i32,
+                    tile,
+                    attr,
+                    large: high & 2 != 0,
+                };
+                let placed = &mut self.scene.layer2_objects;
+                if !placed.iter().any(|o| (o.x, o.y) == (riding.x, riding.y)) {
+                    placed.push(riding);
+                }
+                objects.retain(|o| (o.tile, o.attr) != (tile, attr));
             }
-            flames = true;
-            let object = CANDLE_FLAME_OAM + slot as usize;
-            let (tile, attr) = (image[object * 4 + 2], image[object * 4 + 3]);
-            let high = image[oam::OAM_OBJECTS * 4 + object / 4] >> (2 * (object % 4));
-            let flame = SpriteObject {
-                x: ram.u8_at(ram::CLUSTER_X_LOW, slot) as i32,
-                y: ram.u8_at(ram::CLUSTER_Y_LOW, slot) as i32,
-                tile,
-                attr,
-                large: high & 2 != 0,
-            };
-            let placed = &mut self.scene.layer2_objects;
-            if !placed.iter().any(|o| (o.x, o.y) == (flame.x, flame.y)) {
-                placed.push(flame);
-            }
-            objects.retain(|o| (o.tile, o.attr) != (tile, attr));
         }
-        flames
+        found
     }
 }
 

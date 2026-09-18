@@ -1,6 +1,8 @@
-//! Video state used by the fixed-screen boss arenas. Ordinary levels
-//! render their full object grids; these rooms switch video modes during
-//! the frame and their collision tiles are not their visible artwork.
+//! Video state captured from the game: what it uploaded, how a level's
+//! layers are set up on entry, and the objects its sprite engine drew.
+//! Fixed-screen boss arenas switch video modes during the frame, and
+//! their collision tiles are not their visible artwork, so they carry a
+//! scene of their own.
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Mode7 {
@@ -174,4 +176,68 @@ pub struct SpriteScene {
     /// Passes the CPU core gave up on; what they would have drawn is in
     /// `undrawn` instead.
     pub diagnostics: Vec<crate::expand::Diagnostic>,
+}
+
+/// Video memory and the registers that say how to read it, as level
+/// preparation left them.
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub struct VideoMemory {
+    /// VRAM: layer tiles at `$0000`, sprite tiles at `$C000`, tilemaps in
+    /// between. The player's tile uploads are included, and in boss arenas
+    /// the boss's.
+    pub vram: Vec<u8>,
+    /// Which VRAM bytes were actually written.
+    pub vram_written: Vec<bool>,
+    pub cgram: Vec<u8>,
+    /// `BG1SC`-`BG4SC`: bits 7-2 are the tilemap's VRAM word address
+    /// divided by `$400`, bit 1 selects 64 tiles tall, bit 0 selects 64
+    /// tiles wide. Vanilla puts layer 1 at `$2000` and layer 2 at `$3000`,
+    /// both 64x64; Lunar Magic uses `$3000` and `$3800`, 64x32.
+    pub bg_sc: [u8; 4],
+    /// `OBSEL`: object sizes and character base.
+    pub object_select: u8,
+}
+
+impl VideoMemory {
+    /// The palette as uploaded to CGRAM.
+    pub fn palette(&self) -> crate::palette::Palette {
+        crate::palette::Palette::from_cgram(&self.cgram)
+    }
+}
+
+/// How a level is shown when it is entered.
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub struct LevelScene {
+    /// Main and sub screen designation and colour math, which decide how
+    /// the layers combine into the picture.
+    pub screen: Screen,
+    /// Layer 1 position the level was entered at (`$1A`/`$1C`) and the
+    /// layer 2 position the first camera update derived for it (`$1E`/
+    /// `$20`). The two differ when the level's layer 2 scroll settings
+    /// offset or slow the layer (parallax); the renderer draws layer 2
+    /// where this camera sees it.
+    pub camera: [u16; 2],
+    pub layer2_position: [u16; 2],
+    /// Layer 3 position and scroll behaviour, when the level shows
+    /// layer 3 on either screen in Mode 1 (every ordinary level; boss
+    /// arenas draw theirs into `boss`).
+    pub layer3: Option<Layer3>,
+    /// The player's OAM objects at the level's entrance, in level
+    /// coordinates, as the game draws him once any entrance action (pipe,
+    /// cannon pipe, door) has finished. Empty for boss arenas, whose
+    /// drawing pass already includes him.
+    pub player: Vec<SpriteObject>,
+    /// Video-mode bands installed by the ROM's boss NMI/IRQ handlers.
+    pub boss: Option<BossScene>,
+}
+
+impl LevelScene {
+    /// How far layer 2 content is displaced from the layer 1 grid, in
+    /// pixels: a layer 2 tile at column `c` shows at level x
+    /// `c * 16 + offset[0]`. Zero when both layers scroll together.
+    pub fn layer2_offset(&self) -> [i32; 2] {
+        std::array::from_fn(|axis| {
+            self.camera[axis].wrapping_sub(self.layer2_position[axis]) as i16 as i32
+        })
+    }
 }

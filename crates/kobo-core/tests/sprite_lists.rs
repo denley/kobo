@@ -35,36 +35,36 @@ fn check_rom(name: &str, rom: &Rom) -> (usize, usize) {
     let mut parsed = 0;
     let mut confirmed = 0;
     for level in 0..0x200u16 {
-        let tiles = match expand::expand_level(rom, level) {
+        let loaded = match expand::expand_level(rom, level) {
             Ok(t) => t,
             Err(ExpandError::MissingBackgroundTable(_)) => continue,
             Err(e) => panic!("{name} level {level:03X}: {e}"),
         };
-        let start = tiles.sprite_data_ptr();
+        let start = loaded.sprite_data_ptr();
         let list = sprites::read_sprites_at(rom, start)
             .unwrap_or_else(|e| panic!("{name} level {level:03X}: {e}"));
         parsed += 1;
-        let (w, h) = tiles.size();
+        let (w, h) = loaded.tiles.size();
         // Lunar Magic 3 sets the screen count from its own per-level table
         // rather than the header; a level it never saved can come out as
         // `$FF` (Grand Poo World 2's 109), which `size()` bounds.
         assert!(
-            tiles.rows * tiles.screens * 16 <= expand::GRID_LEN
-                || tiles.vertical
-                || tiles.screens == 0xFF,
+            loaded.tiles.rows * loaded.tiles.screens * 16 <= expand::GRID_LEN
+                || loaded.tiles.vertical
+                || loaded.tiles.screens == 0xFF,
             "{name} level {level:03X}: {} screens of {} rows overflow the planes",
-            tiles.screens,
-            tiles.rows
+            loaded.tiles.screens,
+            loaded.tiles.rows
         );
         // Lunar Magic lets sprites sit beyond the last screen, so only Y
         // is checked: it is the coordinate the Y position jumps extend.
-        if !tiles.vertical && tiles.rows != expand::SCREEN_ROWS {
+        if !loaded.tiles.vertical && loaded.tiles.rows != expand::SCREEN_ROWS {
             for s in &list.sprites {
                 let (x, y) = s.tile_position(false);
                 assert!(
                     y < h,
                     "{name} level {level:03X} ({} rows): sprite {:02X} at ({x}, {y}) lies below {w}x{h}",
-                    tiles.rows,
+                    loaded.tiles.rows,
                     s.id
                 );
             }

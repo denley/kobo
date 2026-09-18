@@ -8,8 +8,7 @@
 
 mod common;
 
-use kobo_core::render::{self, LayerTiles};
-use kobo_core::{expand, sprites};
+use kobo_core::render;
 use std::path::{Path, PathBuf};
 
 /// The status bar occupies the top of the picture with its own scroll.
@@ -77,16 +76,8 @@ fn rendered_levels_match_emulator_frames() {
     for dir in &dirs {
         for level in levels_in(dir) {
             let frame = read_frame(dir, level).unwrap();
-            let tiles = expand::expand_level(&rom, level).unwrap();
-            let pal = tiles.palette();
-            let mut layers = render::level_layers(&tiles, &LayerTiles::from_vram(&tiles.vram));
-            if tiles.boss_scene.is_none() {
-                let list = sprites::read_sprites_at(&rom, tiles.sprite_data_ptr()).unwrap();
-                let scene = expand::capture_sprites(&rom, &tiles, &list).unwrap();
-                render::draw_sprite_scene(&mut layers, &scene, tiles.layer2_offset(), &tiles.vram);
-            }
-            render::draw_objects(&mut layers, &tiles.player, tiles.object_select, &tiles.vram);
-            let img = render::compose_level(&tiles, &layers, &pal);
+            let rendered = render::render_level(&rom, level, Default::default()).unwrap();
+            let (img, loaded) = (rendered.image, rendered.level);
             let (rate, pad) = FRAME_PADDING
                 .map(|pad| (match_rate(&frame, &img, pad), pad))
                 .max_by(|a, b| a.0.total_cmp(&b.0))
@@ -94,7 +85,7 @@ fn rendered_levels_match_emulator_frames() {
             eprintln!(
                 "{}: level {level:03X} mode {:02X} matches {:.1}% (padding {pad})",
                 dir.display(),
-                tiles.level_mode,
+                loaded.tiles.level_mode,
                 rate * 100.0
             );
             if rate < MIN_MATCH {

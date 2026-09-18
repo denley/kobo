@@ -30,18 +30,18 @@ fn capture(
     rom: &kobo_core::Rom,
     level: u16,
 ) -> (sprites::SpriteList, kobo_core::video::SpriteScene) {
-    let tiles = expand::expand_level(rom, level).unwrap();
-    let list = sprites::read_sprites_at(rom, tiles.sprite_data_ptr()).unwrap();
-    let scene = expand::capture_sprites(rom, &tiles, &list).unwrap();
+    let loaded = expand::expand_level(rom, level).unwrap();
+    let list = sprites::read_sprites_at(rom, loaded.sprite_data_ptr()).unwrap();
+    let scene = expand::capture_sprites(rom, &loaded, &list).unwrap();
     (list, scene)
 }
 
 #[test]
 fn yoshis_island_1_sprites_all_draw_near_their_entries() {
     let Some(rom) = common::vanilla() else { return };
-    let tiles = expand::expand_level(&rom, 0x105).unwrap();
-    let list = sprites::read_sprites_at(&rom, tiles.sprite_data_ptr()).unwrap();
-    let scene = expand::capture_sprites(&rom, &tiles, &list).unwrap();
+    let loaded = expand::expand_level(&rom, 0x105).unwrap();
+    let list = sprites::read_sprites_at(&rom, loaded.sprite_data_ptr()).unwrap();
+    let scene = expand::capture_sprites(&rom, &loaded, &list).unwrap();
     assert!(
         scene.objects.len() >= 100,
         "{} objects",
@@ -74,9 +74,9 @@ fn yoshis_island_1_sprites_all_draw_near_their_entries() {
 #[test]
 fn vertical_level_sprites_draw_where_their_entries_are() {
     let Some(rom) = common::vanilla() else { return };
-    let tiles = expand::expand_level(&rom, 0x0DB).unwrap();
-    let list = sprites::read_sprites_at(&rom, tiles.sprite_data_ptr()).unwrap();
-    let scene = expand::capture_sprites(&rom, &tiles, &list).unwrap();
+    let loaded = expand::expand_level(&rom, 0x0DB).unwrap();
+    let list = sprites::read_sprites_at(&rom, loaded.sprite_data_ptr()).unwrap();
+    let scene = expand::capture_sprites(&rom, &loaded, &list).unwrap();
     assert!(scene.undrawn.is_empty(), "{:?}", scene.undrawn);
     for e in &list.sprites {
         let (x, y) = e.tile_position(true);
@@ -161,10 +161,10 @@ fn passes_the_cpu_gives_up_on_are_reported() {
         if rom.sha1_hex() != "6dd24c31b5d8c568aab0de6d68855f609cbe8f08" {
             continue;
         }
-        let tiles = expand::expand_level(&rom, 0x136).unwrap();
+        let loaded = expand::expand_level(&rom, 0x136).unwrap();
         let (_, scene) = capture(&rom, 0x136);
-        assert!(tiles.player.is_empty());
-        assert!(matches!(tiles.diagnostics[..], [ref d] if d.pass == Pass::Player));
+        assert!(loaded.scene.player.is_empty());
+        assert!(matches!(loaded.diagnostics[..], [ref d] if d.pass == Pass::Player));
         assert!(!scene.undrawn.is_empty());
         assert!(
             scene
@@ -174,9 +174,9 @@ fn passes_the_cpu_gives_up_on_are_reported() {
         );
     }
     let Some(rom) = common::vanilla() else { return };
-    let tiles = expand::expand_level(&rom, 0x105).unwrap();
+    let loaded = expand::expand_level(&rom, 0x105).unwrap();
     let (_, scene) = capture(&rom, 0x105);
-    assert!(tiles.diagnostics.is_empty() && scene.diagnostics.is_empty());
+    assert!(loaded.diagnostics.is_empty() && scene.diagnostics.is_empty());
 }
 
 #[test]
@@ -184,9 +184,9 @@ fn a_spread_of_vanilla_levels_captures_cleanly() {
     let Some(rom) = common::vanilla() else { return };
     let mut captured = 0;
     for level in (0..0x200u16).step_by(7) {
-        let tiles = expand::expand_level(&rom, level).unwrap();
-        let list = sprites::read_sprites_at(&rom, tiles.sprite_data_ptr()).unwrap();
-        let scene = expand::capture_sprites(&rom, &tiles, &list)
+        let loaded = expand::expand_level(&rom, level).unwrap();
+        let list = sprites::read_sprites_at(&rom, loaded.sprite_data_ptr()).unwrap();
+        let scene = expand::capture_sprites(&rom, &loaded, &list)
             .unwrap_or_else(|e| panic!("level {level:03X}: {e}"));
         for (x, y, id) in &scene.undrawn {
             assert!(
@@ -205,17 +205,17 @@ fn a_spread_of_vanilla_levels_captures_cleanly() {
 #[test]
 fn player_is_drawn_at_the_entrance() {
     let Some(rom) = common::vanilla() else { return };
-    let tiles = expand::expand_level(&rom, 0x105).unwrap();
-    let player = |tiles: &expand::LevelTiles| {
+    let loaded = expand::expand_level(&rom, 0x105).unwrap();
+    let player = |loaded: &expand::LoadedLevel| {
         (
-            i32::from(tiles.ram.u16(ram::PLAYER_X)),
-            i32::from(tiles.ram.u16(ram::PLAYER_Y)),
+            i32::from(loaded.ram.u16(ram::PLAYER_X)),
+            i32::from(loaded.ram.u16(ram::PLAYER_Y)),
         )
     };
-    let (x, y) = player(&tiles);
+    let (x, y) = player(&loaded);
     assert_eq!((x, y), (0x10, 0x160));
-    assert!(!tiles.player.is_empty());
-    for o in &tiles.player {
+    assert!(!loaded.scene.player.is_empty());
+    for o in &loaded.scene.player {
         assert!(
             (o.x - x).abs() <= 16 && (o.y - y).abs() <= 32,
             "object at ({}, {}) is not the player at ({x}, {y})",
@@ -224,20 +224,20 @@ fn player_is_drawn_at_the_entrance() {
         );
     }
     // Mario's palette (row 8, colours 6-F) is uploaded with his tiles.
-    assert_ne!(tiles.palette().get(8, 8).0, 0);
+    assert_ne!(loaded.video.palette().get(8, 8).0, 0);
 
     // The cannon pipe fires him up and to the right of where he entered,
     // and the pass follows him until the launch ends.
-    let tiles = expand::expand_level(&rom, 0x0D0).unwrap();
+    let loaded = expand::expand_level(&rom, 0x0D0).unwrap();
     assert_eq!(
-        tiles.ram.u8(ram::PLAYER_ANIMATION),
+        loaded.ram.u8(ram::PLAYER_ANIMATION),
         7,
         "cannon pipe entrance"
     );
-    let (x, y) = player(&tiles);
-    let (w, h) = tiles.size();
-    assert!(!tiles.player.is_empty());
-    for o in &tiles.player {
+    let (x, y) = player(&loaded);
+    let (w, h) = loaded.tiles.size();
+    assert!(!loaded.scene.player.is_empty());
+    for o in &loaded.scene.player {
         assert!(
             o.x > x && o.y < y && o.x < w as i32 * 16 && o.y >= 0 && o.y < h as i32 * 16,
             "object at ({}, {}) after launching from ({x}, {y})",
@@ -246,6 +246,6 @@ fn player_is_drawn_at_the_entrance() {
         );
     }
 
-    let tiles = expand::expand_level(&rom, 0x1C7).unwrap();
-    assert!(tiles.player.is_empty());
+    let loaded = expand::expand_level(&rom, 0x1C7).unwrap();
+    assert!(loaded.scene.player.is_empty());
 }

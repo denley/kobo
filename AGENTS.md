@@ -72,19 +72,6 @@ Before finishing step 1 (SA-1):
   `expand::machine::Call`. `tools/oracle/dump_levels.lua` reads `$7E` addresses directly and
   needs the same map before Mesen can be the oracle for SA-1 ROMs.
 
-Before step 2 (the build pipeline will depend on these types):
-
-- **One render entry point in the core.** `level_png` in the CLI decides the drawing order
-  (layers, sprite scene, player behind the sprites, compose, markers on top, boss arenas
-  skip sprites), `tests/video_oracle.rs` repeats it by hand, and a GUI would be the third
-  copy. Add `render_level(rom, level, options) -> RgbImage` beside the pieces; the CLI's
-  grouping of diagnostics into warnings belongs with it. This breaks principle 3 today.
-- **Split `LevelTiles`.** It is one struct of 26 public fields holding three things: the
-  machine state after loading (`ram`, `vram`, `cgram`, registers), the decoded level (grid,
-  Map16, layer layouts), and render inputs (screen, camera, layer 3, player). The build
-  pipeline wants the decoded level without the emulator residue, and tests should not have
-  to write out every field to make one.
-
 Before step 3 (the GUI will draw through these):
 
 - **One set of PPU primitives in `render`.** Two tilemap pixel fetchers (`layer3_pixel`,
@@ -101,9 +88,6 @@ Whenever convenient:
 
 - `SpriteScene::undrawn` is a `(usize, usize, u8)` tuple; give it a named type.
 - `examples/census.rs` is a rougher duplicate of `sprite_census.rs`; delete it.
-- The castle candle flames are still a special case inside the general slotless pass
-  (`SpriteCapture::take_candle_flames`). Fine for one; find a general form before adding
-  a second layer-2-riding sprite.
 - This file has become the knowledge base. Move the SMW and Lunar Magic facts into `docs/`
   or module documentation and keep this file to rules, layout, and pointers: it is loaded
   into every agent context, and much of it restates doc comments that will drift from it.
@@ -125,9 +109,18 @@ Whenever convenient:
 - `kobo_core::expand` runs ROM code. `machine` owns the CPU, the bus, and `Call` (the register
   state a routine is entered with; every call starts from reset registers), `load` runs the
   loader phases, and `sprite_capture`, `player`, `boss`, `layer3`, and `map16` are the passes
-  over the loaded level. `routines` holds the ROM addresses, `tiles` the `LevelTiles` result.
-  A pass the CPU core gives up on is recorded as a `Diagnostic` (`LevelTiles::diagnostics`,
-  `SpriteScene::diagnostics`) instead of failing the level; the CLI prints them as warnings.
+  over the loaded level. `routines` holds the ROM addresses. `expand_level` returns a
+  `LoadedLevel` of four parts: `tiles` (`LevelTiles`: the grid, Map16 definitions, and layer
+  layouts, which is what the level *is*), `video` (`VideoMemory`: VRAM, CGRAM, `BGnSC`,
+  `OBSEL`), `scene` (`LevelScene`: screen setup, camera, layer 3, player, boss arena), and
+  `ram`. A pass the CPU core gives up on is recorded as a `Diagnostic`
+  (`LoadedLevel::diagnostics`, `SpriteScene::diagnostics`) instead of failing the level;
+  `expand::summarize` turns them into one line per distinct error.
+- `render::render_level(rom, level, options)` is the one way to a level's picture (and
+  `render_loaded` for a level already loaded): it owns the drawing order (layers, sprite
+  scene, the player behind the sprites, compose, markers on top; a boss arena skips the
+  sprite capture). The CLI and `tests/video_oracle.rs` both call it; do not rebuild that
+  sequence in a shell.
 - `kobo_core::rom::Rom` strips and remembers the 512-byte copier header; `data()` is always
   headerless. Identity is by SHA-1 of the headerless image.
 
@@ -293,7 +286,7 @@ Windows, and macOS. Keep all three green.
   ExGFX, custom palettes, and animated tiles come for free. VRAM matches the emulator except
   animated slots (frame-dependent) and tilemap areas filled on later frames; CGRAM matches
   except one per-frame colour.
-- The player (`expand::capture_player`, `LevelTiles::player`): from the prepared state, with
+- The player (`expand::player`, `LevelScene::player`): from the prepared state, with
   every sprite slot cleared, every load flag set (whichever table the loader reads, as in
   the sprite passes), and the generator `$18B9` zeroed,
   `GM14Level` frames run until the entrance action `$71` is zero (a cannon pipe takes a few
@@ -384,7 +377,7 @@ Windows, and macOS. Keep all three green.
   drives the window by HDMA; no window is modelled, so the room renders dark throughout.
   Modes `$1E`/`$1F` put only layer 1 or only layer 2 on the main screen and add the rest.
   `render::LevelLayers` keeps BG1, BG2, BG3, and objects as separate colour-index layers
-  and composes them per pixel from `LevelTiles::screen` (`video::Screen`), which is also
+  and composes them per pixel from `LevelScene::screen` (`video::Screen`), which is also
   how sprites end up in front of or behind layers. Colour windows (spotlight, keyhole,
   message boxes) are not modelled.
 - Layer 2 position: the entry camera is `$1A`/`$1C` and layer 2 sits at `$1E`/`$20`, which
@@ -443,10 +436,10 @@ Windows, and macOS. Keep all three green.
 - Capture the screen count (`$005D`) immediately after `LoadLevel`: boss preparation
   overwrites it (level `$1C7` ends with `$FF`). `LevelTiles::size()` also bounds dimensions
   to complete screens in the captured grid planes.
-- Tilemaps: `BG1SC`-`BG4SC` are captured in `LevelTiles::bg_sc`. Vanilla puts layer 1 at VRAM
+- Tilemaps: `BG1SC`-`BG4SC` are captured in `VideoMemory::bg_sc`. Vanilla puts layer 1 at VRAM
   word `$2000` and layer 2 at `$3000`, both 64x64 tiles, and uploads the whole two-screen
   background. Lunar Magic uses `$3000`/`$3800`, 64x32, and uploads only the 15 or 16 rows
-  around the initial scroll position. `LevelTiles::vram_written` says which bytes were touched.
+  around the initial scroll position. `VideoMemory::vram_written` says which bytes were touched.
 
 ## Lunar Magic ROM facts
 

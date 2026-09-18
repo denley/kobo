@@ -4,13 +4,13 @@ fn main() {
     let rom = kobo_core::rom::Rom::load(&path).unwrap();
     let mut undrawn: BTreeMap<u8, Vec<u16>> = BTreeMap::new();
     for level in 0..0x200u16 {
-        let Ok(tiles) = kobo_core::expand::expand_level(&rom, level) else {
+        let Ok(loaded) = kobo_core::expand::expand_level(&rom, level) else {
             continue;
         };
-        let Ok(list) = kobo_core::sprites::read_sprites_at(&rom, tiles.sprite_data_ptr()) else {
+        let Ok(list) = kobo_core::sprites::read_sprites_at(&rom, loaded.sprite_data_ptr()) else {
             continue;
         };
-        match kobo_core::expand::capture_sprites(&rom, &tiles, &list) {
+        match kobo_core::expand::capture_sprites(&rom, &loaded, &list) {
             Ok(scene) => {
                 for (_, _, id) in scene.undrawn {
                     undrawn.entry(id).or_default().push(level);

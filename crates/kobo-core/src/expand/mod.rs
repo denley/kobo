@@ -23,6 +23,7 @@ mod diagnostics;
 mod layer3;
 mod load;
 mod load_flags;
+mod loaded;
 mod machine;
 mod map16;
 mod oam;
@@ -31,8 +32,9 @@ mod routines;
 mod sprite_capture;
 mod tiles;
 
-pub use diagnostics::{Diagnostic, Pass};
+pub use diagnostics::{Diagnostic, Pass, summarize};
 pub use load::{ReadTrace, expand_level, expand_level_traced};
+pub use loaded::LoadedLevel;
 pub use oam::object_sizes;
 pub use sprite_capture::{LATE_SPRITE_FRAMES, capture_sprites};
 pub use tiles::{

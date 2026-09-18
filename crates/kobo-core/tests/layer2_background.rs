@@ -6,7 +6,7 @@
 
 mod common;
 
-use kobo_core::expand::{self, ExpandError, LevelTiles, SCREEN_COLS};
+use kobo_core::expand::{self, ExpandError, LoadedLevel, SCREEN_COLS};
 use kobo_core::{Rom, map16, ram};
 use sha1::{Digest, Sha1};
 use std::collections::HashMap;
@@ -32,34 +32,34 @@ const MODES_WITHOUT_BACKGROUND: [u8; 4] = [0x09, 0x0B, 0x0F, 0x10];
 /// from one above the initial layer 2 position. The loader masks source
 /// rows to five bits, even for 27-row backgrounds; rows 27-31 in that
 /// format address data outside the background and are not checked.
-fn uploaded_rows(tiles: &LevelTiles) -> std::ops::Range<isize> {
-    let rows = tiles.layer2_bg_rows() as isize;
-    if tiles.bg_sc[1] & 0x02 != 0 {
+fn uploaded_rows(loaded: &LoadedLevel) -> std::ops::Range<isize> {
+    let rows = loaded.tiles.layer2_bg_rows() as isize;
+    if loaded.video.bg_sc[1] & 0x02 != 0 {
         return 0..rows;
     }
-    let y = tiles.ram.u16(ram::LAYER2_Y) as isize;
+    let y = loaded.ram.u16(ram::LAYER2_Y) as isize;
     let first = y / 16 - 1;
     first..first + 16
 }
 
 /// For each VRAM word of the layer 2 tilemap the game uploaded, the word
 /// the captured background and BG Map16 table say it should hold.
-fn candidates(tiles: &LevelTiles) -> HashMap<usize, Vec<[u8; 2]>> {
+fn candidates(loaded: &LoadedLevel) -> HashMap<usize, Vec<[u8; 2]>> {
     let mut out: HashMap<usize, Vec<[u8; 2]>> = HashMap::new();
-    for world_y in uploaded_rows(tiles) {
+    for world_y in uploaded_rows(loaded) {
         let y = world_y.rem_euclid(32) as usize;
-        if y >= tiles.layer2_bg_rows() {
+        if y >= loaded.tiles.layer2_bg_rows() {
             continue;
         }
         for screen in 0..2 {
             for x in 0..SCREEN_COLS {
-                let n = tiles.layer2_bg_tile(screen, x, y).unwrap();
-                let def = tiles.bg_map16[n as usize - 0x200].to_bytes();
+                let n = loaded.tiles.layer2_bg_tile(screen, x, y).unwrap();
+                let def = loaded.tiles.bg_map16[n as usize - 0x200].to_bytes();
                 let col8 = 2 * (screen * SCREEN_COLS + x);
                 let row8 = (2 * world_y).rem_euclid(64) as usize;
                 // Definition order is TL, BL, TR, BR.
                 for (q, (dx, dy)) in [(0, 0), (0, 1), (1, 0), (1, 1)].into_iter().enumerate() {
-                    let at = vram_offset(tiles.bg_sc[1], col8 + dx, row8 + dy);
+                    let at = vram_offset(loaded.video.bg_sc[1], col8 + dx, row8 + dy);
                     out.entry(at)
                         .or_default()
                         .push([def[2 * q], def[2 * q + 1]]);
@@ -71,13 +71,13 @@ fn candidates(tiles: &LevelTiles) -> HashMap<usize, Vec<[u8; 2]>> {
 }
 
 /// (words checked, words that were never uploaded or differ).
-fn check_level(tiles: &LevelTiles) -> (usize, usize) {
+fn check_level(loaded: &LoadedLevel) -> (usize, usize) {
     let mut checked = 0;
     let mut bad = 0;
-    for (at, want) in candidates(tiles) {
+    for (at, want) in candidates(loaded) {
         checked += 1;
-        let written = tiles.vram_written[at] && tiles.vram_written[at + 1];
-        if !written || !want.iter().any(|w| tiles.vram[at..at + 2] == w[..]) {
+        let written = loaded.video.vram_written[at] && loaded.video.vram_written[at + 1];
+        if !written || !want.iter().any(|w| loaded.video.vram[at..at + 2] == w[..]) {
             bad += 1;
         }
     }
@@ -93,7 +93,7 @@ fn check_rom(rom: &Rom) -> (usize, Vec<String>) {
     let mut failures = Vec::new();
     let gpw2 = rom.sha1_hex() == "390583d5faa0cc02e0c4f414f7638228661b2dc9";
     for level in 0..0x200u16 {
-        let tiles = match expand::expand_level(rom, level) {
+        let loaded = match expand::expand_level(rom, level) {
             Ok(t) => t,
             Err(ExpandError::MissingBackgroundTable(0x09F)) if gpw2 => {
                 eprintln!("rejected level {level:03X}: null background Map16 table");
@@ -104,17 +104,19 @@ fn check_rom(rom: &Rom) -> (usize, Vec<String>) {
                 continue;
             }
         };
-        if tiles.layer2_tilemap.is_none() || MODES_WITHOUT_BACKGROUND.contains(&tiles.level_mode) {
+        if loaded.tiles.layer2_tilemap.is_none()
+            || MODES_WITHOUT_BACKGROUND.contains(&loaded.tiles.level_mode)
+        {
             continue;
         }
         checked += 1;
-        let (words, bad) = check_level(&tiles);
+        let (words, bad) = check_level(&loaded);
         // At least 960 words, including when scrolling through the five
         // rows outside a 27-row buffer. Both background screens count.
         if words < 30 * 32 || bad != 0 {
             failures.push(format!(
                 "level {level:03X} (mode ${:02X}, BG2SC ${:02X}): {bad} of {words} tilemap words missing or different",
-                tiles.level_mode, tiles.bg_sc[1]
+                loaded.tiles.level_mode, loaded.video.bg_sc[1]
             ));
         }
     }
@@ -166,13 +168,13 @@ fn lunar_magic_bg_map16_matches_export() {
             eprintln!("skipping {}: no export hash in fixture", path.display());
             continue;
         };
-        let tiles = expand::expand_level(&rom, *level).unwrap();
+        let loaded = expand::expand_level(&rom, *level).unwrap();
         assert!(
-            tiles.bg_map16.len() >= map16::BG_TILE_COUNT,
+            loaded.tiles.bg_map16.len() >= map16::BG_TILE_COUNT,
             "{} level {level:03X} has no BG table",
             path.display()
         );
-        let bytes: Vec<u8> = tiles.bg_map16[..map16::BG_TILE_COUNT]
+        let bytes: Vec<u8> = loaded.tiles.bg_map16[..map16::BG_TILE_COUNT]
             .iter()
             .flat_map(|t| t.to_bytes())
             .collect();

@@ -4,12 +4,12 @@ use super::machine::{Call, Machine};
 use super::tiles::{
     GRID_LEN, LAYER2_TILEMAP_LEN, LevelTiles, SCREEN_COLS, SCREEN_LEN, SCREEN_ROWS,
 };
-use super::{ExpandError, boss, layer3, map16, player, routines};
+use super::{ExpandError, LoadedLevel, boss, layer3, map16, player, routines};
 use crate::level;
 use crate::palette::Color15;
 use crate::ram::{self, Ram};
 use crate::rom::Rom;
-use crate::video::Screen;
+use crate::video::{LevelScene, Screen, VideoMemory};
 
 /// Instruction limit for the reset code, which uploads the SPC engine.
 const RESET_STEP_LIMIT: u64 = 200_000_000;
@@ -18,8 +18,8 @@ const RESET_STEP_LIMIT: u64 = 200_000_000;
 /// rather than objects or nothing.
 const BACKGROUND_MODES: [u8; 7] = [0x00, 0x0A, 0x0C, 0x0D, 0x0E, 0x11, 0x1E];
 
-/// Runs the ROM's level loader for `level` and returns the tile grid.
-pub fn expand_level(rom: &Rom, level: u16) -> Result<LevelTiles, ExpandError> {
+/// Runs the ROM's level loader and level preparation for `level`.
+pub fn expand_level(rom: &Rom, level: u16) -> Result<LoadedLevel, ExpandError> {
     expand_level_traced(rom, level, false).map(|(t, _)| t)
 }
 
@@ -32,18 +32,18 @@ pub fn expand_level_traced(
     rom: &Rom,
     level: u16,
     trace: bool,
-) -> Result<(LevelTiles, Option<ReadTrace>), ExpandError> {
+) -> Result<(LoadedLevel, Option<ReadTrace>), ExpandError> {
     let header = level::read_primary_header(rom, level)?;
     let mut machine = Machine::new(rom, level);
     boot(&mut machine)?;
     if trace {
         machine.cpu.trace_data_reads = Some(Vec::new());
     }
-    let loaded = load_level(&mut machine)?;
+    let expanded = load_level(&mut machine)?;
     prepare_level(&mut machine)?;
     let trace = machine.cpu.trace_data_reads.take();
 
-    let boss_scene = boss::capture_boss_scene(&mut machine)?;
+    let boss = boss::capture_boss_scene(&mut machine)?;
     let ram = &machine.bus.ram;
     let camera = [ram.u16(ram::LAYER1_X), ram.u16(ram::LAYER1_Y)];
     let layer2_position = [ram.u16(ram::LAYER2_X), ram.u16(ram::LAYER2_Y)];
@@ -55,7 +55,7 @@ pub fn expand_level_traced(
         fixed_color: Color15(ram.u16(ram::BACKGROUND_COLOR)),
     };
     let mut diagnostics = Vec::new();
-    let (layer3, player) = if boss_scene.is_some() {
+    let (layer3, player) = if boss.is_some() {
         // The arena's drawing pass already includes the player.
         (None, Vec::new())
     } else {
@@ -65,7 +65,7 @@ pub fn expand_level_traced(
         )
     };
     let lunar_magic = rom.lunar_magic_version().is_some();
-    let (bg_map16, layer2_screen_len) = match &loaded.layer2_tilemap {
+    let (bg_map16, layer2_screen_len) = match &expanded.layer2_tilemap {
         Some(planes) => map16::read_bg_map16(&mut machine, planes)?,
         None => (Vec::new(), SCREEN_LEN),
     };
@@ -77,31 +77,38 @@ pub fn expand_level_traced(
         header,
         level_mode: bus.ram.u8(ram::LEVEL_MODE),
         object_tileset: bus.ram.u8(ram::OBJECT_TILESET),
-        vertical: loaded.vertical,
-        screens: loaded.screens,
-        rows: loaded.rows,
+        vertical: expanded.vertical,
+        screens: expanded.screens,
+        rows: expanded.rows,
         low: bus.ram.bytes(ram::TILES_LOW, GRID_LEN),
         high: bus.ram.bytes(ram::TILES_HIGH, GRID_LEN),
-        layer2_tilemap: loaded.layer2_tilemap,
+        layer2_tilemap: expanded.layer2_tilemap,
         layer2_screen_len,
-        vram: bus.vram,
-        vram_written: bus.vram_written,
-        cgram: bus.cgram,
-        bg_sc: bus.bg_sc,
-        object_select: bus.object_select,
-        player,
-        boss_scene,
-        layer3,
-        screen,
-        camera,
-        layer2_position,
-        ram: bus.ram,
         map16,
         pipe_map16,
         bg_map16,
+    };
+    let level = LoadedLevel {
+        tiles,
+        video: VideoMemory {
+            vram: bus.vram,
+            vram_written: bus.vram_written,
+            cgram: bus.cgram,
+            bg_sc: bus.bg_sc,
+            object_select: bus.object_select,
+        },
+        scene: LevelScene {
+            screen,
+            camera,
+            layer2_position,
+            layer3,
+            player,
+            boss,
+        },
+        ram: bus.ram,
         diagnostics,
     };
-    Ok((tiles, trace))
+    Ok((level, trace))
 }
 
 /// Brings the machine to where the game is when a level load starts.
@@ -118,7 +125,7 @@ fn boot(machine: &mut Machine) -> Result<(), ExpandError> {
 
 /// What has to be read right after `LoadLevel`, before level preparation
 /// overwrites it.
-struct Loaded {
+struct Expanded {
     screens: usize,
     vertical: bool,
     rows: usize,
@@ -127,7 +134,7 @@ struct Loaded {
 
 /// The loading half of game mode `$11`: resolves the level's header
 /// pointers and expands its objects into the tile grid.
-fn load_level(machine: &mut Machine) -> Result<Loaded, ExpandError> {
+fn load_level(machine: &mut Machine) -> Result<Expanded, ExpandError> {
     // Enter the level the way a screen exit on screen 0 would. The
     // overworld path cannot express every level number through `$0109`,
     // loads the "No Yoshi" entrance intro room for castle and ghost house
@@ -154,7 +161,7 @@ fn load_level(machine: &mut Machine) -> Result<Loaded, ExpandError> {
     machine.call(Call::jsl(routines::LOAD_LEVEL_DATA))?;
     let ram = &machine.bus.ram;
     let vertical = ram.u8(ram::SCREEN_MODE) & 0x01 != 0;
-    Ok(Loaded {
+    Ok(Expanded {
         // Boss preparation reuses the screen-count byte (level $1C7 ends
         // with $FF). Read the length while it still describes the grid.
         screens: ram.u8(ram::SCREENS) as usize,

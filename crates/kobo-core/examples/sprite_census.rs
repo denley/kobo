@@ -15,13 +15,13 @@ fn main() {
     let rom = Rom::load(&path).expect("ROM must load");
     let mut undrawn: BTreeMap<u8, Vec<u16>> = BTreeMap::new();
     for level in 0..0x200u16 {
-        let Ok(tiles) = expand::expand_level(&rom, level) else {
+        let Ok(loaded) = expand::expand_level(&rom, level) else {
             continue;
         };
-        let Ok(list) = sprites::read_sprites_at(&rom, tiles.sprite_data_ptr()) else {
+        let Ok(list) = sprites::read_sprites_at(&rom, loaded.sprite_data_ptr()) else {
             continue;
         };
-        match expand::capture_sprites(&rom, &tiles, &list) {
+        match expand::capture_sprites(&rom, &loaded, &list) {
             Ok(scene) => {
                 for (_, _, id) in scene.undrawn {
                     undrawn.entry(id).or_default().push(level);

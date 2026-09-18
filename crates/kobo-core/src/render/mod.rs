@@ -5,6 +5,11 @@
 //! `0x000`, `0x080`, `0x100`, `0x180`. Decoding captured VRAM also
 //! includes animated tiles and other dynamic uploads.
 
+mod level;
+
+pub use level::{LevelRender, RenderError, RenderOptions, Sprites, render_level, render_loaded};
+
+use crate::expand::{LevelTiles, LoadedLevel};
 use crate::gfx::{self, Bpp, GfxError, Tile8};
 use crate::image::RgbImage;
 use crate::map16::{Map16Table, Map16Tile, Tile8Ref};
@@ -361,55 +366,49 @@ pub fn map16_sheet(
 /// tilemap or objects), and its layer 3, combined by the screen
 /// designation and colour math the level set up. Sprites are left out;
 /// see [`level_layers`] and [`draw_sprite_scene`] to include them.
-pub fn level_image(
-    tiles: &crate::expand::LevelTiles,
-    layer_tiles: &LayerTiles,
-    palette: &Palette,
-) -> RgbImage {
-    compose_level(tiles, &level_layers(tiles, layer_tiles), palette)
+pub fn level_image(level: &LoadedLevel, layer_tiles: &LayerTiles, palette: &Palette) -> RgbImage {
+    compose_level(level, &level_layers(level, layer_tiles), palette)
 }
 
 /// Draws a level's background layers, ready for sprites to be added
 /// before [`compose_level`] turns them into a picture. Boss arenas have
 /// their own drawing path and get empty layers.
-pub fn level_layers(tiles: &crate::expand::LevelTiles, layer_tiles: &LayerTiles) -> LevelLayers {
-    if tiles.boss_scene.is_some() {
+pub fn level_layers(level: &LoadedLevel, layer_tiles: &LayerTiles) -> LevelLayers {
+    if level.scene.boss.is_some() {
         return LevelLayers::new(256, 224);
     }
-    let (w, h) = tiles.size();
+    let (w, h) = level.tiles.size();
     let mut layers = LevelLayers::new(w as u32 * 16, h as u32 * 16);
-    draw_layer1(&mut layers, tiles, layer_tiles);
-    draw_layer2(&mut layers, tiles, layer_tiles);
-    if let Some(layer3) = &tiles.layer3 {
-        draw_layer3(&mut layers, layer3, &tiles.vram);
+    draw_layer1(&mut layers, &level.tiles, layer_tiles);
+    draw_layer2(
+        &mut layers,
+        &level.tiles,
+        level.scene.layer2_offset(),
+        layer_tiles,
+    );
+    if let Some(layer3) = &level.scene.layer3 {
+        draw_layer3(&mut layers, layer3, &level.video.vram);
     }
     layers
 }
 
 /// Turns drawn layers into the picture the level shows. Boss arenas are
 /// rendered from their captured video-mode bands instead.
-pub fn compose_level(
-    tiles: &crate::expand::LevelTiles,
-    layers: &LevelLayers,
-    palette: &Palette,
-) -> RgbImage {
-    match &tiles.boss_scene {
+pub fn compose_level(level: &LoadedLevel, layers: &LevelLayers, palette: &Palette) -> RgbImage {
+    let screen = &level.scene.screen;
+    match &level.scene.boss {
         Some(scene) => boss_image(
             scene,
-            &tiles.vram,
+            &level.video.vram,
             palette,
-            tiles.screen.fixed_color.to_rgb8(),
+            screen.fixed_color.to_rgb8(),
         ),
-        None => layers.compose(palette, &tiles.screen),
+        None => layers.compose(palette, screen),
     }
 }
 
 /// Draws the layer 1 tile grid.
-fn draw_layer1(
-    layers: &mut LevelLayers,
-    tiles: &crate::expand::LevelTiles,
-    layer_tiles: &LayerTiles,
-) {
+fn draw_layer1(layers: &mut LevelLayers, tiles: &LevelTiles, layer_tiles: &LayerTiles) {
     let (w, h) = tiles.size();
     for y in 0..h {
         for x in 0..w {
@@ -505,7 +504,7 @@ fn layer3_pixel(vram: &[u8], layer3: &crate::video::Layer3, x: i32, y: i32) -> O
 /// against the background layers.
 ///
 /// Objects riding on layer 2 go wherever `layer2_offset` (see
-/// [`crate::expand::LevelTiles::layer2_offset`]) puts that layer, once per
+/// [`crate::video::LevelScene::layer2_offset`]) puts that layer, once per
 /// 256 pixels across the level.
 pub fn draw_sprite_scene(
     layers: &mut LevelLayers,
@@ -602,7 +601,8 @@ fn object_pixel(
     (color != 0).then_some(color)
 }
 
-/// Draws layer 2 where the entry camera sees it: the background tilemap
+/// Draws layer 2 where the entry camera sees it, (`dx`, `dy`) pixels from
+/// the layer 1 grid: the background tilemap
 /// repeated every two screens, or the layer 2 objects from their own
 /// region of the tile grid, displaced from the layer 1 grid by the
 /// difference between the layer 2 and layer 1 positions at entry (layer 2
@@ -616,7 +616,8 @@ fn object_pixel(
 /// that parallax, so the background is tiled down the level instead.
 fn draw_layer2(
     layers: &mut LevelLayers,
-    tiles: &crate::expand::LevelTiles,
+    tiles: &LevelTiles,
+    [dx, dy]: [i32; 2],
     layer_tiles: &LayerTiles,
 ) {
     let priorities = [LAYER2_LOW, LAYER2_HIGH];
@@ -635,7 +636,6 @@ fn draw_layer2(
         tiles.layer2_palette_mask()
     };
     let rows = tiles.layer2_bg_rows().min(crate::expand::SCREEN_ROWS) as i32;
-    let [dx, dy] = tiles.layer2_offset();
     // Layer 2 tile (tx, ty) covers level pixels from (tx * 16 + dx, ty * 16 + dy).
     let first = |d: i32| (-d).div_euclid(16);
     let last = |d: i32, extent: u32| (extent as i32 - d).div_euclid(16);

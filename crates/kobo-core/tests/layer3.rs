@@ -23,16 +23,16 @@ fn vanilla_scroll_rates_and_positions_follow_the_tileset_table() {
     let mut checked = 0;
     for lv in 0..level::LEVEL_COUNT {
         let header = level::read_primary_header(&rom, lv).unwrap();
-        let tiles = match expand::expand_level(&rom, lv) {
+        let loaded = match expand::expand_level(&rom, lv) {
             Ok(t) => t,
             Err(e) => {
                 failures.push(format!("level {lv:03X}: {e}"));
                 continue;
             }
         };
-        if tiles.boss_scene.is_some() {
+        if loaded.scene.boss.is_some() {
             assert!(
-                tiles.layer3.is_none(),
+                loaded.scene.layer3.is_none(),
                 "level {lv:03X}: boss arena with layer 3"
             );
             continue;
@@ -59,9 +59,9 @@ fn vanilla_scroll_rates_and_positions_follow_the_tileset_table() {
             0x81 => ([16, 16], None),
             other => panic!("level {lv:03X}: unknown layer 3 kind {other:02X}"),
         };
-        let Some(layer3) = tiles.layer3 else {
+        let Some(layer3) = loaded.scene.layer3 else {
             // Level modes without layer 3 on the main screen.
-            if layer3_on_main(&tiles) {
+            if layer3_on_main(&loaded) {
                 failures.push(format!("level {lv:03X}: layer 3 missing"));
             }
             continue;
@@ -97,6 +97,6 @@ fn vanilla_scroll_rates_and_positions_follow_the_tileset_table() {
 }
 
 /// `$0D9D` (main screen designation) bit 2 after loading.
-fn layer3_on_main(tiles: &expand::LevelTiles) -> bool {
-    tiles.ram.u8(ram::MAIN_SCREEN) & 0x04 != 0
+fn layer3_on_main(loaded: &expand::LoadedLevel) -> bool {
+    loaded.ram.u8(ram::MAIN_SCREEN) & 0x04 != 0
 }
