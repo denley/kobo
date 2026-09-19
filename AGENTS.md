@@ -101,10 +101,12 @@ Before finishing step 1 (SA-1):
   scene, the player behind the sprites, compose, markers on top; a boss arena skips the
   sprite capture). The CLI and `tests/video_oracle.rs` both call it; do not rebuild that
   sequence in a shell.
-- `render` has one of each PPU primitive; extend these instead of adding a second:
+- `render` has one of each PPU primitive, all public so a GUI can redraw a tile or a viewport
+  through them; extend these instead of adding a second:
   `Tilemap::pixel` reads any background tilemap (layer 3, an arena's layer 1),
   `character_pixel` any character data, `draw_objects` rasterises `SpriteObject`s,
-  `tile_pixels` walks a tile for both the image and the layer drawers, and
+  `tile_pixels` walks a tile for both the image and the layer drawers
+  (`LevelLayers::draw_map16` and `draw_tile_ref`, styled by a `LayerStyle`), and
   `LevelLayers::compose` applies screen designation, colour math, and a fixed screen's
   `video::Window`. A boss arena is drawn into `LevelLayers` like any level.
 - `kobo_core::level::LevelMode` is the only place that says what a level mode means to the

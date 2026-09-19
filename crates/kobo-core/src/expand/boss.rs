@@ -6,15 +6,15 @@ use super::oam::{self, SCREEN_H};
 use super::routines;
 use crate::cpu::smw_bus::SmwBus;
 use crate::ram;
-use crate::video::{Band, BossScene, Layer1, Window};
+use crate::video::{Band, BossScene, Layer1Registers, Window};
 
 /// Instruction limit for a stretch of an interrupt handler.
 const HANDLER_STEP_LIMIT: u64 = 100_000;
 /// What the boss IRQ handler expects in A: `TIMEUP` with its IRQ flag set.
 const IRQ_PENDING: u16 = 0x81;
 
-fn layer1(bus: &SmwBus) -> Layer1 {
-    Layer1 {
+fn layer1(bus: &SmwBus) -> Layer1Registers {
+    Layer1Registers {
         mode: bus.bg_mode,
         tilemap: bus.bg_sc[0],
         character_base: bus.bg_character_base[0],
@@ -80,8 +80,10 @@ pub(super) fn capture_boss_scene(machine: &mut Machine) -> Result<Option<BossSce
             .as_chunks::<2>()
             .0
             .to_vec(),
-        main_mask: machine.bus.window_main_mask,
+        window2: machine.bus.window2,
+        masks: machine.bus.window_masks,
         select: std::array::from_fn(|i| ram.u8_at(ram::WINDOW_SELECT, i as u32)),
+        logic: machine.bus.window_logic,
     };
     machine.bus.ram = saved;
     Ok(Some(BossScene {

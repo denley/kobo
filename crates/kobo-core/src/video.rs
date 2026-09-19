@@ -12,8 +12,10 @@ pub struct Mode7 {
     pub control: u8,
 }
 
+/// The video registers that say how layer 1 is read within one band of
+/// a boss arena's screen.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Layer1 {
+pub struct Layer1Registers {
     pub mode: u8,
     pub tilemap: u8,
     /// Byte address of the character data in VRAM.
@@ -26,7 +28,7 @@ pub struct Layer1 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Band {
     pub start: usize,
-    pub layer: Layer1,
+    pub layer: Layer1Registers,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,51 +45,76 @@ pub struct BossScene {
     pub object_select: u8,
 }
 
-/// Each layer's bit in `TM`, `TS`, `TMW`, and `CGADSUB`, in the order the
+/// Each layer's bit in `TM`, `TS`, `TMW`, `TSW`, and `CGADSUB`, in the order the
 /// renderer keeps its layers: BG1, BG2, BG3, objects.
 pub const LAYER_BITS: [u8; 4] = [0x01, 0x02, 0x04, 0x10];
 
-/// Window 1 over a fixed screen, as the game's HDMA drives it. Window 2
-/// and the window logic registers are not modelled; SMW leaves them off.
+/// The PPU's two windows over a fixed screen: what they cover, which
+/// layers they hide on each screen, and the colour window `CGWSEL` refers
+/// to. Screen positions are pixels of the visible picture.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Window {
-    /// Left and right edge (inclusive) per screen row, from the table the
-    /// HDMA feeds to `WH0`/`WH1` (`$04A0`). A row with left past right is
-    /// empty.
+    /// Window 1's left and right edge (inclusive) per screen row, from the
+    /// table the game's HDMA feeds to `WH0`/`WH1` (`$04A0`). A row with
+    /// left past right is empty.
     pub rows: Vec<[u8; 2]>,
-    /// `TMW`: the main-screen layers the window masks where it applies.
-    pub main_mask: u8,
+    /// Window 2's edges (`WH2`/`WH3`), the same on every row: the game
+    /// has no HDMA for them.
+    pub window2: [u8; 2],
+    /// `TMW` and `TSW`: the layers the windows hide, where they apply, on
+    /// the main screen and the subscreen. Neither has a RAM mirror.
+    pub masks: [u8; 2],
     /// `W12SEL`, `W34SEL`, and `WOBJSEL` mirrors (`$41`-`$43`), a nibble
     /// each for BG1 and BG2, BG3 and BG4, objects and the colour window:
-    /// bit 1 enables window 1, bit 0 inverts it.
+    /// bits 1 and 3 enable windows 1 and 2, bits 0 and 2 invert them.
     pub select: [u8; 3],
+    /// `WBGLOG` and `WOBJLOG`: how a layer with both windows enabled
+    /// combines them (OR, AND, XOR, XNOR), two bits each for BG1-BG4, and
+    /// for objects and the colour window.
+    pub logic: [u8; 2],
 }
 
 impl Window {
-    fn applies(&self, setting: u8, x: usize, y: usize) -> bool {
-        let inside = self
-            .rows
-            .get(y)
-            .is_some_and(|&[left, right]| (left as usize..=right as usize).contains(&x));
-        setting & 2 != 0 && inside != (setting & 1 != 0)
+    /// Whether the windows a `select` nibble enables apply at a screen
+    /// position, combined by a two-bit `logic` value.
+    fn applies(&self, select: u8, logic: u8, x: usize, y: usize) -> bool {
+        let within = |[left, right]: [u8; 2]| (left as usize..=right as usize).contains(&x);
+        let window1 = self.rows.get(y).is_some_and(|&row| within(row)) != (select & 1 != 0);
+        let window2 = within(self.window2) != (select & 4 != 0);
+        match (select & 2 != 0, select & 8 != 0) {
+            (false, false) => false,
+            (true, false) => window1,
+            (false, true) => window2,
+            (true, true) => match logic & 3 {
+                0 => window1 || window2,
+                1 => window1 && window2,
+                2 => window1 != window2,
+                _ => window1 == window2,
+            },
+        }
     }
 
-    /// Whether the window hides `layer` (an index into [`LAYER_BITS`]) on
-    /// the main screen at a screen position.
-    pub fn masks_main(&self, layer: usize, x: usize, y: usize) -> bool {
-        let setting = [
-            self.select[0],
-            self.select[0] >> 4,
-            self.select[1],
-            self.select[2],
-        ][layer];
-        self.main_mask & LAYER_BITS[layer] != 0 && self.applies(setting, x, y)
+    /// The layers (as [`LAYER_BITS`]) hidden at a screen position on the
+    /// main screen and on the subscreen.
+    pub fn hidden(&self, x: usize, y: usize) -> [u8; 2] {
+        let settings = [
+            (self.select[0], self.logic[0]),
+            (self.select[0] >> 4, self.logic[0] >> 2),
+            (self.select[1], self.logic[0] >> 4),
+            (self.select[2], self.logic[1]),
+        ];
+        let inside = LAYER_BITS
+            .iter()
+            .zip(settings)
+            .filter(|&(_, (select, logic))| self.applies(select, logic, x, y))
+            .fold(0, |bits, (bit, _)| bits | bit);
+        self.masks.map(|mask| mask & inside)
     }
 
     /// Whether a screen position is inside the colour window, which
     /// `CGWSEL` clips and prevents colour math against.
     pub fn color(&self, x: usize, y: usize) -> bool {
-        self.applies(self.select[2] >> 4, x, y)
+        self.applies(self.select[2] >> 4, self.logic[1] >> 2, x, y)
     }
 }
 
@@ -304,5 +331,54 @@ impl LevelScene {
         std::array::from_fn(|axis| {
             self.camera[axis].wrapping_sub(self.layer2_position[axis]) as i16 as i32
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Window 1 covers columns 2-5 of row 0 and window 2 columns 4-7.
+    fn window(select: [u8; 3], logic: [u8; 2]) -> Window {
+        Window {
+            rows: vec![[2, 5]],
+            window2: [4, 7],
+            masks: [0x11, 0x02],
+            select,
+            logic,
+        }
+    }
+
+    fn columns(hit: impl Fn(usize) -> bool) -> Vec<usize> {
+        (0..10).filter(|&x| hit(x)).collect()
+    }
+
+    #[test]
+    fn windows_hide_the_layers_their_screen_masks() {
+        // Window 1 on BG1, inverted on BG2, window 2 on the objects.
+        let w = window([0x32, 0x00, 0x08], [0; 2]);
+        assert_eq!(columns(|x| w.hidden(x, 0)[0] & 0x01 != 0), [2, 3, 4, 5]);
+        assert_eq!(columns(|x| w.hidden(x, 0)[0] & 0x10 != 0), [4, 5, 6, 7]);
+        // BG2 is masked on the subscreen only, BG1 on the main screen only.
+        assert_eq!(columns(|x| w.hidden(x, 0)[1] == 0x02), [0, 1, 6, 7, 8, 9]);
+        assert!((0..10).all(|x| w.hidden(x, 0)[0] & 0x02 == 0));
+        // Past the table window 1 is empty, so its inverse is everywhere.
+        assert_eq!(w.hidden(3, 1), [0x00, 0x02]);
+    }
+
+    #[test]
+    fn two_windows_combine_by_the_layer_logic() {
+        let bg1 = |logic| {
+            let w = window([0x0A, 0, 0], [logic, 0]);
+            columns(|x| w.hidden(x, 0)[0] & 0x01 != 0)
+        };
+        assert_eq!(bg1(0), [2, 3, 4, 5, 6, 7]); // OR
+        assert_eq!(bg1(1), [4, 5]); // AND
+        assert_eq!(bg1(2), [2, 3, 6, 7]); // XOR
+        assert_eq!(bg1(3), [0, 1, 4, 5, 8, 9]); // XNOR
+        // The colour window has its own nibble and logic bits.
+        let w = window([0, 0, 0xA0], [0, 0x04]);
+        assert_eq!(columns(|x| w.color(x, 0)), [4, 5]);
+        assert!(w.hidden(4, 0) == [0, 0]);
     }
 }

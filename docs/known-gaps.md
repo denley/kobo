@@ -6,7 +6,8 @@ What a rendered level does not reproduce, and what the tooling does not handle.
   (see the layer facts in [smw.md](smw.md)); parallax is not reproduced away from the entry
   screen, the status bar is left out, and an axis layer 3 does not scroll along cannot be
   followed once the camera moves.
-- Windows are modelled only on a boss arena's fixed screen. The spotlight rooms (mode `$11`)
+- Windows are applied only on a boss arena's fixed screen: they are screen positions, which
+  a picture of a whole scrolling level has no place for. The spotlight rooms (mode `$11`)
   render uniformly dark, which is what the game shows until the light switch is hit (the
   spotlight sprite writes an empty window to `$04A0` while its `$C2` is zero), and the
   keyhole and message box effects do not appear.

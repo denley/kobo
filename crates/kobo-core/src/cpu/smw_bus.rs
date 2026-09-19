@@ -44,9 +44,12 @@ pub struct SmwBus<'a> {
     pub bg_scroll: [[u16; 2]; 4],
     pub bg_mode: u8,
     pub object_select: u8,
-    /// Last value written to `TMW` (`$212E`), which the game sets per
-    /// game mode without a RAM mirror.
-    pub window_main_mask: u8,
+    /// Last values written to the window registers the game keeps no RAM
+    /// mirror of: `WH2`/`WH3` (`$2128`-`$2129`), `WBGLOG`/`WOBJLOG`
+    /// (`$212A`-`$212B`), and `TMW`/`TSW` (`$212E`-`$212F`).
+    pub window2: [u8; 2],
+    pub window_logic: [u8; 2],
+    pub window_masks: [u8; 2],
     pub mode7: crate::video::Mode7,
     bg_scroll_latch: u8,
     mode7_latch: u8,
@@ -98,7 +101,9 @@ impl<'a> SmwBus<'a> {
             bg_scroll: [[0; 2]; 4],
             bg_mode: 0,
             object_select: 0,
-            window_main_mask: 0,
+            window2: [0; 2],
+            window_logic: [0; 2],
+            window_masks: [0; 2],
             mode7: crate::video::Mode7::default(),
             bg_scroll_latch: 0,
             mode7_latch: 0,
@@ -255,7 +260,9 @@ impl<'a> SmwBus<'a> {
                     self.vmadd = self.vmadd.wrapping_add(self.vram_step());
                 }
             }
-            0x212E => self.window_main_mask = value,
+            0x2128..=0x2129 => self.window2[(reg - 0x2128) as usize] = value,
+            0x212A..=0x212B => self.window_logic[(reg - 0x212A) as usize] = value,
+            0x212E..=0x212F => self.window_masks[(reg - 0x212E) as usize] = value,
             0x2121 => self.cgadd = value as u16 * 2,
             0x2122 => {
                 self.cgram[self.cgadd as usize % CGRAM_LEN] = value;
@@ -423,6 +430,12 @@ mod tests {
         bus.write(0x210E, 0x02);
         assert_eq!(bus.bg_scroll[0][1], 0x0201);
         assert_eq!(bus.mode7.scroll[1], 0x02FF);
+        bus.write(0x212E, 0x11);
+        bus.write(0x212F, 0x02);
+        bus.write(0x2129, 0x80);
+        bus.write(0x212B, 0x04);
+        assert_eq!(bus.window_masks, [0x11, 0x02]);
+        assert_eq!((bus.window2, bus.window_logic), ([0, 0x80], [0, 0x04]));
         bus.write(0x4209, 0xAE);
         bus.write(0x420A, 0xFF);
         assert_eq!(bus.irq_scanline, 0x1AE);

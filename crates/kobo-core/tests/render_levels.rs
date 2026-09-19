@@ -467,7 +467,7 @@ fn boss_arenas_capture_mode_switches_and_object_art() {
         assert!(!scene.objects.is_empty());
         // The game's window setup: BG1 and objects masked inside window
         // 1, colour math prevented outside it.
-        assert_eq!(scene.window.main_mask, 0x11);
+        assert_eq!(scene.window.masks, [0x11, 0x00]);
         assert_eq!(scene.window.select, [0x02, 0x00, 0x32]);
         // Keep the frame counter from before the drawing pass.
         assert_eq!(loaded.ram.u8(ram::TRUE_FRAME), 0);

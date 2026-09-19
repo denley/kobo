@@ -255,9 +255,16 @@ are SMWDisX's.
 - The arena is drawn through the same `render::LevelLayers` and `compose` as any level, as one
   fixed screen: each band's layer 1 (Mode 7's single layer stacks between object priorities
   0 and 1) and the objects. Arena preparation sets `TM = $15`, `CGADSUB = $20` (the backdrop
-  only), `CGWSEL = $20` (prevent math inside the colour window), `TMW = $11`, `W12SEL = $02`,
-  and `WOBJSEL = $32`: window 1, driven by HDMA from the table at `$04A0`, masks layer 1 and
-  the objects, and the colour window is its inverse. Inside window 1 the black backdrop
-  therefore takes the back area colour, and outside it stays black under the arena. `TMW`
-  has no RAM mirror (each game mode writes `$212E` directly), so the bus captures it.
-  `video::Window` models window 1 only, and `compose` applies one only to a fixed screen.
+  only), `CGWSEL = $20` (prevent math inside the colour window), `TMW = $11`, `TSW = 0`,
+  `W12SEL = $02`, and `WOBJSEL = $32`: window 1, driven by HDMA from the table at `$04A0`,
+  masks layer 1 and the objects, and the colour window is its inverse. Inside window 1 the
+  backdrop (CGRAM colour 0, black) therefore takes the back area colour, and outside it
+  stays as it is under the arena.
+- `video::Window` is the PPU's window model in full: window 1 per row from the HDMA table,
+  window 2 from `WH2`/`WH3` (the game's HDMA drives only `WH0`/`WH1`; the arenas leave
+  window 2 off), the
+  per-layer enable and invert bits from the `$41`-`$43` mirrors, the combining logic
+  (`WBGLOG`/`WOBJLOG`), and the main and subscreen masks (`TMW`/`TSW`). The last three
+  pairs have no RAM mirror (each game mode writes the registers directly), so the bus
+  captures `$2128`-`$212B` and `$212E`-`$212F`. `compose` applies a window only to a fixed
+  screen, because window positions are screen positions.

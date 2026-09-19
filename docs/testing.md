@@ -1,12 +1,9 @@
-# Test tiers, oracles, and ROM configuration
+# Oracles and corpus checks
 
-- **Unit tests** use synthetic data and always run.
-- **ROM-backed tests** (`crates/kobo-core/tests/`) load the vanilla ROM through
-  `kobo_core::config::vanilla_rom_path()`: the `KOBO_SMW_ROM` env var, else `roms.smw` in
-  `$XDG_CONFIG_HOME/kobo/config.toml`. They print `skipping: ...` and pass when no ROM is
-  configured, so CI never needs ROM data. Run them locally before pushing.
-- The vanilla reference is No-Intro "Super Mario World (USA)", headerless SHA-1
-  `6b47bb75d16514b6a476aa0c73a683a2a4c18765`, checksum `$A0DA`.
+The tiers themselves (unit, ROM-backed, opt-in oracles), where the vanilla ROM is looked up, and
+its reference hash are in `AGENTS.md` under "Test tiers and ROM configuration". This file is
+how each oracle is produced, where its data lives, and what is known not to match.
+
 - **Emulator oracle** (`tools/oracle/`): `dump.sh <rom> <outdir> 105,106,...` runs Mesen 2
   headlessly, navigates to each level through the file select, and dumps the tile grid,
   CGRAM, VRAM, and header RAM on the first level frame. `tests/oracle_levels.rs` compares

@@ -15,7 +15,7 @@ use crate::image::RgbImage;
 use crate::map16::{Map16Table, Map16Tile, Tile8Ref};
 use crate::palette::{Color15, Palette};
 use crate::rom::Rom;
-use crate::video::{BossScene, LAYER_BITS, Layer1, Layer3, Screen, SpriteObject, Window};
+use crate::video::{BossScene, LAYER_BITS, Layer1Registers, Layer3, Screen, SpriteObject, Window};
 
 /// Number of 8x8 tiles addressable by a tilemap word.
 pub const LAYER_TILE_COUNT: usize = 0x400;
@@ -80,7 +80,7 @@ impl LayerTiles {
 
 /// The opaque pixels of an 8x8 tile as (`dx`, `dy`, value), where they
 /// land once the tile is flipped. Colour 0 is transparent.
-fn tile_pixels(
+pub fn tile_pixels(
     tile: &Tile8,
     flip_x: bool,
     flip_y: bool,
@@ -150,13 +150,14 @@ const FIRST_MATH_OBJECT_COLOR: u8 = 0xC0;
 
 /// How a background layer's tiles go into [`LevelLayers`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct LayerStyle {
-    layer: usize,
+pub struct LayerStyle {
+    /// Index into [`LevelLayers::layers`]: [`BG1`], [`BG2`], or [`BG3`].
+    pub layer: usize,
     /// Stacking priority of tiles without and with the priority bit.
-    priorities: [u8; 2],
+    pub priorities: [u8; 2],
     /// ORed into every tile's palette row, as the game's upload routine
     /// does for layer 2 objects in object tileset 3.
-    palette_mask: u8,
+    pub palette_mask: u8,
 }
 
 /// A level drawn layer by layer, before the PPU's screen designation and
@@ -226,8 +227,8 @@ impl LevelLayers {
     /// Objects on sprite palettes 0-3 are exempt.
     ///
     /// `window` is in screen coordinates, so it is for layers that are one
-    /// fixed screen (a boss arena): it hides the main-screen layers it
-    /// masks and is the colour window `CGWSEL` clips and prevents math
+    /// fixed screen (a boss arena): it hides the layers it masks on each
+    /// screen and is the colour window `CGWSEL` clips and prevents math
     /// against. Without one, every pixel is outside the colour window.
     pub fn compose(&self, palette: &Palette, screen: &Screen, window: Option<&Window>) -> RgbImage {
         let mut img = RgbImage::new(self.width, self.height);
@@ -235,19 +236,15 @@ impl LevelLayers {
         let halve = screen.color_math & 0x40 != 0;
         let subtract = screen.color_math & 0x80 != 0;
         for (at, out) in img.pixels.iter_mut().enumerate() {
-            let (mut main_layers, mut in_window) = (screen.main, false);
+            let (mut hidden, mut in_window) = ([0; 2], false);
             if let Some(window) = window {
                 let (x, y) = (at % self.width as usize, at / self.width as usize);
-                for (layer, bit) in LAYER_BITS.iter().enumerate() {
-                    if window.masks_main(layer, x, y) {
-                        main_layers &= !bit;
-                    }
-                }
+                hidden = window.hidden(x, y);
                 in_window = window.color(x, y);
             }
             let prevented = screen.prevents_math(in_window);
             let clipped = screen.clips_to_black(in_window);
-            let (color, bit, exempt) = match self.pick(main_layers, at) {
+            let (color, bit, exempt) = match self.pick(screen.main & !hidden[0], at) {
                 Some((layer, p)) => (
                     palette.colors[p.color as usize],
                     LAYER_BITS[layer],
@@ -258,7 +255,8 @@ impl LevelLayers {
             let main = if clipped { Color15(0) } else { color };
             let math = screen.color_math & bit != 0 && !exempt && !prevented;
             let result = if math {
-                let (operand, halve) = match (add_subscreen, self.pick(screen.sub, at)) {
+                let (operand, halve) = match (add_subscreen, self.pick(screen.sub & !hidden[1], at))
+                {
                     (true, Some((_, p))) => (palette.colors[p.color as usize], halve && !clipped),
                     (true, None) => (screen.fixed_color, false),
                     (false, _) => (screen.fixed_color, halve && !clipped),
@@ -292,7 +290,7 @@ fn color_math(main: Color15, operand: Color15, subtract: bool, halve: bool) -> C
 impl LevelLayers {
     /// Draws the 8x8 tile a reference names into a background layer, in
     /// the palette row and at the priority the reference selects.
-    fn draw_tile_ref(
+    pub fn draw_tile_ref(
         &mut self,
         style: LayerStyle,
         x: i32,
@@ -311,7 +309,7 @@ impl LevelLayers {
 
     /// Draws a 16x16 tile into a background layer at pixel position
     /// (`x`, `y`), quadrant by quadrant.
-    fn draw_map16(
+    pub fn draw_map16(
         &mut self,
         style: LayerStyle,
         x: i32,
@@ -484,19 +482,19 @@ fn layer3_axis(layer3: &Layer3, axis: usize, at: i32) -> Option<i32> {
 /// A background layer's tilemap and character data, as the PPU's
 /// registers describe them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct Tilemap {
+pub struct Tilemap {
     /// `BGnSC`: tilemap base and size.
-    screens: u8,
+    pub screens: u8,
     /// Byte address of the character data in VRAM.
-    character_base: usize,
-    bpp: Bpp,
+    pub character_base: usize,
+    pub bpp: Bpp,
     /// Tile side in pixels: 8, or 16 with the layer's `BGMODE` size bit.
-    tile_side: usize,
+    pub tile_side: usize,
 }
 
 impl Tilemap {
     /// Mode 1's layer 3: 2bpp with 8x8 tiles.
-    fn layer3(layer3: &Layer3) -> Self {
+    pub fn layer3(layer3: &Layer3) -> Self {
         Self {
             screens: layer3.tilemap,
             character_base: layer3.character_base as usize,
@@ -506,7 +504,7 @@ impl Tilemap {
     }
 
     /// Mode 1's layer 1: 4bpp.
-    fn layer1(layer: &Layer1) -> Self {
+    pub fn layer1(layer: &Layer1Registers) -> Self {
         Self {
             screens: layer.tilemap,
             character_base: layer.character_base as usize,
@@ -518,7 +516,7 @@ impl Tilemap {
     /// CGRAM colour index relative to the layer's first palette and
     /// priority bit of the pixel at a tilemap position (which wraps), or
     /// `None` where it is transparent.
-    fn pixel(&self, vram: &[u8], x: i32, y: i32) -> Option<(u8, bool)> {
+    pub fn pixel(&self, vram: &[u8], x: i32, y: i32) -> Option<(u8, bool)> {
         let side = self.tile_side;
         let (x, y) = (
             x.rem_euclid(64 * side as i32) as usize,
@@ -550,7 +548,7 @@ impl Tilemap {
 
 /// One pixel of an 8x8 character whose data starts at byte `start` of
 /// VRAM: planes 0 and 1 interleaved row by row, then planes 2 and 3.
-fn character_pixel(vram: &[u8], start: usize, bpp: Bpp, px: usize, py: usize) -> u8 {
+pub fn character_pixel(vram: &[u8], start: usize, bpp: Bpp, px: usize, py: usize) -> u8 {
     (0..bpp.bits() as usize).fold(0, |color, plane| {
         let bits = video_byte(vram, start + plane / 2 * 16 + py * 2 + plane % 2);
         color | ((bits >> (7 - px)) & 1) << plane
@@ -875,11 +873,11 @@ mod video_tests {
     #[test]
     fn tilemap_uses_character_base_second_screen_and_flips() {
         let mut vram = vec![0; 0x10000];
-        let layer = Layer1 {
+        let layer = Layer1Registers {
             mode: 1,
             tilemap: 0x59,
             character_base: 0xE000,
-            ..Layer1::default()
+            ..Layer1Registers::default()
         };
         // Second horizontal screen, tile 2, palette 3, high priority, both flips.
         vram[0xB800..0xB802].copy_from_slice(&0xEC02u16.to_le_bytes());
@@ -1050,15 +1048,16 @@ mod video_tests {
         let scene = BossScene {
             bands: vec![Band {
                 start: 0,
-                layer: Layer1 {
+                layer: Layer1Registers {
                     mode: 1,
-                    ..Layer1::default()
+                    ..Layer1Registers::default()
                 },
             }],
             window: Window {
                 rows: vec![[1, 0]; 224],
-                main_mask: 0x11,
+                masks: [0x11, 0x00],
                 select: [0x02, 0x00, 0x32],
+                ..Window::default()
             },
             objects: vec![object(-1, 2, 0x00), object(0, 3, 0x30)],
             object_select: 0,
@@ -1081,7 +1080,7 @@ mod video_tests {
 
     #[test]
     fn arena_objects_respect_oam_order_signed_x_and_the_window() {
-        let (mut scene, vram, palette, screen) = arena();
+        let (mut scene, vram, mut palette, screen) = arena();
         scene.window.rows[0] = [2, 2];
         let picture = |scene: &BossScene| {
             let layers = boss_layers(scene, &vram);
@@ -1095,6 +1094,12 @@ mod video_tests {
         assert_eq!(row[8], [0, 0, 0]); // Outside the window the backdrop stays black.
         scene.objects.reverse();
         assert_eq!(picture(&scene)[1], [0, 31, 0]);
+        // The backdrop is CGRAM colour 0, whatever a hack makes it; the
+        // back area colour is added to it inside the window only.
+        palette.colors[0] = Color15::from_rgb5(4, 0, 0);
+        let layers = boss_layers(&scene, &vram);
+        let row = rgb5(&layers.compose(&palette, &screen, Some(&scene.window)));
+        assert_eq!((row[2], row[8]), ([4, 0, 31], [4, 0, 0]));
     }
 
     #[test]
