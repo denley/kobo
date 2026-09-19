@@ -23,8 +23,8 @@ fn main() {
         };
         match expand::capture_sprites(&rom, &loaded, &list) {
             Ok(scene) => {
-                for (_, _, id) in scene.undrawn {
-                    undrawn.entry(id).or_default().push(level);
+                for sprite in scene.undrawn {
+                    undrawn.entry(sprite.id).or_default().push(level);
                 }
             }
             Err(e) => eprintln!("{level:03X}: {e}"),

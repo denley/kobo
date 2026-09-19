@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use crate::level::PrimaryHeader;
+use crate::level::{Layer2Kind, LevelMode, PrimaryHeader};
 use crate::map16::Map16Tile;
 
 /// Bytes per plane of the tile grid.
@@ -86,9 +86,9 @@ impl Layer2Objects {
     /// The layout for a level mode and layer 1 row count, or `None` when
     /// the mode uploads no layer 2 objects (background tilemap modes and
     /// boss arenas) or the height is unknown.
-    pub fn for_level(mode: u8, rows: usize) -> Option<Self> {
-        match mode {
-            0x01..=0x04 | 0x0F | 0x1F => {
+    pub fn for_level(mode: LevelMode, rows: usize) -> Option<Self> {
+        match mode.layer2() {
+            Layer2Kind::HorizontalObjects => {
                 let total = max_screens(rows)?;
                 let layer1 = total.div_ceil(2);
                 Some(Self::Horizontal {
@@ -97,8 +97,8 @@ impl Layer2Objects {
                     screens: total - layer1,
                 })
             }
-            0x05..=0x08 => Some(Self::Vertical),
-            _ => None,
+            Layer2Kind::VerticalObjects => Some(Self::Vertical),
+            Layer2Kind::Background | Layer2Kind::None => None,
         }
     }
 
@@ -136,7 +136,7 @@ pub struct LevelTiles {
     pub level: u16,
     pub header: PrimaryHeader,
     /// Level mode as the game stored it.
-    pub level_mode: u8,
+    pub level_mode: LevelMode,
     /// Object tileset as the game stored it. Tileset 3 shifts layer 2
     /// object palettes up by four rows on upload.
     pub object_tileset: u8,
@@ -220,6 +220,13 @@ impl LevelTiles {
         self.map16.get(&n)
     }
 
+    /// Whether layer 2 shows the decoded background tilemap. A buffer held
+    /// under any other mode is not displayed: boss arenas and the dark
+    /// rooms sharing their tilemap never upload it.
+    pub fn shows_background(&self) -> bool {
+        self.layer2_tilemap.is_some() && self.level_mode.layer2() == Layer2Kind::Background
+    }
+
     /// How this level's layer 2 objects are laid out, if it has any.
     pub fn layer2_objects(&self) -> Option<Layer2Objects> {
         if self.layer2_tilemap.is_some() {
@@ -290,7 +297,7 @@ mod tests {
 
     #[test]
     fn layer2_objects_start_after_layer_1s_share_of_the_screens() {
-        let horizontal = |rows: usize| match Layer2Objects::for_level(0x02, rows) {
+        let horizontal = |rows: usize| match Layer2Objects::for_level(LevelMode(0x02), rows) {
             Some(Layer2Objects::Horizontal {
                 base,
                 rows,
@@ -303,9 +310,9 @@ mod tests {
         assert_eq!(horizontal(74), (0x1BC0, 74, 6));
         assert_eq!(horizontal(298), (0x2540, 298, 1));
         assert_eq!(horizontal(448), (0x1C00, 448, 1));
-        assert_eq!(Layer2Objects::for_level(0x02, 50), None);
-        assert_eq!(Layer2Objects::for_level(0x00, 27), None);
-        let layout = Layer2Objects::for_level(0x01, 47).unwrap();
+        assert_eq!(Layer2Objects::for_level(LevelMode(0x02), 50), None);
+        assert_eq!(Layer2Objects::for_level(LevelMode(0x00), 27), None);
+        let layout = Layer2Objects::for_level(LevelMode(0x01), 47).unwrap();
         assert_eq!(layout.offset(17, 3), Some(0x1D60 + 0x2F0 + 3 * 16 + 1));
         assert_eq!(layout.offset(9 * 16, 0), None);
         assert_eq!(layout.offset(0, 47), None);

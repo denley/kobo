@@ -359,7 +359,7 @@ fn level_info(rom: &Rom, level: &str) -> Result<()> {
     }
     println!("sprite data:      {}", level::sprite_ptr(rom, level)?);
     println!("screens:          {}", h.screens);
-    println!("level mode:       ${:02X}", h.level_mode);
+    println!("level mode:       {}", h.level_mode);
     println!(
         "object tileset:   {} ({:?})",
         h.object_tileset,
@@ -409,7 +409,7 @@ fn level_png(
     }
     rendered.image.write_png(out)?;
     println!(
-        "level {level:03X}: {} screens, mode ${:02X}, {}x{} -> {}",
+        "level {level:03X}: {} screens, mode {}, {}x{} -> {}",
         rendered.level.tiles.screens,
         rendered.level.tiles.level_mode,
         rendered.image.width,
@@ -558,7 +558,7 @@ fn level_tiles(rom: &Rom, level: &str) -> Result<()> {
     let level = parse_level(level)?;
     let loaded = expand::expand_level(rom, level)?;
     println!(
-        "level {level:03X}: {} screens, mode ${:02X}, vertical {}",
+        "level {level:03X}: {} screens, mode {}, vertical {}",
         loaded.tiles.screens, loaded.tiles.level_mode, loaded.tiles.vertical
     );
     let (w, h) = loaded.tiles.size();

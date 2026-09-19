@@ -5,7 +5,7 @@ use super::tiles::{
     GRID_LEN, LAYER2_TILEMAP_LEN, LevelTiles, SCREEN_COLS, SCREEN_LEN, SCREEN_ROWS,
 };
 use super::{ExpandError, LoadedLevel, boss, layer3, map16, player, routines};
-use crate::level;
+use crate::level::{self, Layer2Kind, LevelMode};
 use crate::palette::Color15;
 use crate::ram::{self, Ram};
 use crate::rom::Rom;
@@ -13,10 +13,6 @@ use crate::video::{LevelScene, Screen, VideoMemory};
 
 /// Instruction limit for the reset code, which uploads the SPC engine.
 const RESET_STEP_LIMIT: u64 = 200_000_000;
-
-/// Level modes whose layer 2 is a background tilemap the loader decodes,
-/// rather than objects or nothing.
-const BACKGROUND_MODES: [u8; 7] = [0x00, 0x0A, 0x0C, 0x0D, 0x0E, 0x11, 0x1E];
 
 /// Runs the ROM's level loader and level preparation for `level`.
 pub fn expand_level(rom: &Rom, level: u16) -> Result<LoadedLevel, ExpandError> {
@@ -75,7 +71,7 @@ pub fn expand_level_traced(
     let tiles = LevelTiles {
         level,
         header,
-        level_mode: bus.ram.u8(ram::LEVEL_MODE),
+        level_mode: LevelMode(bus.ram.u8(ram::LEVEL_MODE)),
         object_tileset: bus.ram.u8(ram::OBJECT_TILESET),
         vertical: expanded.vertical,
         screens: expanded.screens,
@@ -171,8 +167,7 @@ fn load_level(machine: &mut Machine) -> Result<Expanded, ExpandError> {
         // Lunar Magic's 4bpp files overrun the vanilla 3bpp buffer into
         // the background at `$7EB900`. The game has uploaded the tilemap
         // to VRAM by then, so it does not care; we do.
-        layer2_tilemap: BACKGROUND_MODES
-            .contains(&ram.u8(ram::LEVEL_MODE))
+        layer2_tilemap: (LevelMode(ram.u8(ram::LEVEL_MODE)).layer2() == Layer2Kind::Background)
             .then(|| {
                 (
                     ram.bytes(ram::LAYER2_TILEMAP_LOW, LAYER2_TILEMAP_LEN),

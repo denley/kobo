@@ -7,7 +7,7 @@ use kobo_core::expand::{
     GRID_LEN, LAYER2_TILEMAP_LEN, LevelTiles, LoadedLevel, SCREEN_COLS, SCREEN_ROWS,
 };
 use kobo_core::gfx::Tile8;
-use kobo_core::level::PrimaryHeader;
+use kobo_core::level::{LevelMode, PrimaryHeader};
 use kobo_core::map16::{BG_TILE_COUNT, Map16Tile, Tile8Ref};
 use kobo_core::palette::{Color15, Palette};
 use kobo_core::ram;
@@ -32,7 +32,7 @@ fn scene() -> (LoadedLevel, LayerTiles, Palette) {
     let tiles = LevelTiles {
         level: 0x105,
         header: PrimaryHeader::from_bytes([0; 5]),
-        level_mode: 0,
+        level_mode: LevelMode(0),
         object_tileset: 0,
         vertical: false,
         screens: 3,
@@ -83,7 +83,7 @@ fn overlapping_map16_numbers_keep_foreground_and_background_art_separate() {
 
 /// A level whose layer 2 is objects: tile 1 is solid blue and 2 is solid
 /// red, with map16 knowing both.
-fn object_scene(level_mode: u8) -> (LoadedLevel, LayerTiles, Palette) {
+fn object_scene(level_mode: LevelMode) -> (LoadedLevel, LayerTiles, Palette) {
     let (mut loaded, gfx, palette) = scene();
     loaded.tiles.level_mode = level_mode;
     loaded.tiles.layer2_tilemap = None;
@@ -95,7 +95,7 @@ fn object_scene(level_mode: u8) -> (LoadedLevel, LayerTiles, Palette) {
 
 #[test]
 fn layer2_objects_draw_under_layer_1_from_their_own_screens() {
-    let (mut loaded, mut gfx, palette) = object_scene(0x01);
+    let (mut loaded, mut gfx, palette) = object_scene(LevelMode(0x01));
     let back = [0, 255, 0];
     // Screen 0 of the horizontal layer 2 buffer starts at plane offset $1B00.
     loaded.tiles.low[0x1B00] = 1;
@@ -108,14 +108,14 @@ fn layer2_objects_draw_under_layer_1_from_their_own_screens() {
     assert_eq!(image.pixels[16], back);
     assert_eq!(image.pixels[(16 + 5) * 16], [0, 0, 255]);
     // The same bytes are not layer 2 objects in a background tilemap mode.
-    loaded.tiles.level_mode = 0x00;
+    loaded.tiles.level_mode = LevelMode(0x00);
     let image = render::level_image(&loaded, &gfx, &palette);
     assert_eq!(image.pixels[0], back);
 }
 
 #[test]
 fn vertical_modes_read_layer2_objects_from_the_vertical_buffer() {
-    let (mut loaded, gfx, palette) = object_scene(0x07);
+    let (mut loaded, gfx, palette) = object_scene(LevelMode(0x07));
     loaded.scene.screen.fixed_color = Color15(0);
     loaded.tiles.vertical = true;
     loaded.tiles.screens = 2;
@@ -127,7 +127,7 @@ fn vertical_modes_read_layer2_objects_from_the_vertical_buffer() {
     assert_eq!(at(16, 16), [0, 0, 255]);
     assert_eq!(at(0, 0), [0; 3]);
     // Modes 3 and 4 pair a vertical layer 1 with a horizontal layer 2.
-    loaded.tiles.level_mode = 0x03;
+    loaded.tiles.level_mode = LevelMode(0x03);
     loaded.tiles.low[0x1B00 + SCREEN_COLS] = 1; // row 1, column 0
     let image = render::level_image(&loaded, &gfx, &palette);
     let at = |x: usize, y: usize| image.pixels[y * 16 * 512 + x * 16];
@@ -137,7 +137,7 @@ fn vertical_modes_read_layer2_objects_from_the_vertical_buffer() {
 
 #[test]
 fn object_tileset_three_moves_layer2_palettes_up_four_rows() {
-    let (mut loaded, gfx, mut palette) = object_scene(0x02);
+    let (mut loaded, gfx, mut palette) = object_scene(LevelMode(0x02));
     loaded.tiles.object_tileset = 3;
     palette.set(4, 2, Color15::from_rgb5(0, 31, 0));
     loaded.tiles.low[0x1B00] = 1;
@@ -150,7 +150,7 @@ fn object_tileset_three_moves_layer2_palettes_up_four_rows() {
 #[test]
 fn priority_bits_interleave_layers_like_mode_1() {
     // Level mode 2 puts layer 2 on the main screen with layer 1.
-    let (mut loaded, gfx, palette) = object_scene(0x02);
+    let (mut loaded, gfx, palette) = object_scene(LevelMode(0x02));
     loaded.scene.screen.main = 0x17;
     loaded.scene.screen.sub = 0x00;
     let r = Tile8Ref::new(2, 0, true, false, false);
@@ -177,7 +177,7 @@ fn special_modes_do_not_draw_unused_background_buffers() {
     let (mut loaded, gfx, palette) = scene();
     let back = [0, 255, 0];
     for mode in [0x09, 0x0B, 0x0F, 0x10] {
-        loaded.tiles.level_mode = mode;
+        loaded.tiles.level_mode = LevelMode(mode);
         let image = render::level_image(&loaded, &gfx, &palette);
         assert!(image.pixels.iter().all(|&p| p == back), "mode {mode:02X}");
         // Suppressing the background must still leave foreground art visible.
@@ -235,7 +235,7 @@ fn layer2_is_drawn_where_the_entry_camera_put_it() {
     assert_eq!(at(425, 40), [0, 0, 255]);
     assert_eq!(at(426 + 512, 40), [255, 0, 0]); // repeats every two screens
     // Layer 2 objects move with the same offset.
-    let (mut loaded, gfx, palette) = object_scene(0x01);
+    let (mut loaded, gfx, palette) = object_scene(LevelMode(0x01));
     loaded.tiles.low[0x1B00] = 1;
     loaded.scene.camera = [0, 0];
     loaded.scene.layer2_position = [0, 8];
@@ -263,7 +263,7 @@ fn subscreen_layer2_only_shows_through_the_backdrop() {
     // Level mode 1 keeps layer 2 on the subscreen: even a high-priority
     // layer 2 tile stays behind low-priority layer 1, and where layer 1
     // is transparent the backdrop math shows layer 2 at full strength.
-    let (mut loaded, gfx, palette) = object_scene(0x01);
+    let (mut loaded, gfx, palette) = object_scene(LevelMode(0x01));
     let r = Tile8Ref::new(2, 0, true, false, false);
     loaded.tiles.map16.insert(
         3,
@@ -464,14 +464,11 @@ fn boss_arenas_capture_mode_switches_and_object_art() {
             "level {level:03X}"
         );
         assert!(scene.bands.iter().any(|b| b.layer.mode & 7 == 7));
-        assert_eq!(scene.oam.len(), 544);
-        assert!(
-            scene.oam[..512]
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .any(|o| o[1] < 224)
-        );
+        assert!(!scene.objects.is_empty());
+        // The game's window setup: BG1 and objects masked inside window
+        // 1, colour math prevented outside it.
+        assert_eq!(scene.window.main_mask, 0x11);
+        assert_eq!(scene.window.select, [0x02, 0x00, 0x32]);
         // Keep the frame counter from before the drawing pass.
         assert_eq!(loaded.ram.u8(ram::TRUE_FRAME), 0);
     }

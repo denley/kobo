@@ -22,11 +22,6 @@ fn vram_offset(bg_sc: u8, col8: usize, row8: usize) -> usize {
     base + ((row8 / 32) * wide + col8 / 32) * 0x800 + (row8 % 32) * 64 + (col8 % 32) * 2
 }
 
-/// Level modes whose layer 2 is not the decoded background: boss arenas
-/// (`$09`, `$0B`, `$10`) and the dark rooms sharing their tilemap (`$0F`).
-/// The game does not upload the background tilemap for these.
-const MODES_WITHOUT_BACKGROUND: [u8; 4] = [0x09, 0x0B, 0x0F, 0x10];
-
 /// The background rows the game uploads. A 64-tall tilemap takes the whole
 /// two-screen background. Lunar Magic's 32-tall tilemap takes the 16 rows
 /// from one above the initial layer 2 position. The loader masks source
@@ -104,9 +99,7 @@ fn check_rom(rom: &Rom) -> (usize, Vec<String>) {
                 continue;
             }
         };
-        if loaded.tiles.layer2_tilemap.is_none()
-            || MODES_WITHOUT_BACKGROUND.contains(&loaded.tiles.level_mode)
-        {
+        if !loaded.tiles.shows_background() {
             continue;
         }
         checked += 1;
@@ -115,7 +108,7 @@ fn check_rom(rom: &Rom) -> (usize, Vec<String>) {
         // rows outside a 27-row buffer. Both background screens count.
         if words < 30 * 32 || bad != 0 {
             failures.push(format!(
-                "level {level:03X} (mode ${:02X}, BG2SC ${:02X}): {bad} of {words} tilemap words missing or different",
+                "level {level:03X} (mode {}, BG2SC ${:02X}): {bad} of {words} tilemap words missing or different",
                 loaded.tiles.level_mode, loaded.video.bg_sc[1]
             ));
         }

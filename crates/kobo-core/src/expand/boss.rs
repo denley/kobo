@@ -2,11 +2,11 @@
 
 use super::ExpandError;
 use super::machine::{Call, Machine};
-use super::oam::{self, OAM_LEN, SCREEN_H};
+use super::oam::{self, SCREEN_H};
 use super::routines;
 use crate::cpu::smw_bus::SmwBus;
 use crate::ram;
-use crate::video::{Band, BossScene, Layer1};
+use crate::video::{Band, BossScene, Layer1, Window};
 
 /// Instruction limit for a stretch of an interrupt handler.
 const HANDLER_STEP_LIMIT: u64 = 100_000;
@@ -37,7 +37,8 @@ pub(super) fn capture_boss_scene(machine: &mut Machine) -> Result<Option<BossSce
     machine.bus.ram.set_u8(ram::GAME_MODE, 0x14);
     machine.call(Call::jsr(routines::DRAW_LEVEL_FRAME))?;
     let (oam, first_object) = oam::read_oam(&machine.bus.ram);
-    debug_assert_eq!(oam.len(), OAM_LEN);
+    let object_select = machine.bus.object_select;
+    let objects = oam::screen_objects(&oam, first_object, oam::object_sizes(object_select));
     machine.call(Call::jsr(routines::UPLOAD_PLAYER_TILES))?;
     if command & 0x40 != 0 {
         machine.call(Call::jsr(routines::UPLOAD_BOSS_TILES))?;
@@ -72,19 +73,21 @@ pub(super) fn capture_boss_scene(machine: &mut Machine) -> Result<Option<BossSce
             next_band(machine, floor_line)?;
         }
     }
-    let backdrop_window = machine
-        .bus
-        .ram
-        .bytes(ram::WINDOW_TABLE, SCREEN_H as usize * 2)
-        .as_chunks::<2>()
-        .0
-        .to_vec();
+    let ram = &machine.bus.ram;
+    let window = Window {
+        rows: ram
+            .bytes(ram::WINDOW_TABLE, SCREEN_H as usize * 2)
+            .as_chunks::<2>()
+            .0
+            .to_vec(),
+        main_mask: machine.bus.window_main_mask,
+        select: std::array::from_fn(|i| ram.u8_at(ram::WINDOW_SELECT, i as u32)),
+    };
     machine.bus.ram = saved;
     Ok(Some(BossScene {
         bands,
-        backdrop_window,
-        oam,
-        object_select: machine.bus.object_select,
-        first_object,
+        window,
+        objects,
+        object_select,
     }))
 }

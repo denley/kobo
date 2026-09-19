@@ -32,14 +32,63 @@ pub struct Band {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BossScene {
     pub bands: Vec<Band>,
-    /// The back-area colour is visible through the window; outside it
-    /// the backdrop is black. This also masks BG1 and objects.
-    pub backdrop_window: Vec<[u8; 2]>,
-    /// Packed OAM from the first drawing pass, including sprite-based
-    /// arena walls and Bowser's floor.
-    pub oam: Vec<u8>,
+    /// The arena's window: it masks BG1 and the objects, and colour math
+    /// (the back area colour added to a black backdrop) is prevented
+    /// outside it, so the back area shows through the window only.
+    pub window: Window,
+    /// The objects of the first drawing pass, front to back in screen
+    /// coordinates, including sprite-based arena walls and Bowser's floor.
+    pub objects: Vec<SpriteObject>,
+    /// `OBSEL`: object sizes and character base.
     pub object_select: u8,
-    pub first_object: usize,
+}
+
+/// Each layer's bit in `TM`, `TS`, `TMW`, and `CGADSUB`, in the order the
+/// renderer keeps its layers: BG1, BG2, BG3, objects.
+pub const LAYER_BITS: [u8; 4] = [0x01, 0x02, 0x04, 0x10];
+
+/// Window 1 over a fixed screen, as the game's HDMA drives it. Window 2
+/// and the window logic registers are not modelled; SMW leaves them off.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Window {
+    /// Left and right edge (inclusive) per screen row, from the table the
+    /// HDMA feeds to `WH0`/`WH1` (`$04A0`). A row with left past right is
+    /// empty.
+    pub rows: Vec<[u8; 2]>,
+    /// `TMW`: the main-screen layers the window masks where it applies.
+    pub main_mask: u8,
+    /// `W12SEL`, `W34SEL`, and `WOBJSEL` mirrors (`$41`-`$43`), a nibble
+    /// each for BG1 and BG2, BG3 and BG4, objects and the colour window:
+    /// bit 1 enables window 1, bit 0 inverts it.
+    pub select: [u8; 3],
+}
+
+impl Window {
+    fn applies(&self, setting: u8, x: usize, y: usize) -> bool {
+        let inside = self
+            .rows
+            .get(y)
+            .is_some_and(|&[left, right]| (left as usize..=right as usize).contains(&x));
+        setting & 2 != 0 && inside != (setting & 1 != 0)
+    }
+
+    /// Whether the window hides `layer` (an index into [`LAYER_BITS`]) on
+    /// the main screen at a screen position.
+    pub fn masks_main(&self, layer: usize, x: usize, y: usize) -> bool {
+        let setting = [
+            self.select[0],
+            self.select[0] >> 4,
+            self.select[1],
+            self.select[2],
+        ][layer];
+        self.main_mask & LAYER_BITS[layer] != 0 && self.applies(setting, x, y)
+    }
+
+    /// Whether a screen position is inside the colour window, which
+    /// `CGWSEL` clips and prevents colour math against.
+    pub fn color(&self, x: usize, y: usize) -> bool {
+        self.applies(self.select[2] >> 4, x, y)
+    }
 }
 
 /// Layer 3 as level preparation left it: where the game scrolled it for
@@ -114,21 +163,27 @@ impl Screen {
     }
 
     /// Whether a `CGWSEL` window-relative setting (clip or prevent, bits
-    /// `10` = inside, `01` = outside, `11` = always) applies. No colour
-    /// window is modelled, so "inside" never applies and "outside" always
-    /// does.
-    fn window_setting_applies(setting: u8) -> bool {
-        matches!(setting & 3, 1 | 3)
+    /// `10` = inside, `01` = outside, `11` = always) applies to a pixel
+    /// inside or outside the colour window. Without a window every pixel
+    /// is outside.
+    fn window_setting_applies(setting: u8, in_window: bool) -> bool {
+        match setting & 3 {
+            0 => false,
+            1 => !in_window,
+            2 => in_window,
+            _ => true,
+        }
     }
 
-    /// Whether main-screen colours are forced to black before the math.
-    pub fn clips_to_black(&self) -> bool {
-        Self::window_setting_applies(self.math_select >> 6)
+    /// Whether a pixel's main-screen colour is forced to black before the
+    /// math.
+    pub fn clips_to_black(&self, in_window: bool) -> bool {
+        Self::window_setting_applies(self.math_select >> 6, in_window)
     }
 
-    /// Whether colour math is switched off for every pixel.
-    pub fn prevents_math(&self) -> bool {
-        Self::window_setting_applies(self.math_select >> 4)
+    /// Whether colour math is switched off for a pixel.
+    pub fn prevents_math(&self, in_window: bool) -> bool {
+        Self::window_setting_applies(self.math_select >> 4, in_window)
     }
 }
 
@@ -159,6 +214,16 @@ impl SpriteObject {
     }
 }
 
+/// A level sprite entry that drew nothing, for the renderer to mark.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct UndrawnSprite {
+    /// Level tile position of the entry.
+    pub x: usize,
+    pub y: usize,
+    /// Sprite number.
+    pub id: u8,
+}
+
 /// The sprites of an ordinary level as the game draws them on their first
 /// frame, front to back, plus the level sprite entries that produced no
 /// graphics at all (generators, scroll commands, and the like).
@@ -167,8 +232,8 @@ pub struct SpriteScene {
     pub objects: Vec<SpriteObject>,
     /// `OBSEL`: object sizes and character base.
     pub object_select: u8,
-    /// Level tile positions and sprite numbers of entries with no graphics.
-    pub undrawn: Vec<(usize, usize, u8)>,
+    /// Entries with no graphics.
+    pub undrawn: Vec<UndrawnSprite>,
     /// Objects that ride on layer 2 (the castle candle flames), positioned
     /// in layer 2 pixels. The game keeps eight bits of their position, so
     /// they repeat every 256 pixels along the layer.

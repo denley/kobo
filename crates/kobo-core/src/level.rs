@@ -69,6 +69,53 @@ pub fn sprite_ptr(rom: &Rom, level: u16) -> Result<SnesAddr, LevelError> {
     Ok(SnesAddr::from_bank_offset(0x07, offset))
 }
 
+/// What a level mode puts on layer 2.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Layer2Kind {
+    /// A pre-built background tilemap, which the loader decodes into its
+    /// own buffer and the game uploads whole.
+    Background,
+    /// Objects in the upper part of the tile grid, in horizontal screens.
+    /// Modes `$03` and `$04` pair these with a vertical layer 1.
+    HorizontalObjects,
+    /// Objects in the upper part of the tile grid, in vertical screens.
+    VerticalObjects,
+    /// Nothing the loader builds: boss arenas draw their own layers, and
+    /// the modes the game does not define load nothing.
+    None,
+}
+
+/// A level mode (`$1925`, five bits of the primary header): the one
+/// number that chooses a level's layer 2 and, through the ROM's per-mode
+/// tables, its orientation, screen designation, and colour math. Those
+/// tables are read by the game's own code; what is stated here is what
+/// this library has to know without running it.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug)]
+pub struct LevelMode(pub u8);
+
+impl LevelMode {
+    /// What the loader builds for layer 2. Background modes decode the
+    /// tilemap (`LoadLevel`); object modes follow the layer 2 upload
+    /// dispatch (`CODE_058883`) and the screen pointer tables at `$00BB08`
+    /// and `$00BC16`, which choose the layout independently of layer 1's.
+    /// Mode `$0F` (the dark rooms sharing the boss arenas' tilemap) has
+    /// objects; the arenas themselves (`$09`, `$0B`, `$10`) have neither.
+    pub fn layer2(self) -> Layer2Kind {
+        match self.0 {
+            0x00 | 0x0A | 0x0C | 0x0D | 0x0E | 0x11 | 0x1E => Layer2Kind::Background,
+            0x01..=0x04 | 0x0F | 0x1F => Layer2Kind::HorizontalObjects,
+            0x05..=0x08 => Layer2Kind::VerticalObjects,
+            _ => Layer2Kind::None,
+        }
+    }
+}
+
+impl std::fmt::Display for LevelMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "${:02X}", self.0)
+    }
+}
+
 /// The five bytes at the start of a level's layer 1 data.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PrimaryHeader {
@@ -78,8 +125,7 @@ pub struct PrimaryHeader {
     pub screens: u8,
     /// Back area colour, 0 to 7.
     pub back_area: u8,
-    /// Level mode, 0 to 31.
-    pub level_mode: u8,
+    pub level_mode: LevelMode,
     pub layer3_priority: bool,
     /// Music, 0 to 7.
     pub music: u8,
@@ -105,7 +151,7 @@ impl PrimaryHeader {
             bg_palette: b[0] >> 5,
             screens: (b[0] & 0x1F) + 1,
             back_area: b[1] >> 5,
-            level_mode: b[1] & 0x1F,
+            level_mode: LevelMode(b[1] & 0x1F),
             layer3_priority: b[2] & 0x80 != 0,
             music: (b[2] >> 4) & 0x07,
             sprite_tileset: b[2] & 0x0F,
@@ -121,7 +167,7 @@ impl PrimaryHeader {
     pub fn to_bytes(self) -> [u8; 5] {
         [
             (self.bg_palette << 5) | ((self.screens - 1) & 0x1F),
-            (self.back_area << 5) | (self.level_mode & 0x1F),
+            (self.back_area << 5) | (self.level_mode.0 & 0x1F),
             ((self.layer3_priority as u8) << 7) | (self.music << 4) | (self.sprite_tileset & 0x0F),
             (self.time << 6) | (self.sprite_palette << 3) | (self.fg_palette & 0x07),
             (self.item_memory << 6) | (self.vertical_scroll << 4) | (self.object_tileset & 0x0F),
@@ -154,7 +200,7 @@ mod tests {
             bg_palette: 5,
             screens: 20,
             back_area: 3,
-            level_mode: 0x1E,
+            level_mode: LevelMode(0x1E),
             layer3_priority: true,
             music: 6,
             sprite_tileset: 0xB,
@@ -172,5 +218,20 @@ mod tests {
         assert_eq!(b[3], 0b10_111_001);
         assert_eq!(b[4], 0b1101_1110);
         assert_eq!(PrimaryHeader::from_bytes(b), h);
+    }
+
+    #[test]
+    fn level_modes_choose_layer_2() {
+        let kind = |mode| LevelMode(mode).layer2();
+        assert_eq!(kind(0x00), Layer2Kind::Background);
+        assert_eq!(kind(0x0A), Layer2Kind::Background);
+        assert_eq!(kind(0x01), Layer2Kind::HorizontalObjects);
+        assert_eq!(kind(0x03), Layer2Kind::HorizontalObjects); // vertical layer 1
+        assert_eq!(kind(0x0F), Layer2Kind::HorizontalObjects);
+        assert_eq!(kind(0x07), Layer2Kind::VerticalObjects);
+        for boss in [0x09, 0x0B, 0x10] {
+            assert_eq!(kind(boss), Layer2Kind::None);
+        }
+        assert_eq!(LevelMode(0x0C).to_string(), "$0C");
     }
 }

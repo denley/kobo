@@ -83,7 +83,7 @@ fn rendered_levels_match_emulator_frames() {
                 .max_by(|a, b| a.0.total_cmp(&b.0))
                 .unwrap();
             eprintln!(
-                "{}: level {level:03X} mode {:02X} matches {:.1}% (padding {pad})",
+                "{}: level {level:03X} mode {} matches {:.1}% (padding {pad})",
                 dir.display(),
                 loaded.tiles.level_mode,
                 rate * 100.0

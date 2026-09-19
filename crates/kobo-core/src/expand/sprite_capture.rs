@@ -23,7 +23,7 @@ use crate::cpu::CpuError;
 use crate::ram::{self, Ram};
 use crate::rom::Rom;
 use crate::sprites::{SpriteEntry, SpriteList};
-use crate::video::{SpriteObject, SpriteScene};
+use crate::video::{SpriteObject, SpriteScene, UndrawnSprite};
 
 /// Most frames a sprite pass runs waiting for the sprite to initialise.
 const SPRITE_FRAMES: usize = 8;
@@ -463,9 +463,11 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
         });
         self.keep(self.level_loop.camera, &drawn);
         if drawn.is_empty() {
-            self.scene
-                .undrawn
-                .push((tile.0.max(0) as usize, tile.1.max(0) as usize, id));
+            self.scene.undrawn.push(UndrawnSprite {
+                x: tile.0.max(0) as usize,
+                y: tile.1.max(0) as usize,
+                id,
+            });
         }
     }
 
@@ -559,7 +561,11 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
         if objects.is_empty() && !riding {
             self.scene
                 .undrawn
-                .extend(slotless.into_iter().map(|((x, y), id)| (x, y, id)));
+                .extend(
+                    slotless
+                        .into_iter()
+                        .map(|((x, y), id)| UndrawnSprite { x, y, id }),
+                );
         }
     }
 

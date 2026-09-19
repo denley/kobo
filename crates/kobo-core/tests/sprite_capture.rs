@@ -6,6 +6,7 @@
 
 mod common;
 
+use kobo_core::video::UndrawnSprite;
 use kobo_core::{expand, ram, sprites};
 
 /// Sprites with no graphics of their own: the invisible warp hole and the
@@ -47,7 +48,7 @@ fn yoshis_island_1_sprites_all_draw_near_their_entries() {
         "{} objects",
         scene.objects.len()
     );
-    for (x, y, id) in &scene.undrawn {
+    for UndrawnSprite { x, y, id } in &scene.undrawn {
         assert!(
             INVISIBLE.contains(id),
             "sprite {id:02X} at ({x}, {y}) drew nothing"
@@ -133,7 +134,7 @@ fn awkward_sprites_draw() {
         let (list, scene) = capture(&rom, level);
         assert!(list.sprites.iter().any(|e| e.id == id));
         assert!(
-            !scene.undrawn.iter().any(|&(_, _, undrawn)| undrawn == id),
+            !scene.undrawn.iter().any(|undrawn| undrawn.id == id),
             "level {level:03X}: sprite {id:02X} drew nothing"
         );
     }
@@ -146,7 +147,7 @@ fn candle_flames_ride_on_layer_2() {
     let Some(rom) = common::vanilla() else { return };
     let (_, scene) = capture(&rom, 0x101);
     assert_eq!(scene.layer2_objects.len(), 4);
-    assert!(!scene.undrawn.iter().any(|&(_, _, id)| id == 0xE6));
+    assert!(!scene.undrawn.iter().any(|undrawn| undrawn.id == 0xE6));
     let (_, scene) = capture(&rom, 0x105);
     assert!(scene.layer2_objects.is_empty());
 }
@@ -188,7 +189,7 @@ fn a_spread_of_vanilla_levels_captures_cleanly() {
         let list = sprites::read_sprites_at(&rom, loaded.sprite_data_ptr()).unwrap();
         let scene = expand::capture_sprites(&rom, &loaded, &list)
             .unwrap_or_else(|e| panic!("level {level:03X}: {e}"));
-        for (x, y, id) in &scene.undrawn {
+        for UndrawnSprite { x, y, id } in &scene.undrawn {
             assert!(
                 draws_nothing(*id),
                 "level {level:03X}: sprite {id:02X} at ({x}, {y}) drew nothing"

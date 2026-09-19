@@ -44,6 +44,9 @@ pub struct SmwBus<'a> {
     pub bg_scroll: [[u16; 2]; 4],
     pub bg_mode: u8,
     pub object_select: u8,
+    /// Last value written to `TMW` (`$212E`), which the game sets per
+    /// game mode without a RAM mirror.
+    pub window_main_mask: u8,
     pub mode7: crate::video::Mode7,
     bg_scroll_latch: u8,
     mode7_latch: u8,
@@ -95,6 +98,7 @@ impl<'a> SmwBus<'a> {
             bg_scroll: [[0; 2]; 4],
             bg_mode: 0,
             object_select: 0,
+            window_main_mask: 0,
             mode7: crate::video::Mode7::default(),
             bg_scroll_latch: 0,
             mode7_latch: 0,
@@ -251,6 +255,7 @@ impl<'a> SmwBus<'a> {
                     self.vmadd = self.vmadd.wrapping_add(self.vram_step());
                 }
             }
+            0x212E => self.window_main_mask = value,
             0x2121 => self.cgadd = value as u16 * 2,
             0x2122 => {
                 self.cgram[self.cgadd as usize % CGRAM_LEN] = value;

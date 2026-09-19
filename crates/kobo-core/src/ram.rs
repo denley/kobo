@@ -341,9 +341,11 @@ pub const SUB_SCREEN: RamAddr = ram(0x7E_0D9E);
 pub const IRQ_NMI_COMMAND: RamAddr = ram(0x7E_0D9B);
 /// `$11`: which of an arena's IRQs comes next.
 pub const IRQ_TYPE: RamAddr = ram(0x7E_0011);
-/// `$04A0`: the colour window's left and right edges per scanline, as
-/// the HDMA feeds them to the PPU.
+/// `$04A0`: window 1's left and right edges per scanline, as the HDMA
+/// feeds them to the PPU.
 pub const WINDOW_TABLE: RamAddr = ram(0x7E_04A0);
+/// `$41`-`$43`: `W12SEL`, `W34SEL`, and `WOBJSEL` mirrors.
+pub const WINDOW_SELECT: RamAddr = ram(0x7E_0041);
 
 #[cfg(test)]
 mod tests {

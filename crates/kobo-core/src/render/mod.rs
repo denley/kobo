@@ -15,6 +15,7 @@ use crate::image::RgbImage;
 use crate::map16::{Map16Table, Map16Tile, Tile8Ref};
 use crate::palette::{Color15, Palette};
 use crate::rom::Rom;
+use crate::video::{BossScene, LAYER_BITS, Layer1, Layer3, Screen, SpriteObject, Window};
 
 /// Number of 8x8 tiles addressable by a tilemap word.
 pub const LAYER_TILE_COUNT: usize = 0x400;
@@ -77,6 +78,27 @@ impl LayerTiles {
     }
 }
 
+/// The opaque pixels of an 8x8 tile as (`dx`, `dy`, value), where they
+/// land once the tile is flipped. Colour 0 is transparent.
+fn tile_pixels(
+    tile: &Tile8,
+    flip_x: bool,
+    flip_y: bool,
+) -> impl Iterator<Item = (usize, usize, u8)> + '_ {
+    tile.pixels.iter().enumerate().flat_map(move |(ty, line)| {
+        line.iter()
+            .enumerate()
+            .filter(|&(_, &px)| px != 0)
+            .map(move |(tx, &px)| {
+                (
+                    if flip_x { 7 - tx } else { tx },
+                    if flip_y { 7 - ty } else { ty },
+                    px,
+                )
+            })
+    })
+}
+
 /// Draws one 8x8 tile. Colour 0 is transparent.
 pub fn draw_tile8(
     img: &mut RgbImage,
@@ -87,15 +109,8 @@ pub fn draw_tile8(
     flip_x: bool,
     flip_y: bool,
 ) {
-    for (ty, line) in tile.pixels.iter().enumerate() {
-        for (tx, &px) in line.iter().enumerate() {
-            if px == 0 {
-                continue;
-            }
-            let dx = if flip_x { 7 - tx } else { tx } as u32;
-            let dy = if flip_y { 7 - ty } else { ty } as u32;
-            img.put(x + dx, y + dy, row[px as usize]);
-        }
+    for (dx, dy, px) in tile_pixels(tile, flip_x, flip_y) {
+        img.put(x + dx as u32, y + dy as u32, row[px as usize]);
     }
 }
 
@@ -103,7 +118,8 @@ pub fn draw_tile8(
 /// (1), layer 3 high (3), layer 2 low (5), layer 1 low (6), layer 2 high
 /// (8), layer 1 high (9). Objects with priority 0-3 slot in at 2, 4, 7,
 /// and 10. With the BG3 priority bit, high-priority layer 3 moves in
-/// front of everything (11). Zero is transparent.
+/// front of everything (11). Mode 7's single layer sits between object
+/// priorities 0 and 1 (3). Zero is transparent.
 pub const LAYER3_LOW: u8 = 1;
 pub const LAYER3_HIGH: u8 = 3;
 pub const LAYER2_LOW: u8 = 5;
@@ -111,6 +127,7 @@ pub const LAYER1_LOW: u8 = 6;
 pub const LAYER2_HIGH: u8 = 8;
 pub const LAYER1_HIGH: u8 = 9;
 pub const LAYER3_FRONT: u8 = 11;
+pub const MODE7_LAYER1: u8 = 3;
 pub const OBJECT_PRIORITIES: [u8; 4] = [2, 4, 7, 10];
 
 /// One pixel of one layer: its CGRAM colour (0 is transparent, as on the
@@ -126,12 +143,21 @@ pub const BG1: usize = 0;
 pub const BG2: usize = 1;
 pub const BG3: usize = 2;
 pub const OBJ: usize = 3;
-/// Each layer's bit in `TM`, `TS`, and `CGADSUB`.
-const LAYER_BITS: [u8; 4] = [0x01, 0x02, 0x04, 0x10];
 /// The backdrop's bit in `CGADSUB`.
 const BACKDROP_BIT: u8 = 0x20;
 /// Objects using sprite palettes 0-3 never take part in colour math.
 const FIRST_MATH_OBJECT_COLOR: u8 = 0xC0;
+
+/// How a background layer's tiles go into [`LevelLayers`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct LayerStyle {
+    layer: usize,
+    /// Stacking priority of tiles without and with the priority bit.
+    priorities: [u8; 2],
+    /// ORed into every tile's palette row, as the game's upload routine
+    /// does for layer 2 objects in object tileset 3.
+    palette_mask: u8,
+}
 
 /// A level drawn layer by layer, before the PPU's screen designation and
 /// colour math combine the layers into a picture. Layer 1, layer 2,
@@ -197,17 +223,31 @@ impl LevelLayers {
     /// whose layer is enabled in `CGADSUB` are added to or subtracted from
     /// the subscreen's topmost pixel, or the fixed colour where the
     /// subscreen is transparent (in which case the result is not halved).
-    /// Objects on sprite palettes 0-3 are exempt. No colour window is
-    /// modelled.
-    pub fn compose(&self, palette: &Palette, screen: &crate::video::Screen) -> RgbImage {
+    /// Objects on sprite palettes 0-3 are exempt.
+    ///
+    /// `window` is in screen coordinates, so it is for layers that are one
+    /// fixed screen (a boss arena): it hides the main-screen layers it
+    /// masks and is the colour window `CGWSEL` clips and prevents math
+    /// against. Without one, every pixel is outside the colour window.
+    pub fn compose(&self, palette: &Palette, screen: &Screen, window: Option<&Window>) -> RgbImage {
         let mut img = RgbImage::new(self.width, self.height);
-        let prevented = screen.prevents_math();
-        let clipped = screen.clips_to_black();
         let add_subscreen = screen.math_select & 0x02 != 0;
         let halve = screen.color_math & 0x40 != 0;
         let subtract = screen.color_math & 0x80 != 0;
         for (at, out) in img.pixels.iter_mut().enumerate() {
-            let (color, bit, exempt) = match self.pick(screen.main, at) {
+            let (mut main_layers, mut in_window) = (screen.main, false);
+            if let Some(window) = window {
+                let (x, y) = (at % self.width as usize, at / self.width as usize);
+                for (layer, bit) in LAYER_BITS.iter().enumerate() {
+                    if window.masks_main(layer, x, y) {
+                        main_layers &= !bit;
+                    }
+                }
+                in_window = window.color(x, y);
+            }
+            let prevented = screen.prevents_math(in_window);
+            let clipped = screen.clips_to_black(in_window);
+            let (color, bit, exempt) = match self.pick(main_layers, at) {
                 Some((layer, p)) => (
                     palette.colors[p.color as usize],
                     LAYER_BITS[layer],
@@ -249,29 +289,40 @@ fn color_math(main: Color15, operand: Color15, subtract: bool, halve: bool) -> C
     )
 }
 
-/// Draws one 8x8 tile into a background layer: pixel value `p` becomes
-/// CGRAM colour `color_base + p`.
-#[allow(clippy::too_many_arguments)]
-fn draw_tile8_layer(
-    layers: &mut LevelLayers,
-    layer: usize,
-    x: i32,
-    y: i32,
-    tile: &Tile8,
-    color_base: u8,
-    priority: u8,
-    flip_x: bool,
-    flip_y: bool,
-) {
-    for (ty, line) in tile.pixels.iter().enumerate() {
-        for (tx, &px) in line.iter().enumerate() {
-            if px == 0 {
-                continue;
+impl LevelLayers {
+    /// Draws the 8x8 tile a reference names into a background layer, in
+    /// the palette row and at the priority the reference selects.
+    fn draw_tile_ref(
+        &mut self,
+        style: LayerStyle,
+        x: i32,
+        y: i32,
+        r: Tile8Ref,
+        tiles: &LayerTiles,
+    ) {
+        let color_base = ((r.palette() | style.palette_mask) & 7) * 16;
+        let priority = style.priorities[r.priority() as usize];
+        for (dx, dy, px) in tile_pixels(tiles.get(r.tile()), r.flip_x(), r.flip_y()) {
+            if let Some(at) = self.index(x + dx as i32, y + dy as i32) {
+                self.put(style.layer, at, color_base + px, priority);
             }
-            let dx = if flip_x { 7 - tx } else { tx } as i32;
-            let dy = if flip_y { 7 - ty } else { ty } as i32;
-            if let Some(at) = layers.index(x + dx, y + dy) {
-                layers.put(layer, at, color_base + px, priority);
+        }
+    }
+
+    /// Draws a 16x16 tile into a background layer at pixel position
+    /// (`x`, `y`), quadrant by quadrant.
+    fn draw_map16(
+        &mut self,
+        style: LayerStyle,
+        x: i32,
+        y: i32,
+        tile: &Map16Tile,
+        tiles: &LayerTiles,
+    ) {
+        for qy in 0..2 {
+            for qx in 0..2 {
+                let r = tile.quadrant(qx, qy);
+                self.draw_tile_ref(style, x + 8 * qx as i32, y + 8 * qy as i32, r, tiles);
             }
         }
     }
@@ -288,40 +339,6 @@ pub fn draw_tile_ref(
 ) {
     let row = palette.row_rgb8(r.palette() as usize);
     draw_tile8(img, x, y, tiles.get(r.tile()), &row, r.flip_x(), r.flip_y());
-}
-
-/// Draws a 16x16 tile into a layer at pixel position (`x`, `y`), each
-/// quadrant at the low or high priority its priority bit selects.
-/// `palette_mask` is ORed into the palette row, as the game's upload
-/// routine does for layer 2 objects in object tileset 3.
-#[allow(clippy::too_many_arguments)]
-fn draw_map16_layer(
-    layers: &mut LevelLayers,
-    layer: usize,
-    priorities: [u8; 2],
-    x: i32,
-    y: i32,
-    tile: &Map16Tile,
-    tiles: &LayerTiles,
-    palette_mask: u8,
-) {
-    for qy in 0..2 {
-        for qx in 0..2 {
-            let r = tile.quadrant(qx, qy);
-            let color_base = ((r.palette() | palette_mask) & 7) * 16;
-            draw_tile8_layer(
-                layers,
-                layer,
-                x + 8 * qx as i32,
-                y + 8 * qy as i32,
-                tiles.get(r.tile()),
-                color_base,
-                priorities[r.priority() as usize],
-                r.flip_x(),
-                r.flip_y(),
-            );
-        }
-    }
 }
 
 /// Draws a 16x16 tile at pixel position (`x`, `y`).
@@ -371,11 +388,12 @@ pub fn level_image(level: &LoadedLevel, layer_tiles: &LayerTiles, palette: &Pale
 }
 
 /// Draws a level's background layers, ready for sprites to be added
-/// before [`compose_level`] turns them into a picture. Boss arenas have
-/// their own drawing path and get empty layers.
+/// before [`compose_level`] turns them into a picture. A boss arena is
+/// one fixed screen, drawn from its captured video-mode bands with the
+/// objects of its drawing pass.
 pub fn level_layers(level: &LoadedLevel, layer_tiles: &LayerTiles) -> LevelLayers {
-    if level.scene.boss.is_some() {
-        return LevelLayers::new(256, 224);
+    if let Some(scene) = &level.scene.boss {
+        return boss_layers(scene, &level.video.vram);
     }
     let (w, h) = level.tiles.size();
     let mut layers = LevelLayers::new(w as u32 * 16, h as u32 * 16);
@@ -392,37 +410,25 @@ pub fn level_layers(level: &LoadedLevel, layer_tiles: &LayerTiles) -> LevelLayer
     layers
 }
 
-/// Turns drawn layers into the picture the level shows. Boss arenas are
-/// rendered from their captured video-mode bands instead.
+/// Turns drawn layers into the picture the level shows. Only a boss
+/// arena, being one fixed screen, has a window to apply.
 pub fn compose_level(level: &LoadedLevel, layers: &LevelLayers, palette: &Palette) -> RgbImage {
-    let screen = &level.scene.screen;
-    match &level.scene.boss {
-        Some(scene) => boss_image(
-            scene,
-            &level.video.vram,
-            palette,
-            screen.fixed_color.to_rgb8(),
-        ),
-        None => layers.compose(palette, screen),
-    }
+    let window = level.scene.boss.as_ref().map(|scene| &scene.window);
+    layers.compose(palette, &level.scene.screen, window)
 }
 
 /// Draws the layer 1 tile grid.
 fn draw_layer1(layers: &mut LevelLayers, tiles: &LevelTiles, layer_tiles: &LayerTiles) {
+    let style = LayerStyle {
+        layer: BG1,
+        priorities: [LAYER1_LOW, LAYER1_HIGH],
+        palette_mask: 0,
+    };
     let (w, h) = tiles.size();
     for y in 0..h {
         for x in 0..w {
             if let Some(tile) = tiles.map16_at(tiles.tile_at(x, y), x, y) {
-                draw_map16_layer(
-                    layers,
-                    BG1,
-                    [LAYER1_LOW, LAYER1_HIGH],
-                    (x * 16) as i32,
-                    (y * 16) as i32,
-                    tile,
-                    layer_tiles,
-                    0,
-                );
+                layers.draw_map16(style, (x * 16) as i32, (y * 16) as i32, tile, layer_tiles);
             }
         }
     }
@@ -436,7 +442,8 @@ fn draw_layer1(layers: &mut LevelLayers, tiles: &LevelTiles, layer_tiles: &Layer
 /// screen of the level shows the same fixed backdrop; vertically it stays
 /// inside the entry screen's 224-pixel band, where a tide sits while the
 /// camera rests.
-fn draw_layer3(layers: &mut LevelLayers, layer3: &crate::video::Layer3, vram: &[u8]) {
+fn draw_layer3(layers: &mut LevelLayers, layer3: &Layer3, vram: &[u8]) {
+    let tilemap = Tilemap::layer3(layer3);
     let priority_bit = layer3.high_priority_in_front();
     for ly in 0..layers.height {
         let Some(ty) = layer3_axis(layer3, 1, ly as i32) else {
@@ -446,7 +453,7 @@ fn draw_layer3(layers: &mut LevelLayers, layer3: &crate::video::Layer3, vram: &[
             let Some(tx) = layer3_axis(layer3, 0, lx as i32) else {
                 continue;
             };
-            let Some((color, high)) = layer3_pixel(vram, layer3, tx, ty) else {
+            let Some((color, high)) = tilemap.pixel(vram, tx, ty) else {
                 continue;
             };
             let priority = match (high, priority_bit) {
@@ -462,7 +469,7 @@ fn draw_layer3(layers: &mut LevelLayers, layer3: &crate::video::Layer3, vram: &[
 
 /// Layer 3 tilemap coordinate shown at a level coordinate along one axis
 /// (0 horizontal, 1 vertical), or `None` where the layer is not drawn.
-fn layer3_axis(layer3: &crate::video::Layer3, axis: usize, at: i32) -> Option<i32> {
+fn layer3_axis(layer3: &Layer3, axis: usize, at: i32) -> Option<i32> {
     let position = layer3.position[axis] as i32;
     let offset = at - layer3.camera[axis] as i32;
     if layer3.scroll_per_16[axis] != 0 {
@@ -474,29 +481,80 @@ fn layer3_axis(layer3: &crate::video::Layer3, axis: usize, at: i32) -> Option<i3
     }
 }
 
-/// Colour index (1-31) and priority of a layer 3 tilemap pixel, or `None`
-/// where it is transparent. Mode 1's layer 3 is 2bpp with 8x8 tiles.
-fn layer3_pixel(vram: &[u8], layer3: &crate::video::Layer3, x: i32, y: i32) -> Option<(u8, bool)> {
-    let (x, y) = (x.rem_euclid(512) as usize, y.rem_euclid(512) as usize);
-    let wide = (layer3.tilemap as usize & 1) + 1;
-    let tall = ((layer3.tilemap as usize >> 1) & 1) + 1;
-    let col = (x / 8) % (32 * wide);
-    let row = (y / 8) % (32 * tall);
-    let at = ((layer3.tilemap as usize >> 2) << 11)
-        + (row / 32 * wide + col / 32) * 0x800
-        + (row % 32 * 32 + col % 32) * 2;
-    let tile = Tile8Ref(u16::from_le_bytes([
-        video_byte(vram, at),
-        video_byte(vram, at + 1),
-    ]));
-    let px = if tile.flip_x() { 7 - x % 8 } else { x % 8 };
-    let py = if tile.flip_y() { 7 - y % 8 } else { y % 8 };
-    let start = layer3.character_base as usize + tile.tile() as usize * 16 + py * 2;
-    let mut color = 0;
-    for plane in 0..2 {
-        color |= ((video_byte(vram, start + plane) >> (7 - px)) & 1) << plane;
+/// A background layer's tilemap and character data, as the PPU's
+/// registers describe them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Tilemap {
+    /// `BGnSC`: tilemap base and size.
+    screens: u8,
+    /// Byte address of the character data in VRAM.
+    character_base: usize,
+    bpp: Bpp,
+    /// Tile side in pixels: 8, or 16 with the layer's `BGMODE` size bit.
+    tile_side: usize,
+}
+
+impl Tilemap {
+    /// Mode 1's layer 3: 2bpp with 8x8 tiles.
+    fn layer3(layer3: &Layer3) -> Self {
+        Self {
+            screens: layer3.tilemap,
+            character_base: layer3.character_base as usize,
+            bpp: Bpp::Two,
+            tile_side: 8,
+        }
     }
-    (color != 0).then_some((color + tile.palette() * 4, tile.priority()))
+
+    /// Mode 1's layer 1: 4bpp.
+    fn layer1(layer: &Layer1) -> Self {
+        Self {
+            screens: layer.tilemap,
+            character_base: layer.character_base as usize,
+            bpp: Bpp::Four,
+            tile_side: if layer.mode & 0x10 != 0 { 16 } else { 8 },
+        }
+    }
+
+    /// CGRAM colour index relative to the layer's first palette and
+    /// priority bit of the pixel at a tilemap position (which wraps), or
+    /// `None` where it is transparent.
+    fn pixel(&self, vram: &[u8], x: i32, y: i32) -> Option<(u8, bool)> {
+        let side = self.tile_side;
+        let (x, y) = (
+            x.rem_euclid(64 * side as i32) as usize,
+            y.rem_euclid(64 * side as i32) as usize,
+        );
+        let wide = (self.screens as usize & 1) + 1;
+        let tall = ((self.screens as usize >> 1) & 1) + 1;
+        let col = (x / side) % (32 * wide);
+        let row = (y / side) % (32 * tall);
+        let at = ((self.screens as usize >> 2) << 11)
+            + (row / 32 * wide + col / 32) * 0x800
+            + (row % 32 * 32 + col % 32) * 2;
+        let tile = Tile8Ref(u16::from_le_bytes([
+            video_byte(vram, at),
+            video_byte(vram, at + 1),
+        ]));
+        let flip = |flipped: bool, n: usize| if flipped { side - 1 - n } else { n };
+        let (px, py) = (flip(tile.flip_x(), x % side), flip(tile.flip_y(), y % side));
+        // A 16x16 tile is four characters: the next one, and the row below.
+        let number = (tile.tile() as usize + px / 8 + py / 8 * 16) & 0x3FF;
+        let start = self.character_base + number * self.bpp.bytes_per_tile();
+        let color = character_pixel(vram, start, self.bpp, px % 8, py % 8);
+        (color != 0).then_some((
+            color + tile.palette() * self.bpp.colors() as u8,
+            tile.priority(),
+        ))
+    }
+}
+
+/// One pixel of an 8x8 character whose data starts at byte `start` of
+/// VRAM: planes 0 and 1 interleaved row by row, then planes 2 and 3.
+fn character_pixel(vram: &[u8], start: usize, bpp: Bpp, px: usize, py: usize) -> u8 {
+    (0..bpp.bits() as usize).fold(0, |color, plane| {
+        let bits = video_byte(vram, start + plane / 2 * 16 + py * 2 + plane % 2);
+        color | ((bits >> (7 - px)) & 1) << plane
+    })
 }
 
 /// Draws captured sprite objects into the object layer, front to back:
@@ -516,14 +574,11 @@ pub fn draw_sprite_scene(
     let [dx, dy] = layer2_offset;
     let repeated: Vec<_> = (0..=layers.width as i32 / 256 + 1)
         .flat_map(|screen| {
-            scene
-                .layer2_objects
-                .iter()
-                .map(move |o| crate::video::SpriteObject {
-                    x: (o.x + dx).rem_euclid(256) + (screen - 1) * 256,
-                    y: o.y + dy,
-                    ..*o
-                })
+            scene.layer2_objects.iter().map(move |o| SpriteObject {
+                x: (o.x + dx).rem_euclid(256) + (screen - 1) * 256,
+                y: o.y + dy,
+                ..*o
+            })
         })
         .collect();
     draw_objects(layers, &repeated, scene.object_select, vram);
@@ -534,70 +589,54 @@ pub fn draw_sprite_scene(
 /// Objects already in the layer stay in front of these.
 pub fn draw_objects(
     layers: &mut LevelLayers,
-    objects: &[crate::video::SpriteObject],
+    objects: &[SpriteObject],
     object_select: u8,
     vram: &[u8],
 ) {
     let sizes = crate::expand::object_sizes(object_select);
     for object in objects {
-        let (width, height) = sizes[object.large as usize];
+        let size = sizes[object.large as usize];
         let priority = OBJECT_PRIORITIES[(object.attr >> 4 & 3) as usize];
         let color_base = 128 + (object.attr >> 1 & 7) * 16;
-        for dy in 0..height {
-            for dx in 0..width {
+        for dy in 0..size.1 {
+            for dx in 0..size.0 {
                 let Some(at) = layers.index(object.x + dx, object.y + dy) else {
                     continue;
                 };
-                let Some(color) = object_pixel(
-                    vram,
-                    object_select,
-                    object.tile,
-                    object.attr,
-                    dx,
-                    dy,
-                    width,
-                    height,
-                ) else {
-                    continue;
-                };
-                layers.put_object(at, color_base + color, priority);
+                if let Some(color) = object_pixel(vram, object_select, object, size, dx, dy) {
+                    layers.put_object(at, color_base + color, priority);
+                }
             }
         }
     }
 }
 
-/// Colour index (1-15) of a pixel of an OAM object, or `None` where it is
-/// transparent. `dx`/`dy` are unflipped offsets within the object.
-#[allow(clippy::too_many_arguments)]
+/// Colour index (1-15) of a pixel of an OAM object of `size`, or `None`
+/// where it is transparent. `dx`/`dy` are unflipped offsets within the
+/// object.
 fn object_pixel(
     vram: &[u8],
     object_select: u8,
-    tile: u8,
-    attr: u8,
+    object: &SpriteObject,
+    (width, height): (i32, i32),
     dx: i32,
     dy: i32,
-    width: i32,
-    height: i32,
 ) -> Option<u8> {
+    let (tile, attr) = (object.tile as usize, object.attr);
     let tx = if attr & 0x40 != 0 { width - 1 - dx } else { dx } as usize;
     let ty = if attr & 0x80 != 0 {
         height - 1 - dy
     } else {
         dy
     } as usize;
-    let number = (((tile as usize & 0xF0) + ty / 8 * 16) & 0xF0) | ((tile as usize + tx / 8) & 15);
+    let number = (((tile & 0xF0) + ty / 8 * 16) & 0xF0) | ((tile + tx / 8) & 15);
     let base = ((object_select as usize & 7) << 14)
         + if attr & 1 != 0 {
             (((object_select as usize >> 3) & 3) + 1) * 0x2000
         } else {
             0
         };
-    let start = base + number * 32 + (ty % 8) * 2;
-    let mut color = 0;
-    for plane in 0..4 {
-        color |=
-            ((video_byte(vram, start + plane / 2 * 16 + plane % 2) >> (7 - tx % 8)) & 1) << plane;
-    }
+    let color = character_pixel(vram, base + number * 32, Bpp::Four, tx % 8, ty % 8);
     (color != 0).then_some(color)
 }
 
@@ -620,20 +659,18 @@ fn draw_layer2(
     [dx, dy]: [i32; 2],
     layer_tiles: &LayerTiles,
 ) {
-    let priorities = [LAYER2_LOW, LAYER2_HIGH];
-    // Boss arenas and dark rooms sharing their tilemap do not display the
-    // decoded background buffer.
-    let background = tiles.layer2_tilemap.is_some();
-    if background && matches!(tiles.level_mode, 0x09 | 0x0B | 0x0F | 0x10) {
-        return;
-    }
+    let background = tiles.shows_background();
     if !background && tiles.layer2_objects().is_none() {
         return;
     }
-    let palette_mask = if background {
-        0
-    } else {
-        tiles.layer2_palette_mask()
+    let style = LayerStyle {
+        layer: BG2,
+        priorities: [LAYER2_LOW, LAYER2_HIGH],
+        palette_mask: if background {
+            0
+        } else {
+            tiles.layer2_palette_mask()
+        },
     };
     let rows = tiles.layer2_bg_rows().min(crate::expand::SCREEN_ROWS) as i32;
     // Layer 2 tile (tx, ty) covers level pixels from (tx * 16 + dx, ty * 16 + dy).
@@ -654,167 +691,49 @@ fn draw_layer2(
                     .and_then(|n| tiles.map16_at(n, x, y))
             };
             if let Some(tile) = tile {
-                draw_map16_layer(
-                    layers,
-                    BG2,
-                    priorities,
-                    tx * 16 + dx,
-                    ty * 16 + dy,
-                    tile,
-                    layer_tiles,
-                    palette_mask,
-                );
+                layers.draw_map16(style, tx * 16 + dx, ty * 16 + dy, tile, layer_tiles);
             }
         }
     }
 }
 
 /// Fixed-screen arenas use the ROM's video-mode bands, not its collision
-/// Map16 grid. In particular, Mode 7 interleaves tile numbers in the low
-/// VRAM bytes and packed 8bpp pixels in the high bytes.
-fn boss_image(
-    scene: &crate::video::BossScene,
-    vram: &[u8],
-    palette: &Palette,
-    background: [u8; 3],
-) -> RgbImage {
-    let mut img = RgbImage::new(256, 224);
-    img.pixels.fill(background);
-    let colors = palette.colors.map(|color| color.to_rgb8());
-    let mut priorities = vec![0; img.pixels.len()];
-    for y in 0..224 {
+/// Map16 grid: layer 1 is whatever mode each band of the screen is in,
+/// and the objects are those of the arena's drawing pass. In particular,
+/// Mode 7 interleaves tile numbers in the low VRAM bytes and packed 8bpp
+/// pixels in the high bytes.
+fn boss_layers(scene: &BossScene, vram: &[u8]) -> LevelLayers {
+    let mut layers = LevelLayers::new(256, 224);
+    for y in 0..224usize {
         let Some(band) = scene.bands.iter().rev().find(|b| b.start <= y) else {
             continue;
         };
-        for x in 0..256 {
-            let [left, right] = scene.backdrop_window[y];
-            if x >= left as usize && x <= right as usize {
-                continue;
-            }
-            img.pixels[y * 256 + x] = [0; 3];
-            let color = match band.layer.mode & 7 {
-                7 => mode7_pixel(vram, &band.layer.mode7, x, y + 1).map(|color| (color, 3)),
-                1 => tilemap_pixel(vram, &band.layer, x, y + 1),
+        let layer = &band.layer;
+        let tilemap = Tilemap::layer1(layer);
+        for x in 0..256usize {
+            // The picture's first row is the PPU's scanline 1.
+            let pixel = match layer.mode & 7 {
+                7 => mode7_pixel(vram, &layer.mode7, x, y + 1).map(|color| (color, MODE7_LAYER1)),
+                1 => tilemap
+                    .pixel(
+                        vram,
+                        x as i32 + layer.scroll[0] as i32,
+                        y as i32 + 1 + layer.scroll[1] as i32,
+                    )
+                    .map(|(color, high)| (color, [LAYER1_LOW, LAYER1_HIGH][high as usize])),
                 _ => None,
             };
-            if let Some((color, priority)) = color {
-                img.pixels[y * 256 + x] = colors[color as usize];
-                priorities[y * 256 + x] = priority;
+            if let Some((color, priority)) = pixel {
+                layers.put(BG1, y * 256 + x, color, priority);
             }
         }
     }
-    draw_boss_objects(&mut img, &priorities, scene, vram, &colors);
-    img
-}
-
-fn draw_boss_objects(
-    img: &mut RgbImage,
-    bg_priorities: &[u8],
-    scene: &crate::video::BossScene,
-    vram: &[u8],
-    colors: &[[u8; 3]; 256],
-) {
-    let sizes = crate::expand::object_sizes(scene.object_select);
-    let mut covered = vec![false; img.pixels.len()];
-    for offset in 0..128 {
-        let object = (scene.first_object + offset) % 128;
-        let Some(bytes) = scene.oam.get(object * 4..object * 4 + 4) else {
-            continue;
-        };
-        let high = scene.oam.get(512 + object / 4).copied().unwrap_or(0) >> (2 * (object % 4));
-        let x = bytes[0] as i32 - if high & 1 != 0 { 256 } else { 0 };
-        let y = bytes[1] as i32;
-        let attr = bytes[3];
-        let (width, height) = sizes[(high & 2 != 0) as usize];
-        for dy in 0..height {
-            let sy = ((y + dy) & 255) as usize;
-            if sy >= 224 {
-                continue;
-            }
-            let Some(band) = scene.bands.iter().rev().find(|b| b.start <= sy) else {
-                continue;
-            };
-            let [left, right] = scene.backdrop_window[sy];
-            for dx in 0..width {
-                let sx = x + dx;
-                if !(0..256).contains(&sx) || (sx >= left as i32 && sx <= right as i32) {
-                    continue;
-                }
-                let at = sy * 256 + sx as usize;
-                if covered[at] {
-                    continue;
-                }
-                let Some(color) = object_pixel(
-                    vram,
-                    scene.object_select,
-                    bytes[2],
-                    attr,
-                    dx,
-                    dy,
-                    width,
-                    height,
-                ) else {
-                    continue;
-                };
-                covered[at] = true;
-                let priority = if band.layer.mode & 7 == 7 {
-                    [2, 4, 6, 7]
-                } else {
-                    OBJECT_PRIORITIES
-                }[(attr >> 4 & 3) as usize];
-                if priority > bg_priorities[at] {
-                    img.pixels[at] = colors[128 + (attr as usize >> 1 & 7) * 16 + color as usize];
-                }
-            }
-        }
-    }
+    draw_objects(&mut layers, &scene.objects, scene.object_select, vram);
+    layers
 }
 
 fn video_byte(vram: &[u8], address: usize) -> u8 {
     vram.get(address & 0xFFFF).copied().unwrap_or(0)
-}
-
-fn tilemap_pixel(
-    vram: &[u8],
-    layer: &crate::video::Layer1,
-    x: usize,
-    y: usize,
-) -> Option<(u8, u8)> {
-    let side = if layer.mode & 0x10 != 0 { 16 } else { 8 };
-    let x = x + layer.scroll[0] as usize;
-    let y = y + layer.scroll[1] as usize;
-    let wide = (layer.tilemap as usize & 1) + 1;
-    let tall = ((layer.tilemap as usize >> 1) & 1) + 1;
-    let col = (x / side) % (32 * wide);
-    let row = (y / side) % (32 * tall);
-    let at = ((layer.tilemap as usize >> 2) << 11)
-        + (row / 32 * wide + col / 32) * 0x800
-        + (row % 32 * 32 + col % 32) * 2;
-    let tile = Tile8Ref(u16::from_le_bytes([
-        video_byte(vram, at),
-        video_byte(vram, at + 1),
-    ]));
-    let px = if tile.flip_x() {
-        side - 1 - x % side
-    } else {
-        x % side
-    };
-    let py = if tile.flip_y() {
-        side - 1 - y % side
-    } else {
-        y % side
-    };
-    let number = (tile.tile() as usize + px / 8 + py / 8 * 16) & 0x3FF;
-    let start = layer.character_base as usize + number * 32 + (py % 8) * 2;
-    let mut color = 0;
-    for plane in 0..4 {
-        let bits = video_byte(vram, start + (plane / 2) * 16 + plane % 2);
-        color |= ((bits >> (7 - px % 8)) & 1) << plane;
-    }
-    (color != 0).then_some((
-        color + tile.palette() * 16,
-        if tile.priority() { 9 } else { 6 },
-    ))
 }
 
 fn mode7_pixel(vram: &[u8], mode: &crate::video::Mode7, x: usize, y: usize) -> Option<u8> {
@@ -920,7 +839,7 @@ pub fn palette_swatch(palette: &Palette, cell: u32) -> RgbImage {
 #[cfg(test)]
 mod video_tests {
     use super::*;
-    use crate::video::{Band, BossScene, Layer1, Mode7};
+    use crate::video::{Band, Mode7};
 
     #[test]
     fn mode7_interleaving_transform_and_overflow() {
@@ -965,14 +884,15 @@ mod video_tests {
         // Second horizontal screen, tile 2, palette 3, high priority, both flips.
         vram[0xB800..0xB802].copy_from_slice(&0xEC02u16.to_le_bytes());
         vram[0xE000 + 2 * 32 + 14] = 1;
-        assert_eq!(tilemap_pixel(&vram, &layer, 256, 0), Some((49, 9)));
-        assert_eq!(tilemap_pixel(&vram, &layer, 257, 0), None);
-        assert_eq!(tilemap_pixel(&vram, &layer, 768, 0), Some((49, 9)));
+        let tilemap = Tilemap::layer1(&layer);
+        assert_eq!(tilemap.pixel(&vram, 256, 0), Some((49, true)));
+        assert_eq!(tilemap.pixel(&vram, 257, 0), None);
+        assert_eq!(tilemap.pixel(&vram, 768, 0), Some((49, true)));
     }
 
     #[test]
     fn layer3_axes_continue_the_entry_view_or_keep_the_screen() {
-        let mut layer3 = crate::video::Layer3 {
+        let mut layer3 = Layer3 {
             position: [100, 64],
             camera: [32, 192],
             scroll_per_16: [8, 0],
@@ -1041,13 +961,12 @@ mod video_tests {
 
     #[test]
     fn compose_follows_screen_designation_and_color_math() {
-        use crate::video::Screen;
         let (layers, palette) = layers();
         let fixed = Color15::from_rgb5(8, 8, 8);
         // Vanilla: layer 2 on the subscreen shows through the backdrop only.
         let screen = Screen::vanilla(fixed);
         assert_eq!(
-            rgb5(&layers.compose(&palette, &screen)),
+            rgb5(&layers.compose(&palette, &screen, None)),
             [[8, 8, 8], [31, 0, 0], [0, 0, 31], [0, 31, 0], [0, 31, 0]]
         );
         // Half-brightness modes: objects and the backdrop halve with layer
@@ -1058,7 +977,7 @@ mod video_tests {
             ..screen
         };
         assert_eq!(
-            rgb5(&layers.compose(&palette, &half)),
+            rgb5(&layers.compose(&palette, &half, None)),
             [[8, 8, 8], [31, 0, 0], [0, 0, 15], [0, 31, 0], [8, 31, 8]]
         );
         // The spotlight rooms subtract the fixed colour from everything and
@@ -1072,7 +991,7 @@ mod video_tests {
             fixed_color: fixed,
         };
         assert_eq!(
-            rgb5(&layers.compose(&palette, &dark)),
+            rgb5(&layers.compose(&palette, &dark, None)),
             [[0, 0, 0], [11, 0, 0], [0, 0, 11], [0, 31, 0], [0, 11, 0]]
         );
         // Clipping to black and preventing math everywhere.
@@ -1080,7 +999,7 @@ mod video_tests {
             math_select: 0xF2,
             ..screen
         };
-        assert_eq!(rgb5(&layers.compose(&palette, &clipped)), [[0; 3]; 5]);
+        assert_eq!(rgb5(&layers.compose(&palette, &clipped, None)), [[0; 3]; 5]);
         // Level mode $1E: only layer 1 on the main screen, added to the
         // objects and layer 2 beneath it.
         let translucent = Screen {
@@ -1091,7 +1010,7 @@ mod video_tests {
             fixed_color: fixed,
         };
         assert_eq!(
-            rgb5(&layers.compose(&palette, &translucent)),
+            rgb5(&layers.compose(&palette, &translucent, None)),
             [[8, 8, 8], [31, 0, 31], [0, 0, 31], [0, 31, 0], [0, 31, 0]]
         );
     }
@@ -1099,28 +1018,36 @@ mod video_tests {
     #[test]
     fn layer3_pixels_come_from_the_2bpp_tilemap_with_flips() {
         let mut vram = vec![0; 0x10000];
-        let layer3 = crate::video::Layer3 {
+        let tilemap = Tilemap::layer3(&Layer3 {
             tilemap: 0x53,
             character_base: 0x8000,
             ..Default::default()
-        };
+        });
         // Tile 2, palette 3, high priority, X flip, at column 1 of the
         // bottom-left 32x32 screen (row 32).
         let word: u16 = 0x2002 | (3 << 10) | 0x4000;
         vram[0xB000 + 2..0xB000 + 4].copy_from_slice(&word.to_le_bytes());
         vram[0x8000 + 2 * 16] = 0x80; // plane 0, row 0, leftmost pixel
         vram[0x8000 + 2 * 16 + 1] = 0x80; // plane 1
-        assert_eq!(layer3_pixel(&vram, &layer3, 15, 256), Some((15, true)));
-        assert_eq!(layer3_pixel(&vram, &layer3, 8, 256), None);
-        assert_eq!(
-            layer3_pixel(&vram, &layer3, 15 + 512, 256 + 512),
-            Some((15, true))
-        );
+        assert_eq!(tilemap.pixel(&vram, 15, 256), Some((15, true)));
+        assert_eq!(tilemap.pixel(&vram, 8, 256), None);
+        assert_eq!(tilemap.pixel(&vram, 15 + 512, 256 + 512), Some((15, true)));
+        assert_eq!(tilemap.pixel(&vram, 15 - 512, 256), Some((15, true)));
     }
 
-    #[test]
-    fn objects_respect_oam_order_signed_x_background_priority_and_window() {
-        let mut scene = BossScene {
+    /// An arena in one Mode 1 band with two 8x8 objects on sprite palette
+    /// 0, tile 2 (colour 129, red) at x = -1 and tile 3 (colour 130, green,
+    /// priority 3) at x = 0, and the game's window setup: BG1 and objects
+    /// masked inside window 1, colour math prevented outside it.
+    fn arena() -> (BossScene, Vec<u8>, Palette, Screen) {
+        let object = |x, tile, attr| SpriteObject {
+            x,
+            y: 0,
+            tile,
+            attr,
+            large: false,
+        };
+        let scene = BossScene {
             bands: vec![Band {
                 start: 0,
                 layer: Layer1 {
@@ -1128,33 +1055,81 @@ mod video_tests {
                     ..Layer1::default()
                 },
             }],
-            backdrop_window: vec![[1, 0]; 224],
-            oam: vec![0; 544],
+            window: Window {
+                rows: vec![[1, 0]; 224],
+                main_mask: 0x11,
+                select: [0x02, 0x00, 0x32],
+            },
+            objects: vec![object(-1, 2, 0x00), object(0, 3, 0x30)],
             object_select: 0,
-            first_object: 0,
         };
-        for object in scene.oam[..512].as_chunks_mut::<4>().0 {
-            object[1] = 240;
-        }
-        scene.oam[..8].copy_from_slice(&[255, 0, 0, 0, 0, 0, 1, 0x30]);
-        scene.oam[512] = 1; // First sprite at x=-1, second at x=0.
         let mut vram = vec![0; 0x10000];
+        vram[2 * 32] = 0xFF; // Object tile 2, top row, plane 0.
+        vram[3 * 32 + 1] = 0xFF; // Object tile 3, top row, plane 1.
+        let mut palette = Palette::default();
+        palette.colors[129] = Color15::from_rgb5(31, 0, 0);
+        palette.colors[130] = Color15::from_rgb5(0, 31, 0);
+        let screen = Screen {
+            main: 0x15,
+            sub: 0x00,
+            color_math: 0x20,
+            math_select: 0x20,
+            fixed_color: Color15::from_rgb5(0, 0, 31),
+        };
+        (scene, vram, palette, screen)
+    }
+
+    #[test]
+    fn arena_objects_respect_oam_order_signed_x_and_the_window() {
+        let (mut scene, vram, palette, screen) = arena();
+        scene.window.rows[0] = [2, 2];
+        let picture = |scene: &BossScene| {
+            let layers = boss_layers(scene, &vram);
+            rgb5(&layers.compose(&palette, &screen, Some(&scene.window)))
+        };
+        let row = picture(&scene);
+        assert_eq!(row[0], [31, 0, 0]);
+        assert_eq!(row[1], [31, 0, 0]); // First in OAM blocks the higher-priority second.
+        assert_eq!(row[2], [0, 0, 31]); // The window masks both and shows the back area.
+        assert_eq!(row[7], [0, 31, 0]); // Signed X clips the first object.
+        assert_eq!(row[8], [0, 0, 0]); // Outside the window the backdrop stays black.
+        scene.objects.reverse();
+        assert_eq!(picture(&scene)[1], [0, 31, 0]);
+    }
+
+    #[test]
+    fn arena_layer_1_stacks_by_band_mode() {
+        let (mut scene, mut vram, mut palette, screen) = arena();
+        palette.colors[1] = Color15::from_rgb5(31, 31, 31);
+        // Mode 1: the empty tilemap at word $1000 shows character 0, whose
+        // top row is solid colour 1. Without its priority bit it covers
+        // object priority 0 and is covered by priority 3.
         vram[0] = 0xFF;
-        vram[32 + 1] = 0xFF;
-        let mut colors = [[0; 3]; 256];
-        colors[129] = [255, 0, 0];
-        colors[130] = [0, 255, 0];
-        let mut priorities = vec![0; 256 * 224];
-        priorities[1] = 6;
-        scene.backdrop_window[0] = [2, 2];
-        let mut img = RgbImage::new(256, 224);
-        draw_boss_objects(&mut img, &priorities, &scene, &vram, &colors);
-        assert_eq!(img.pixels[0], colors[129]);
-        assert_eq!(img.pixels[1], [0; 3]); // First OAM sprite blocks the higher-priority second.
-        assert_eq!(img.pixels[2], [0; 3]); // Window masks both sprites.
-        assert_eq!(img.pixels[7], colors[130]); // Signed X clips the first sprite.
-        scene.first_object = 1;
-        draw_boss_objects(&mut img, &priorities, &scene, &vram, &colors);
-        assert_eq!(img.pixels[1], colors[130]);
+        scene.objects[0].x = 8;
+        scene.objects[1].x = 16;
+        scene.bands[0].layer.tilemap = 0x10;
+        scene.bands[0].layer.scroll = [0, 0xFFFF]; // Scanline 1 is tilemap row 0.
+        let layers = boss_layers(&scene, &vram);
+        let row = rgb5(&layers.compose(&palette, &screen, Some(&scene.window)));
+        assert_eq!(row[0], [31, 31, 31]);
+        assert_eq!(row[8], [31, 31, 31]);
+        assert_eq!(row[16], [0, 31, 0]);
+        // Mode 7: the first pixel of tile 0 is colour 1, and the layer sits
+        // between object priorities 0 and 1.
+        scene.bands[0].layer.mode = 7;
+        scene.bands[0].layer.mode7.matrix = [256, 0, 0, 256];
+        scene.bands[0].layer.mode7.scroll = [0, 0x1FFF];
+        scene.objects[0].x = 0;
+        scene.objects[1] = SpriteObject {
+            x: 8,
+            attr: 0x10,
+            ..scene.objects[1]
+        };
+        vram[0] = 0;
+        vram[1] = 1;
+        let layers = boss_layers(&scene, &vram);
+        let row = rgb5(&layers.compose(&palette, &screen, Some(&scene.window)));
+        assert_eq!(row[0], [31, 31, 31]); // Over object priority 0.
+        assert_eq!(row[8], [0, 31, 0]); // Under object priority 1.
     }
 }

@@ -9,6 +9,7 @@ use crate::expand::{self, Diagnostic, ExpandError, LoadedLevel};
 use crate::image::RgbImage;
 use crate::rom::Rom;
 use crate::sprites::{self, SpriteError};
+use crate::video::UndrawnSprite;
 
 /// How a level's sprites are shown.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -85,14 +86,18 @@ pub fn render_loaded(
 ) -> Result<(RgbImage, Vec<Diagnostic>), RenderError> {
     let video = &level.video;
     let mut layers = level_layers(level, &LayerTiles::from_vram(&video.vram));
-    let mut markers: Vec<(usize, usize, u8)> = Vec::new();
+    let mut markers: Vec<UndrawnSprite> = Vec::new();
     let mut diagnostics = Vec::new();
     if options.sprites != Sprites::Hidden && level.scene.boss.is_none() {
         let list = sprites::read_sprites_at(rom, level.sprite_data_ptr())?;
         if options.sprites == Sprites::Markers {
             markers.extend(list.sprites.iter().map(|sprite| {
                 let (x, y) = sprite.tile_position(level.tiles.vertical);
-                (x, y, sprite.id)
+                UndrawnSprite {
+                    x,
+                    y,
+                    id: sprite.id,
+                }
             }));
         } else {
             let scene = expand::capture_sprites(rom, level, &list)?;
@@ -117,7 +122,7 @@ pub fn render_loaded(
         );
     }
     let mut image = compose_level(level, &layers, &video.palette());
-    for (x, y, id) in markers {
+    for UndrawnSprite { x, y, id } in markers {
         draw_sprite_marker(&mut image, x as u32 * 16, y as u32 * 16, id, &video.vram);
     }
     Ok((image, diagnostics))
