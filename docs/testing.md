@@ -50,9 +50,10 @@ how each oracle is produced, where its data lives, and what is known not to matc
   check is the reference ROM from [sa1.md](sa1.md) against the vanilla ROM with
   `render_hashes`: the marker column must match on every level but the three boss arenas,
   and the known differences in the drawn column are listed in
-  [known-gaps.md](known-gaps.md). `Super Diagonal Mario 2` is the corpus's one SA-1 hack;
-  all 512 levels render without a diagnostic, which says the code ran, not that the
-  pictures are right.
+  [known-gaps.md](known-gaps.md). The corpus has 39 SA-1 hacks: `Super Diagonal Mario 2`
+  and 38 QLDC 2021 and 2022 entries, which are BPS patches and have to be applied first.
+  `render_hashes` on each says whether the code ran, not whether the pictures are right: 33
+  render all 512 levels, and the rest are in [known-gaps.md](known-gaps.md).
 - **Picture hashes**: `cargo run --release --example render_hashes -- rom.smc` prints a SHA-1
   of every level's picture, with sprites drawn and again as markers without the player. A
   change to `expand` or `render` that should leave every picture alone is checked by diffing

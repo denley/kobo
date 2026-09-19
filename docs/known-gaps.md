@@ -34,6 +34,11 @@ What a rendered level does not reproduce, and what the tooling does not handle.
   use could explain but nothing has shown; a fault in the SA-1 model would look the same.
   Boss arenas (`098`, `0D9`, `198`) differ in their flames. OAM is still read starting from
   `$3F`, which SA-1 Pack no longer applies, so overlapping objects in an arena may be in
-  the wrong order. Images over 4 MiB and code using SA-1 DMA or character conversion are
-  not handled.
+  the wrong order. Images over 4 MiB fail on every level, in code running from banks
+  `$C0`-`$FF` (QLDC 2021 `24_HD_DankBaron`, `70_DPBOX`, `79_Hwailaluta`): the Super MMC is
+  not modelled. Three QLDC 2021 entries fail in the Mode 7 boss rooms and nowhere else
+  (`62_Rykon-V73` and `84_TickTockClock` in the same 21 levels with a jump to `$000000`,
+  `76_Bench-kun` in 18 with a `COP`); the same rooms load in the other SA-1 hacks, and
+  whether these use something unmodelled or are broken in the hacks is not known. Code
+  using SA-1 DMA or character conversion is not handled.
 - `GFX27`'s layout is unknown; `GFX32`/`GFX33` are not handled by the GFX tooling.
