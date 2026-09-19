@@ -65,12 +65,13 @@ should land before; later steps would otherwise build on the shape it fixes.
 
 Before finishing step 1 (SA-1):
 
-- **SA-1 itself.** A second `Cpu` instance, not a second core: the SA-1 is a 65816. Needs its
-  register block, I-RAM and BW-RAM in `Ram`, its arithmetic registers, a synchronous hand-off
-  between the processors (run the other to completion when one triggers it and waits), a
-  `RamMap` variant for SA-1 Pack's remap with 22 sprite slots, and a processor choice on
-  `expand::machine::Call`. `tools/oracle/dump_levels.lua` reads `$7E` addresses directly and
-  needs the same map before Mesen can be the oracle for SA-1 ROMs.
+- **An emulator oracle for SA-1 ROMs.** The SA-1 itself is in (`docs/sa1.md`), checked only
+  against the vanilla ROM. `tools/oracle/dump_levels.lua` reads `$7E` addresses directly and
+  needs `RamMap::Sa1Pack`'s map before Mesen can say whether the differences listed in
+  `docs/known-gaps.md` are SA-1 Pack's or the model's.
+- **OAM as the PPU gets it.** `expand::oam` reads the game's OAM mirror and starts from `$3F`.
+  SA-1 Pack no longer applies `$3F` at upload. Running the ROM's own OAM upload and capturing
+  `$2102`-`$2104` on the bus would settle the order for every ROM instead of assuming it.
 
 ## Stack and layout
 
@@ -82,12 +83,19 @@ Before finishing step 1 (SA-1):
   Conversions mirror Asar's conventions so addresses agree with the rest of the toolchain.
 - `kobo_core::ram` is the only place that knows where the game keeps its variables. A
   `RamAddr` names a variable by its vanilla `$7E`/`$7F` address, a `RamMap` resolves it to a
-  bus address (only `Vanilla` exists; SA-1 Pack's remap is the variant to add, along with its
-  22 sprite slots), and `Ram` is the memory itself: `bus.ram.u8(ram::LEVEL_MODE)`, never
+  bus address (`Vanilla`, or `Sa1Pack` with its I-RAM and BW-RAM addresses and 22 sprite
+  slots), and `Ram` is the memory itself: `bus.ram.u8(ram::LEVEL_MODE)`, never
   `wram[0x1925]`. Tables are indexed from their resolved start (`u8_at`). A `Ram` clone is a
-  snapshot; video memory is not part of it, since the game never reads it back.
+  snapshot, which on an SA-1 cartridge includes the SA-1 (`cpu::sa1::Sa1`: its registers and
+  its `Cpu`), so that restoring one never leaves it mid-handler; video memory is not part of
+  it, since the game never reads it back.
+- `kobo_core::cpu` has one 65816 core and two instances of it. `Cpu::run` takes IRQs from
+  the `Bus` and hands over to `Bus::wait` when the CPU stops to wait (`WAI`, or a loop that
+  changes nothing); `SmwBus` gives the SA-1 its turn there, through `Sa1View`, the bus as
+  the SA-1 sees it. A wait nothing answers is `CpuError::Waiting`, not 200 million steps.
 - `kobo_core::expand` runs ROM code. `machine` owns the CPU, the bus, and `Call` (the register
-  state a routine is entered with; every call starts from reset registers), `load` runs the
+  state a routine is entered with; every call starts from reset registers, and
+  `try_call_to` stops one at an address with the call still open), `load` runs the
   loader phases, and `sprite_capture`, `player`, `boss`, `layer3`, and `map16` are the passes
   over the loaded level. `routines` holds the ROM addresses. `expand_level` returns a
   `LoadedLevel` of four parts: `tiles` (`LevelTiles`: the grid, Map16 definitions, and layer
@@ -193,6 +201,9 @@ describes that module's code rather than the game). Do not grow this file with t
 - `docs/lunar-magic.md`: what Lunar Magic changes in a ROM. Map16 pages and the `$06F540`
   routine, BG Map16 tables, per-level flags, expanded level heights, custom palettes, sprite
   data formats and PIXI extension bytes, the 255-sprite load flags.
+- `docs/sa1.md`: SA-1 Pack. How its two processors hand work over and how the bus schedules
+  them, the RAM it moves, MaxTile and the OAM, the work RAM port, the reference ROM, what is
+  not modelled.
 - `docs/testing.md`: the emulator oracle and its capture modes, the video oracle, the CPU
   suite, the Lunar Magic hack corpus checks and their known exceptions.
 - `docs/known-gaps.md`: what a rendered level does not reproduce.

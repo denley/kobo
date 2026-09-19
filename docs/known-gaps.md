@@ -25,4 +25,15 @@ What a rendered level does not reproduce, and what the tooling does not handle.
   Podoboo; VRAM bytes `$C0C0`-`$C305` were seen to matter) are drawn from whatever the
   player pass left there: the sprite passes never run the NMI upload (`MarioGFXDMA`), and the
   scene is drawn from the level's VRAM, not the pass's.
+- SA-1 ROMs ([sa1.md](sa1.md)): nothing has been compared to an emulator yet, since the
+  oracle script reads `$7E` addresses. Against the vanilla ROM, vanilla with SA-1 Pack
+  renders 476 of 512 levels identically and 23 with the same objects overlapping in another
+  order (MaxTile's priorities). Ten have other objects (`00F`, `0DD`, `0FC`, `104`, `11D`,
+  `12A`, `12C`, `1DD`, `1E8`, `1E9`: an extra object, another animation frame, another
+  palette in `104`), which SA-1 Pack's changed sprite memory settings and random number
+  use could explain but nothing has shown; a fault in the SA-1 model would look the same.
+  Boss arenas (`098`, `0D9`, `198`) differ in their flames. OAM is still read starting from
+  `$3F`, which SA-1 Pack no longer applies, so overlapping objects in an arena may be in
+  the wrong order. Images over 4 MiB and code using SA-1 DMA or character conversion are
+  not handled.
 - `GFX27`'s layout is unknown; `GFX32`/`GFX33` are not handled by the GFX tooling.

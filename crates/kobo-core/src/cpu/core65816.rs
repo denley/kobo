@@ -6,6 +6,28 @@ use thiserror::Error;
 pub trait Bus {
     fn read(&mut self, addr: u32) -> u8;
     fn write(&mut self, addr: u32, value: u8);
+
+    /// Whether the IRQ line is asserted. Polled between instructions while
+    /// the CPU has interrupts enabled.
+    fn irq(&mut self) -> bool {
+        false
+    }
+
+    /// Where an IRQ takes the CPU: the cartridge's vector, unless the bus
+    /// supplies it from somewhere else (the SA-1 reads its own from
+    /// registers).
+    fn irq_vector(&mut self, emulation: bool) -> u16 {
+        let addr = if emulation { 0xFFFE } else { 0xFFEE };
+        u16::from_le_bytes([self.read(addr), self.read(addr + 1)])
+    }
+
+    /// The CPU is waiting for something outside itself (see
+    /// [`Cpu::run`]). Runs whatever else shares the bus and returns
+    /// whether any of it got anywhere; false means nothing the CPU waits
+    /// for is going to happen.
+    fn wait(&mut self) -> bool {
+        false
+    }
 }
 
 /// Processor status bits.
@@ -30,13 +52,37 @@ pub enum CpuError {
     Brk { pb: u8, pc: u16 },
     #[error("COP at ${pb:02X}:{pc:04X}")]
     Cop { pb: u8, pc: u16 },
-    #[error("CPU halted (STP/WAI) at ${pb:02X}:{pc:04X}")]
+    #[error("CPU halted (STP) at ${pb:02X}:{pc:04X}")]
     Halted { pb: u8, pc: u16 },
+    #[error("waiting at ${pb:02X}:{pc:04X} for something that never happens")]
+    Waiting { pb: u8, pc: u16 },
+    #[error("on the SA-1: {0}")]
+    Sa1(Box<CpuError>),
     #[error("instruction limit of {limit} exceeded at ${pb:02X}:{pc:04X}")]
     Limit { limit: u64, pb: u8, pc: u16 },
 }
 
-#[derive(Clone, Debug)]
+/// How [`Cpu::run`] ended.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Run {
+    Done,
+    /// Waiting for something the bus could not make happen.
+    Waiting,
+}
+
+/// Everything a loop can change about the CPU, as it stood at a backward
+/// jump. Two the same in a row mean the loop is polling memory for a
+/// change that has to come from outside.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct LoopState {
+    target: u32,
+    registers: [u16; 5],
+    db: u8,
+    p: u8,
+    writes: u64,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Cpu {
     pub a: u16,
     pub x: u16,
@@ -55,6 +101,15 @@ pub struct Cpu {
     pub trace_data_reads: Option<Vec<(u32, u32)>>,
     in_fetch: bool,
     op_addr: u32,
+    /// Bytes written so far.
+    writes: u64,
+    last_loop: Option<LoopState>,
+    /// The last instruction was `WAI`, or closed a loop that changes
+    /// nothing.
+    waiting: bool,
+    /// Where the stack stands when the `RTS` of a routine entered by
+    /// [`Cpu::enter_jsr`] has returned.
+    return_sp: Option<u16>,
 }
 
 impl Default for Cpu {
@@ -93,6 +148,10 @@ impl Cpu {
             trace_data_reads: None,
             in_fetch: false,
             op_addr: 0,
+            writes: 0,
+            last_loop: None,
+            waiting: false,
+            return_sp: None,
         }
     }
 
@@ -192,11 +251,12 @@ impl Cpu {
         lo | (bank << 16)
     }
 
-    fn write8(&self, bus: &mut impl Bus, addr: u32, value: u8) {
+    fn write8(&mut self, bus: &mut impl Bus, addr: u32, value: u8) {
+        self.writes += 1;
         bus.write(addr & 0xFF_FFFF, value);
     }
 
-    fn write16(&self, bus: &mut impl Bus, addr: u32, value: u16) {
+    fn write16(&mut self, bus: &mut impl Bus, addr: u32, value: u16) {
         self.write8(bus, addr, value as u8);
         self.write8(bus, Self::next_addr(addr), (value >> 8) as u8);
     }
@@ -210,7 +270,7 @@ impl Cpu {
         }
     }
 
-    fn write_m(&self, bus: &mut impl Bus, addr: u32, value: u16) {
+    fn write_m(&mut self, bus: &mut impl Bus, addr: u32, value: u16) {
         if self.m8() {
             self.write8(bus, addr, value as u8);
         } else {
@@ -226,7 +286,7 @@ impl Cpu {
         }
     }
 
-    fn write_x(&self, bus: &mut impl Bus, addr: u32, value: u16) {
+    fn write_x(&mut self, bus: &mut impl Bus, addr: u32, value: u16) {
         if self.x8() {
             self.write8(bus, addr, value as u8);
         } else {
@@ -613,7 +673,24 @@ impl Cpu {
         let rel = self.fetch8(bus) as i8;
         if cond {
             self.pc = self.pc.wrapping_add(rel as i16 as u16);
+            if rel < 0 {
+                self.note_loop();
+            }
         }
+    }
+
+    /// Called on a backward jump: sets `waiting` if nothing has changed
+    /// since the last one to the same place.
+    fn note_loop(&mut self) {
+        let state = LoopState {
+            target: self.pc_addr(),
+            registers: [self.a, self.x, self.y, self.sp, self.dp],
+            db: self.db,
+            p: self.p,
+            writes: self.writes,
+        };
+        self.waiting = self.last_loop == Some(state);
+        self.last_loop = Some(state);
     }
 
     // --- Execution -----------------------------------------------------
@@ -1524,6 +1601,9 @@ impl Cpu {
             // Jumps and calls
             0x4C => {
                 self.pc = self.fetch16(bus);
+                if self.pc <= op_pc {
+                    self.note_loop();
+                }
             }
             0x5C => {
                 let t = self.fetch24(bus);
@@ -1784,7 +1864,8 @@ impl Cpu {
                     pc: op_pc,
                 });
             }
-            0xCB | 0xDB => {
+            0xCB => self.waiting = true,
+            0xDB => {
                 return Err(CpuError::Halted {
                     pb: op_pb,
                     pc: op_pc,
@@ -1794,34 +1875,44 @@ impl Cpu {
         Ok(())
     }
 
-    /// Calls a subroutine as if by `JSL` and runs until it returns with
-    /// `RTL`, or until `limit` instructions have executed.
-    pub fn call(&mut self, bus: &mut impl Bus, addr: u32, limit: u64) -> Result<(), CpuError> {
-        self.push8(bus, RETURN_PB);
-        self.push16(bus, RETURN_PC.wrapping_sub(1));
-        self.pb = (addr >> 16) as u8;
-        self.pc = addr as u16;
-        self.run_to_sentinel(bus, limit)
+    /// Takes an IRQ: pushes the return frame and continues at the bus's
+    /// vector with interrupts disabled.
+    pub fn interrupt(&mut self, bus: &mut impl Bus) {
+        if self.emulation {
+            self.push16(bus, self.pc);
+            self.push8(bus, self.p & !Flags::X);
+        } else {
+            self.push8(bus, self.pb);
+            self.push16(bus, self.pc);
+            self.push8(bus, self.p);
+        }
+        self.p = (self.p | Flags::I) & !Flags::D;
+        self.pb = 0;
+        self.pc = bus.irq_vector(self.emulation);
+        self.last_loop = None;
     }
 
-    /// Calls a subroutine as if by `JSR` from its own bank and runs until
-    /// it returns with `RTS`. An `RTS` stays in the routine's bank, so it
-    /// cannot land on the bank `$FF` sentinel; the return is recognised
-    /// instead by the program counter reaching the sentinel offset with
-    /// the stack back where the call found it. A `JSL` frame sits under
-    /// the `JSR` one, so a routine that ends in `RTL` after all returns
-    /// to the sentinel proper.
-    pub fn call_jsr(&mut self, bus: &mut impl Bus, addr: u32, limit: u64) -> Result<(), CpuError> {
-        self.push8(bus, RETURN_PB);
-        self.push16(bus, RETURN_PC.wrapping_sub(1));
-        self.pb = (addr >> 16) as u8;
-        self.pc = addr as u16;
+    /// Runs until `done`, taking IRQs from the bus. A CPU that stops to
+    /// wait (`WAI`, or a loop that polls memory without changing
+    /// anything) hands over to [`Bus::wait`] and carries on if that got
+    /// anywhere; otherwise the run ends there, to be resumed by calling
+    /// this again.
+    pub fn run(
+        &mut self,
+        bus: &mut impl Bus,
+        limit: u64,
+        done: impl Fn(&Self) -> bool,
+    ) -> Result<Run, CpuError> {
         let start = self.steps;
-        let return_sp = self.sp;
-        self.push16(bus, RETURN_PC.wrapping_sub(1));
-        while !((self.pc == RETURN_PC && self.sp == return_sp)
-            || (self.pb == RETURN_PB && self.pc == RETURN_PC))
-        {
+        loop {
+            // Before `done`: an IRQ raised as the routine returned is
+            // still work it caused.
+            if !self.flag(Flags::I) && bus.irq() {
+                self.interrupt(bus);
+            }
+            if done(self) {
+                return Ok(Run::Done);
+            }
             if self.steps - start >= limit {
                 return Err(CpuError::Limit {
                     limit,
@@ -1830,12 +1921,104 @@ impl Cpu {
                 });
             }
             self.step(bus)?;
+            if self.waiting {
+                self.waiting = false;
+                if !bus.wait() {
+                    return Ok(Run::Waiting);
+                }
+            }
+        }
+    }
+
+    /// Bytes written so far: a measure of whether a run got anywhere.
+    pub fn writes(&self) -> u64 {
+        self.writes
+    }
+
+    /// [`Cpu::run`] for a caller with nothing to resume: a wait that
+    /// nothing answers is an error.
+    fn run_to(
+        &mut self,
+        bus: &mut impl Bus,
+        limit: u64,
+        done: impl Fn(&Self) -> bool,
+    ) -> Result<(), CpuError> {
+        match self.run(bus, limit, done)? {
+            Run::Done => Ok(()),
+            Run::Waiting => Err(CpuError::Waiting {
+                pb: self.pb,
+                pc: self.pc,
+            }),
+        }
+    }
+
+    /// True once the routine entered by [`Cpu::enter`] or
+    /// [`Cpu::enter_jsr`] has returned.
+    pub fn returned(&self) -> bool {
+        (self.pb == RETURN_PB && self.pc == RETURN_PC)
+            || (self.pc == RETURN_PC && Some(self.sp) == self.return_sp)
+    }
+
+    /// Enters a subroutine as if by `JSL` from the sentinel address, so
+    /// that its `RTL` (or, from an interrupt frame, its `RTI`) leaves the
+    /// CPU [`Cpu::returned`].
+    pub fn enter(&mut self, bus: &mut impl Bus, addr: u32) {
+        self.push8(bus, RETURN_PB);
+        self.push16(bus, RETURN_PC.wrapping_sub(1));
+        self.pb = (addr >> 16) as u8;
+        self.pc = addr as u16;
+        self.return_sp = None;
+    }
+
+    /// Enters a subroutine as if by `JSR` from its own bank. An `RTS`
+    /// stays in the routine's bank, so it cannot land on the bank `$FF`
+    /// sentinel; the return is recognised instead by the program counter
+    /// reaching the sentinel offset with the stack back where the call
+    /// found it. A `JSL` frame sits under the `JSR` one, so a routine
+    /// that ends in `RTL` after all returns to the sentinel proper.
+    pub fn enter_jsr(&mut self, bus: &mut impl Bus, addr: u32) {
+        self.enter(bus, addr);
+        self.return_sp = Some(self.sp);
+        self.push16(bus, RETURN_PC.wrapping_sub(1));
+    }
+
+    /// Runs the routine entered until it returns, or until the program
+    /// counter gets to `stop` (without executing it) if that comes
+    /// first. True if it has returned; otherwise the call is still open,
+    /// and calling this again carries on with it: a `stop` it is already
+    /// standing on is one to come round to again, not one reached.
+    pub fn finish(
+        &mut self,
+        bus: &mut impl Bus,
+        limit: u64,
+        stop: Option<u32>,
+    ) -> Result<bool, CpuError> {
+        let start = self.steps;
+        self.run_to(bus, limit, |cpu| {
+            cpu.returned() || (Some(cpu.pc_addr()) == stop && cpu.steps != start)
+        })?;
+        if !self.returned() {
+            return Ok(false);
         }
         // An `RTS` leaves the `JSL` frame behind.
-        if self.sp == return_sp {
+        if self.return_sp.take() == Some(self.sp) {
             self.sp = self.sp.wrapping_add(3);
         }
-        Ok(())
+        Ok(true)
+    }
+
+    /// Calls a subroutine as if by `JSL` and runs until it returns with
+    /// `RTL`, or until `limit` instructions have executed.
+    pub fn call(&mut self, bus: &mut impl Bus, addr: u32, limit: u64) -> Result<(), CpuError> {
+        self.enter(bus, addr);
+        self.finish(bus, limit, None).map(|_| ())
+    }
+
+    /// Calls a subroutine as if by `JSR` from its own bank and runs until
+    /// it returns with `RTS`.
+    pub fn call_jsr(&mut self, bus: &mut impl Bus, addr: u32, limit: u64) -> Result<(), CpuError> {
+        self.enter_jsr(bus, addr);
+        self.finish(bus, limit, None).map(|_| ())
     }
 
     /// Starts executing at `start` and stops when the program counter
@@ -1849,33 +2032,7 @@ impl Cpu {
     ) -> Result<(), CpuError> {
         self.pb = (start >> 16) as u8;
         self.pc = start as u16;
-        let begin = self.steps;
-        while !(self.pb == (stop >> 16) as u8 && self.pc == stop as u16) {
-            if self.steps - begin >= limit {
-                return Err(CpuError::Limit {
-                    limit,
-                    pb: self.pb,
-                    pc: self.pc,
-                });
-            }
-            self.step(bus)?;
-        }
-        Ok(())
-    }
-
-    fn run_to_sentinel(&mut self, bus: &mut impl Bus, limit: u64) -> Result<(), CpuError> {
-        let start = self.steps;
-        while !(self.pb == RETURN_PB && self.pc == RETURN_PC) {
-            if self.steps - start >= limit {
-                return Err(CpuError::Limit {
-                    limit,
-                    pb: self.pb,
-                    pc: self.pc,
-                });
-            }
-            self.step(bus)?;
-        }
-        Ok(())
+        self.run_to(bus, limit, |cpu| cpu.pc_addr() == stop)
     }
 }
 
@@ -1905,6 +2062,141 @@ mod tests {
         setup(&mut cpu, &mut ram);
         cpu.call(&mut ram, 0x80_8000, 100_000).unwrap();
         (cpu, ram)
+    }
+
+    /// RAM with something else on the bus: each wait it is asked for,
+    /// it has an answer until `answers` run out. An answer stores 1 at
+    /// `$0010`, or raises the IRQ line if `by_irq`.
+    struct Shared {
+        ram: Ram,
+        answers: u32,
+        by_irq: bool,
+        irq: bool,
+    }
+
+    impl Bus for Shared {
+        fn read(&mut self, addr: u32) -> u8 {
+            self.ram.read(addr)
+        }
+        fn write(&mut self, addr: u32, value: u8) {
+            if addr == 0x4000 {
+                self.irq = false; // the handler's acknowledgement
+            }
+            self.ram.write(addr, value);
+        }
+        fn irq(&mut self) -> bool {
+            self.irq
+        }
+        fn wait(&mut self) -> bool {
+            if self.answers == 0 {
+                return false;
+            }
+            self.answers -= 1;
+            if self.by_irq {
+                self.irq = true;
+            } else {
+                self.ram.0[0x10] = 1;
+            }
+            true
+        }
+    }
+
+    /// `code` at `$8000`, and an IRQ handler at `$9000` that acknowledges,
+    /// stores 1 at `$0010`, and returns.
+    fn shared(code: &[u8], answers: u32, by_irq: bool) -> Shared {
+        let mut ram = Ram(vec![0; 0x100_0000]);
+        ram.0[0x8000..0x8000 + code.len()].copy_from_slice(code);
+        let handler = [0x8D, 0x00, 0x40, 0xA9, 0x01, 0x85, 0x10, 0x40];
+        ram.0[0x9000..0x9008].copy_from_slice(&handler); // STA $4000 : LDA #1 : STA $10 : RTI
+        ram.0[0xFFEE..0xFFF0].copy_from_slice(&[0x00, 0x90]);
+        Shared {
+            ram,
+            answers,
+            by_irq,
+            irq: false,
+        }
+    }
+
+    /// `- LDA $10 : BEQ - : RTL`
+    const POLL: [u8; 5] = [0xA5, 0x10, 0xF0, 0xFC, 0x6B];
+
+    #[test]
+    fn a_polling_loop_waits_for_the_rest_of_the_bus() {
+        // Nothing answers: the second identical pass round the loop is
+        // the last, not the two hundred millionth.
+        let mut bus = shared(&POLL, 0, false);
+        let mut cpu = Cpu::new();
+        let error = cpu.call(&mut bus, 0x8000, 1_000_000).unwrap_err();
+        assert_eq!(error, CpuError::Waiting { pb: 0, pc: 0x8000 });
+        assert!(cpu.steps < 10);
+
+        let mut bus = shared(&POLL, 1, false);
+        let mut cpu = Cpu::new();
+        cpu.call(&mut bus, 0x8000, 1_000_000).unwrap();
+        assert_eq!(bus.answers, 0);
+    }
+
+    #[test]
+    fn a_loop_that_gets_somewhere_is_not_a_wait() {
+        // `LDX #0 : - DEX : BNE - : RTL` and `- DEC $10 : BNE - : RTL`:
+        // the same place every time round, a register or memory changed.
+        for code in [
+            &[0xA2, 0x00, 0xCA, 0xD0, 0xFD, 0x6B][..],
+            &[0xC6, 0x10, 0xD0, 0xFC, 0x6B],
+        ] {
+            let mut bus = shared(code, 0, false);
+            Cpu::new().call(&mut bus, 0x8000, 1_000_000).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_irq_is_taken_once_interrupts_are_on() {
+        // `CLI`, then the poll; the answer comes as an IRQ, whose handler
+        // returns into the loop.
+        let code = [&[0x58][..], &POLL].concat();
+        let mut bus = shared(&code, 1, true);
+        let mut cpu = Cpu::new();
+        let sp = cpu.sp;
+        cpu.call(&mut bus, 0x8000, 1_000_000).unwrap();
+        assert_eq!((bus.ram.0[0x10], bus.irq), (1, false));
+        assert_eq!(cpu.sp, sp);
+        assert_eq!(cpu.p & Flags::I, 0); // as `RTI` restored it
+
+        // With interrupts off the line goes unanswered, and so the wait.
+        let mut bus = shared(&POLL, 1, true);
+        let error = Cpu::new().call(&mut bus, 0x8000, 1_000_000).unwrap_err();
+        assert!(matches!(error, CpuError::Waiting { .. }));
+        assert!(bus.irq);
+    }
+
+    #[test]
+    fn wai_waits_for_an_interrupt() {
+        let code = [0x58, 0xCB, 0x6B]; // CLI : WAI : RTL
+        let mut bus = shared(&code, 1, true);
+        Cpu::new().call(&mut bus, 0x8000, 100).unwrap();
+        assert_eq!(bus.ram.0[0x10], 1);
+        let mut bus = shared(&code, 0, true);
+        let error = Cpu::new().call(&mut bus, 0x8000, 100).unwrap_err();
+        assert_eq!(error, CpuError::Waiting { pb: 0, pc: 0x8002 });
+    }
+
+    #[test]
+    fn a_call_can_stop_on_the_way_and_be_finished() {
+        // `JSR $8010 : RTS`, and at `$8010` `INC $10 : RTS`.
+        let mut ram = Ram(vec![0; 0x100_0000]);
+        ram.0[0x8000..0x8004].copy_from_slice(&[0x20, 0x10, 0x80, 0x60]);
+        ram.0[0x8010..0x8013].copy_from_slice(&[0xE6, 0x10, 0x60]);
+        let mut cpu = Cpu::new();
+        let sp = cpu.sp;
+        cpu.enter_jsr(&mut ram, 0x8000);
+        assert!(!cpu.finish(&mut ram, 100, Some(0x8010)).unwrap());
+        assert_eq!((ram.0[0x10], cpu.pc), (0, 0x8010));
+        assert!(cpu.finish(&mut ram, 100, Some(0x8010)).unwrap());
+        assert_eq!((ram.0[0x10], cpu.sp), (1, sp));
+        // A stop it never reaches is no different from none.
+        cpu.enter_jsr(&mut ram, 0x8000);
+        assert!(cpu.finish(&mut ram, 100, Some(0x9999)).unwrap());
+        assert_eq!((ram.0[0x10], cpu.sp), (2, sp));
     }
 
     #[test]

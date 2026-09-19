@@ -196,7 +196,8 @@ are SMWDisX's.
   dozen; pipes and doors in vanilla start at zero), then `MarioGFXDMA` (`$00A300`) uploads
   his tiles (VRAM words `$6000`, `$6100`, `$67F0`) and palette (CGRAM `$86`-`$8F`), which
   stay in `vram`/`cgram`. Only OAM slots 64-71 (`$0300`-`$031F`, what `DrawMarioAndYoshi`
-  writes) are kept, in level coordinates from the camera the pass ended with. The other
+  writes) are kept, read as the frame reaches `ConsolidateOAM` (see [sa1.md](sa1.md)), in
+  level coordinates from the camera the pass ended with. The other
   objects in that pass are cluster sprites the entrance screen's level sprites spawned
   (castle candle flames, ghost house Boo ceilings); the sprite passes clear the cluster
   tables and capture the ones their entries respawn, so keeping them here doubled the Boos. Boss

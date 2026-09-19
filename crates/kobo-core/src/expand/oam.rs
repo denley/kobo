@@ -1,5 +1,8 @@
 //! Reading the objects a frame drew out of the game's OAM image.
 
+use super::machine::{Call, Machine};
+use super::routines;
+use crate::cpu::CpuError;
 use crate::ram::{self, Ram};
 use crate::video::SpriteObject;
 
@@ -28,11 +31,46 @@ pub fn object_sizes(object_select: u8) -> [(i32, i32); 2] {
 }
 
 /// The game's OAM image and the object it started writing at.
-pub(super) fn read_oam(ram: &Ram) -> (Vec<u8>, usize) {
+pub(super) fn read_oam(ram: &Ram) -> OamImage {
     (
         ram.bytes(ram::OAM, OAM_LEN),
         ram.u8(ram::OAM_ADDRESS) as usize / 2,
     )
+}
+
+/// An OAM image and the object it starts at.
+pub(super) type OamImage = (Vec<u8>, usize);
+
+/// Runs one frame of the level loop. What the console shows afterwards is
+/// [`read_oam`]; what comes back is the image as the game drew it, taken
+/// when the frame got to the end-of-frame OAM routine. That is where to
+/// look for whatever draws to fixed objects (the player, the candle
+/// flames): SA-1 Pack's MaxTile rebuilds the whole image there, in
+/// priority order. A frame that never gets there (a message box is up,
+/// or a patch has rerouted the end of the frame) gives the image it
+/// left.
+pub(super) fn draw_frame(machine: &mut Machine) -> Result<OamImage, CpuError> {
+    let frame = Call::jsr(routines::DRAW_LEVEL_FRAME);
+    if machine.try_call_to(frame, Some(routines::CONSOLIDATE_OAM))? {
+        return Ok(read_oam(&machine.bus.ram));
+    }
+    let drawn = read_unpacked_oam(&machine.bus.ram);
+    machine.finish_call(frame)?;
+    Ok(drawn)
+}
+
+/// The OAM image of a frame that has drawn but not yet reached
+/// [`routines::CONSOLIDATE_OAM`]: the size bits are packed here from the
+/// table the drawing routines wrote them to.
+fn read_unpacked_oam(ram: &Ram) -> OamImage {
+    let mut image = ram.bytes(ram::OAM, OAM_OBJECTS * 4);
+    let sizes = ram.bytes(ram::OAM_SIZES, OAM_OBJECTS);
+    image.extend(sizes.chunks(4).map(|four| {
+        four.iter()
+            .enumerate()
+            .fold(0, |packed, (i, size)| packed | (size & 3) << (2 * i))
+    }));
+    (image, ram.u8(ram::OAM_ADDRESS) as usize / 2)
 }
 
 /// Visible objects in an OAM image, front to back from object `first`,
@@ -114,6 +152,23 @@ mod tests {
                 (0, -8, 0x42, 0x00, true),
             ]
         );
+    }
+
+    #[test]
+    fn unpacked_sizes_pack_four_to_a_byte() {
+        use crate::ram::RamMap;
+        for map in [RamMap::Vanilla, RamMap::Sa1Pack] {
+            let mut ram = Ram::new(map);
+            ram.set_u8_at(ram::OAM, 65 * 4 + 2, 0x42);
+            ram.set_u8_at(ram::OAM_SIZES, 65, 2);
+            ram.set_u8_at(ram::OAM_SIZES, 67, 0xFF); // only two bits count
+            ram.set_u8(ram::OAM_ADDRESS, 10);
+            let (image, first) = read_unpacked_oam(&ram);
+            assert_eq!(image.len(), OAM_LEN);
+            assert_eq!(image[65 * 4 + 2], 0x42);
+            assert_eq!(image[OAM_OBJECTS * 4 + 16], 0b1100_1000);
+            assert_eq!(first, 5);
+        }
     }
 
     #[test]

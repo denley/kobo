@@ -7,11 +7,27 @@
 //! place that knows that mapping: SA-1 Pack moves most of the game's RAM
 //! into the SA-1's I-RAM and BW-RAM and widens the sprite tables, so
 //! nothing else may assume a variable sits in WRAM at its vanilla address.
+//!
+//! An SA-1 cartridge has no save RAM chip. It has BW-RAM, in banks
+//! `$40`-`$4F` with an 8 KiB window on it at `$6000`-`$7FFF` of the
+//! system banks, and the SA-1's 2 KiB of I-RAM at `$3000`-`$37FF`. The
+//! SA-1 sees both as the S-CPU does, I-RAM again at `$0000`-`$07FF`, a
+//! window of its own, a view of BW-RAM as 2- or 4-bit cells in banks
+//! `$60`-`$6F`, and no work RAM at all.
 
 use std::fmt;
 
+use crate::addr::Mapping;
+use crate::cpu::sa1::{Bitmap, Sa1};
+use crate::rom::Rom;
+
 pub const WRAM_LEN: usize = 0x2_0000;
 pub const SRAM_LEN: usize = 0x8000;
+pub const IRAM_LEN: usize = 0x800;
+/// The most BW-RAM the SA-1 addresses; smaller chips mirror.
+pub const BWRAM_LEN: usize = 0x4_0000;
+/// Length of the BW-RAM window at `$6000`-`$7FFF`.
+const BWRAM_BLOCK: usize = 0x2000;
 
 /// A game variable, named by its vanilla address.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -50,33 +66,142 @@ pub enum RamMap {
     /// usual tools leave this alone.
     #[default]
     Vanilla,
+    /// SA-1 Pack: the SA-1 cannot reach work RAM, so everything its code
+    /// touches is in I-RAM or BW-RAM, and the per-slot sprite tables are
+    /// packed together with 22 slots each.
+    Sa1Pack,
 }
 
+/// Length of a vanilla per-slot sprite table.
+const VANILLA_SPRITE_SLOTS: u32 = 12;
+
+/// SA-1 Pack's sprite tables (`more_sprites/sprite_tables.asm`): the
+/// vanilla table and the bus address of the 22-slot one. Three direct
+/// page tables moved out to make room, and two of those left behind
+/// moved into the gaps.
+const SA1_PACK_SPRITE_TABLES: [(u32, u32); 49] = [
+    (0x7E_009E, 0x00_3200),
+    (0x7E_00AA, 0x00_309E),
+    (0x7E_00B6, 0x00_30B6),
+    (0x7E_00C2, 0x00_30D8),
+    (0x7E_00D8, 0x00_3216),
+    (0x7E_00E4, 0x00_322C),
+    (0x7E_14C8, 0x00_3242),
+    (0x7E_14D4, 0x00_3258),
+    (0x7E_14E0, 0x00_326E),
+    (0x7E_14EC, 0x40_14C8),
+    (0x7E_14F8, 0x40_14DE),
+    (0x7E_1504, 0x40_14F4),
+    (0x7E_1510, 0x40_150A),
+    (0x7E_151C, 0x00_3284),
+    (0x7E_1528, 0x00_329A),
+    (0x7E_1534, 0x00_32B0),
+    (0x7E_1540, 0x00_32C6),
+    (0x7E_154C, 0x00_32DC),
+    (0x7E_1558, 0x00_32F2),
+    (0x7E_1564, 0x00_3308),
+    (0x7E_1570, 0x00_331E),
+    (0x7E_157C, 0x00_3334),
+    (0x7E_1588, 0x00_334A),
+    (0x7E_1594, 0x00_3360),
+    (0x7E_15A0, 0x00_3376),
+    (0x7E_15AC, 0x00_338C),
+    (0x7E_15B8, 0x40_1520),
+    (0x7E_15C4, 0x40_1536),
+    (0x7E_15D0, 0x40_154C),
+    (0x7E_15DC, 0x40_1562),
+    (0x7E_15EA, 0x00_33A2),
+    (0x7E_15F6, 0x00_33B8),
+    (0x7E_1602, 0x00_33CE),
+    (0x7E_160E, 0x00_33E4),
+    (0x7E_161A, 0x40_1578),
+    (0x7E_1626, 0x40_158E),
+    (0x7E_1632, 0x40_15A4),
+    (0x7E_163E, 0x00_33FA),
+    (0x7E_164A, 0x40_15BA),
+    (0x7E_1656, 0x40_15D0),
+    (0x7E_1662, 0x40_15EA),
+    (0x7E_166E, 0x40_1600),
+    (0x7E_167A, 0x40_1616),
+    (0x7E_1686, 0x40_162C),
+    (0x7E_186C, 0x40_1642),
+    (0x7E_187B, 0x00_3410),
+    (0x7E_190F, 0x40_1658),
+    (0x7E_1FD6, 0x40_166E),
+    (0x7E_1FE2, 0x40_1FD6),
+];
+
 impl RamMap {
+    /// The map a ROM uses. An SA-1 cartridge running SMW is SA-1 Pack:
+    /// the game does not run on one without it.
+    pub fn of(rom: &Rom) -> Self {
+        match rom.mapping() {
+            Mapping::LoRom => Self::Vanilla,
+            Mapping::Sa1Rom => Self::Sa1Pack,
+        }
+    }
+
     /// Bus address of a variable. Tables are resolved by their first
     /// entry and indexed from there, since a map may widen them.
     pub fn resolve(self, addr: RamAddr) -> u32 {
         match self {
             Self::Vanilla => addr.0,
+            Self::Sa1Pack => {
+                let moved = SA1_PACK_SPRITE_TABLES
+                    .iter()
+                    .find(|(table, _)| (*table..table + VANILLA_SPRITE_SLOTS).contains(&addr.0));
+                match (moved, addr.0) {
+                    (Some((table, to)), a) => to + (a - table),
+                    // The sprite loader's flags, 255 of them now.
+                    (None, a @ 0x7E_1938..=0x7E_19B7) => 0x41_8A00 + (a - 0x7E_1938),
+                    (None, a @ 0x7E_0000..=0x7E_00FF) => 0x00_3000 + (a & 0xFF),
+                    (None, a @ 0x7E_0100..=0x7E_1FFF) => 0x40_0000 + (a & 0xFFFF),
+                    (None, a @ 0x7E_C800..=0x7E_FFFF) => 0x40_0000 + (a & 0xFFFF),
+                    (None, a @ 0x7F_C800..=0x7F_FFFF) => 0x41_0000 + (a & 0xFFFF),
+                    // Wiggler segments.
+                    (None, a @ 0x7F_9A7B..=0x7F_9C7A) => 0x41_8800 + (a - 0x7F_9A7B),
+                    (None, a) => a,
+                }
+            }
         }
     }
 
     /// Sprite slots, the length of the per-slot sprite tables.
     pub fn sprite_slots(self) -> u32 {
         match self {
-            Self::Vanilla => 12,
+            Self::Vanilla => VANILLA_SPRITE_SLOTS,
+            Self::Sa1Pack => 22,
         }
+    }
+
+    /// Length of the sprite loader's flag table at
+    /// [`SPRITE_LOAD_STATUS`].
+    pub fn sprite_load_flags(self) -> u32 {
+        match self {
+            Self::Vanilla => 0x80,
+            Self::Sa1Pack => 0xFF,
+        }
+    }
+
+    /// The direct page the game runs with: wherever `$7E0000` went.
+    pub fn direct_page(self) -> u16 {
+        self.resolve(RamAddr(0x7E_0000)) as u16
     }
 }
 
-/// Everything a routine can change apart from video memory: work RAM and
-/// the cartridge's save RAM. Cloning it is a snapshot of the game's state,
-/// and [`Clone::clone_from`] restores one.
+/// Everything a routine can change apart from video memory: work RAM,
+/// the cartridge's RAM, and on an SA-1 cartridge the SA-1 itself, which a
+/// routine leaves changed as much as it does memory. Cloning it is a
+/// snapshot of the game's state, and [`Clone::clone_from`] restores one.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct Ram {
     map: RamMap,
     wram: Vec<u8>,
-    sram: Vec<u8>,
+    /// Save RAM, or BW-RAM on an SA-1 cartridge.
+    cart: Vec<u8>,
+    /// Empty without an SA-1.
+    iram: Vec<u8>,
+    pub sa1: Option<Box<Sa1>>,
 }
 
 impl fmt::Debug for Ram {
@@ -88,10 +213,13 @@ impl fmt::Debug for Ram {
 impl Ram {
     /// Zeroed memory laid out by `map`.
     pub fn new(map: RamMap) -> Self {
+        let sa1 = map == RamMap::Sa1Pack;
         Self {
             map,
             wram: vec![0; WRAM_LEN],
-            sram: vec![0; SRAM_LEN],
+            cart: vec![0; if sa1 { BWRAM_LEN } else { SRAM_LEN }],
+            iram: vec![0; if sa1 { IRAM_LEN } else { 0 }],
+            sa1: sa1.then(Box::default),
         }
     }
 
@@ -99,32 +227,112 @@ impl Ram {
         self.map
     }
 
-    /// Reads a bus address, or `None` if it is not RAM: work RAM in banks
-    /// `$7E`-`$7F` with its low 8 KiB mirrored in the system banks, and
-    /// save RAM in banks `$70`-`$7D`. Every CPU access comes through here
-    /// or [`Ram::write`], so the decode is kept to one bank match.
+    /// Reads a bus address as the S-CPU sees it, or `None` if it is not
+    /// RAM: work RAM in banks `$7E`-`$7F` with its low 8 KiB mirrored in
+    /// the system banks, and save RAM in banks `$70`-`$7D` or the SA-1's
+    /// memories. Every CPU access comes through here or [`Ram::write`],
+    /// so the decode is kept to one bank match.
     #[inline(always)]
     pub fn read(&self, addr: u32) -> Option<u8> {
         let off = addr as u16;
         match (addr >> 16) as u8 {
             0x7E | 0x7F => Some(self.wram[(addr - 0x7E_0000) as usize]),
             0x00..=0x3F | 0x80..=0xBF if off < 0x2000 => Some(self.wram[off as usize]),
-            0x70..=0x7D if off < 0x8000 => Some(self.sram[off as usize % SRAM_LEN]),
-            _ => None,
+            _ => match &self.sa1 {
+                None => match (addr >> 16) as u8 {
+                    0x70..=0x7D if off < 0x8000 => Some(self.cart[off as usize % SRAM_LEN]),
+                    _ => None,
+                },
+                Some(sa1) => self.sa1_read(addr, sa1.bwram_window[0], false),
+            },
         }
     }
 
-    /// Writes a bus address; false if it is not RAM.
+    /// Writes a bus address as the S-CPU sees it; false if it is not RAM.
     #[inline(always)]
     pub fn write(&mut self, addr: u32, value: u8) -> bool {
         let off = addr as u16;
         let cell = match (addr >> 16) as u8 {
             0x7E | 0x7F => &mut self.wram[(addr - 0x7E_0000) as usize],
             0x00..=0x3F | 0x80..=0xBF if off < 0x2000 => &mut self.wram[off as usize],
-            0x70..=0x7D if off < 0x8000 => &mut self.sram[off as usize % SRAM_LEN],
-            _ => return false,
+            _ => match &self.sa1 {
+                None => match (addr >> 16) as u8 {
+                    0x70..=0x7D if off < 0x8000 => &mut self.cart[off as usize % SRAM_LEN],
+                    _ => return false,
+                },
+                Some(sa1) => return self.sa1_write(addr, value, sa1.bwram_window[0], false),
+            },
         };
         *cell = value;
+        true
+    }
+
+    /// Reads a bus address as the SA-1 sees it.
+    pub fn read_sa1(&self, addr: u32) -> Option<u8> {
+        let window = self.sa1.as_ref()?.bwram_window[1];
+        self.sa1_read(addr, window, true)
+    }
+
+    /// Writes a bus address as the SA-1 sees it.
+    pub fn write_sa1(&mut self, addr: u32, value: u8) -> bool {
+        match &self.sa1 {
+            Some(sa1) => self.sa1_write(addr, value, sa1.bwram_window[1], true),
+            None => false,
+        }
+    }
+
+    /// Where a bus address lands in the SA-1's memories. `window` is the
+    /// register that places `$6000`-`$7FFF` for the processor asking;
+    /// only the SA-1's can select the bitmap view, and only the SA-1 has
+    /// I-RAM in its first page and the bitmap banks.
+    fn sa1_cell(&self, addr: u32, window: u8, from_sa1: bool) -> Option<Cell> {
+        let off = addr as usize & 0xFFFF;
+        match (addr >> 16) as u8 {
+            0x00..=0x3F | 0x80..=0xBF => match off {
+                0x0000..=0x07FF if from_sa1 => Some(Cell::Iram(off)),
+                0x3000..=0x37FF => Some(Cell::Iram(off - 0x3000)),
+                0x6000..=0x7FFF => {
+                    let at = (window & 0x7F) as usize * BWRAM_BLOCK + (off - 0x6000);
+                    Some(if from_sa1 && window & 0x80 != 0 {
+                        Cell::Bitmap(at)
+                    } else {
+                        Cell::Bwram(at % BWRAM_LEN)
+                    })
+                }
+                _ => None,
+            },
+            0x40..=0x4F => Some(Cell::Bwram(addr as usize % BWRAM_LEN)),
+            0x60..=0x6F if from_sa1 => Some(Cell::Bitmap(addr as usize & 0xF_FFFF)),
+            _ => None,
+        }
+    }
+
+    fn bitmap(&self) -> Bitmap {
+        self.sa1.as_ref().map(|sa1| sa1.bitmap).unwrap_or_default()
+    }
+
+    fn sa1_read(&self, addr: u32, window: u8, from_sa1: bool) -> Option<u8> {
+        Some(match self.sa1_cell(addr, window, from_sa1)? {
+            Cell::Iram(at) => self.iram[at],
+            Cell::Bwram(at) => self.cart[at],
+            Cell::Bitmap(at) => {
+                let (byte, shift, mask) = self.bitmap().cell(at);
+                (self.cart[byte % BWRAM_LEN] >> shift) & mask
+            }
+        })
+    }
+
+    fn sa1_write(&mut self, addr: u32, value: u8, window: u8, from_sa1: bool) -> bool {
+        match self.sa1_cell(addr, window, from_sa1) {
+            Some(Cell::Iram(at)) => self.iram[at] = value,
+            Some(Cell::Bwram(at)) => self.cart[at] = value,
+            Some(Cell::Bitmap(at)) => {
+                let (byte, shift, mask) = self.bitmap().cell(at);
+                let cell = &mut self.cart[byte % BWRAM_LEN];
+                *cell = (*cell & !(mask << shift)) | ((value & mask) << shift);
+            }
+            None => return false,
+        }
         true
     }
 
@@ -195,6 +403,13 @@ impl Ram {
             self.set_u8_at(addr, i, value);
         }
     }
+}
+
+/// A byte of the SA-1's memories, or a cell of the bitmap view of BW-RAM.
+enum Cell {
+    Iram(usize),
+    Bwram(usize),
+    Bitmap(usize),
 }
 
 const fn ram(addr: u32) -> RamAddr {
@@ -305,6 +520,10 @@ pub const SPRITE_LOCK: RamAddr = ram(0x7E_009D);
 /// byte. `$3F` is the OAM address the first object was written at.
 pub const OAM: RamAddr = ram(0x7E_0200);
 pub const OAM_ADDRESS: RamAddr = ram(0x7E_003F);
+/// `$0420`-`$049F`: the size and X-high bits one object to a byte, as
+/// the drawing routines write them. The end of each frame packs them
+/// into the OAM image.
+pub const OAM_SIZES: RamAddr = ram(0x7E_0420);
 /// `$14C8`: sprite slot status (0 = free), one byte per slot.
 pub const SPRITE_STATUS: RamAddr = ram(0x7E_14C8);
 /// `$9E`, `$E4`/`$14E0`, `$D8`/`$14D4`: sprite number and position
@@ -314,10 +533,9 @@ pub const SPRITE_X_LOW: RamAddr = ram(0x7E_00E4);
 pub const SPRITE_X_HIGH: RamAddr = ram(0x7E_14E0);
 pub const SPRITE_Y_LOW: RamAddr = ram(0x7E_00D8);
 pub const SPRITE_Y_HIGH: RamAddr = ram(0x7E_14D4);
-/// `$1938`: the per-entry "already loaded" flags the vanilla level
-/// sprite loader keeps, 128 of them.
+/// `$1938`: the per-entry "already loaded" flags the level sprite
+/// loader keeps, [`RamMap::sprite_load_flags`] of them.
 pub const SPRITE_LOAD_STATUS: RamAddr = ram(0x7E_1938);
-pub const SPRITE_LOAD_STATUS_LEN: u32 = 0x80;
 /// `$18B9`: the active sprite generator, which keeps spawning sprites
 /// after its own sprite slot is cleared.
 pub const SPRITE_GENERATOR: RamAddr = ram(0x7E_18B9);
@@ -375,6 +593,72 @@ mod tests {
         assert_eq!(ram.read(0x71_0010), Some(7)); // one SRAM chip, mirrored
         assert_eq!(RamAddr::checked(0x80_0000), None);
         assert_eq!(RamAddr::checked(0x7F_FFFF).unwrap().to_string(), "$7FFFFF");
+    }
+
+    #[test]
+    fn sa1_pack_moves_what_the_sa1_touches() {
+        let map = RamMap::Sa1Pack;
+        let at = |addr| map.resolve(RamAddr::new(addr));
+        assert_eq!(at(0x7E_0013), 0x00_3013); // direct page: I-RAM
+        assert_eq!(map.direct_page(), 0x3000);
+        assert_eq!(at(0x7E_0100), 0x40_0100); // the rest of low RAM: BW-RAM
+        assert_eq!(at(0x7E_1FFF), 0x40_1FFF);
+        assert_eq!(at(0x7E_C800), 0x40_C800); // the tile grid
+        assert_eq!(at(0x7F_C800), 0x41_C800);
+        assert_eq!(at(0x7F_9A7B), 0x41_8800); // Wiggler segments
+        assert_eq!(at(0x7E_1938), 0x41_8A00); // sprite load flags
+        assert_eq!(at(0x7E_2000), 0x7E_2000); // the S-CPU's own stays put
+        assert_eq!(at(0x7F_0000), 0x7F_0000);
+        // Sprite tables are packed together, 22 slots each, and those
+        // left on the direct page moved up into the gaps.
+        assert_eq!(map.sprite_slots(), 22);
+        assert_eq!(at(0x7E_009E), 0x00_3200);
+        assert_eq!(at(0x7E_14C8), 0x00_3242);
+        assert_eq!(at(0x7E_14D3), 0x00_324D);
+        assert_eq!(at(0x7E_00AA), 0x00_309E);
+        assert_eq!(at(0x7E_00C2), 0x00_30D8);
+        assert_eq!(at(0x7E_14EC), 0x40_14C8);
+        assert_eq!(at(0x7E_00CE), 0x00_30CE); // not a table: the data pointer
+        let mut ram = Ram::new(map);
+        ram.set_u8_at(SPRITE_STATUS, 21, 8);
+        assert_eq!(ram.peek(0x00_3242 + 21), 8);
+        assert_eq!(ram.peek(0x00_3258), 0); // and not into the next table
+        // Every table has room for its 22 slots before the next begins.
+        let mut tables: Vec<u32> = SA1_PACK_SPRITE_TABLES.iter().map(|t| t.1).collect();
+        tables.sort_unstable();
+        assert!(tables.windows(2).all(|w| w[1] - w[0] >= 22), "{tables:X?}");
+    }
+
+    #[test]
+    fn an_sa1_cartridge_has_its_own_memories() {
+        let mut ram = Ram::new(RamMap::Sa1Pack);
+        assert!(ram.write(0x00_3000, 1));
+        assert_eq!(ram.read(0x80_3000), Some(1));
+        assert_eq!(ram.read_sa1(0x00_0000), Some(1)); // I-RAM, mirrored down
+        assert_eq!(ram.read(0x00_0000), Some(0)); // where the S-CPU has work RAM
+        assert_eq!(ram.read(0x00_3800), None);
+        assert_eq!(ram.read_sa1(0x7E_0000), None); // the SA-1 has no work RAM
+        assert_eq!(ram.read(0x70_0000), None); // and the cartridge no save RAM
+
+        // BW-RAM, and each processor's window on it.
+        assert!(ram.write(0x41_2005, 7));
+        assert_eq!(ram.read(0x45_2005), Some(7)); // mirrored through `$4F`
+        assert_eq!(ram.read(0x00_6005), Some(0));
+        ram.sa1.as_mut().unwrap().bwram_window = [9, 0]; // block 9 is `$412000`
+        assert_eq!(ram.read(0x00_6005), Some(7));
+        assert_eq!(ram.read_sa1(0x00_6005), Some(0));
+
+        // The SA-1 alone can address BW-RAM in cells.
+        assert!(ram.write_sa1(0x40_0000, 0xA5));
+        assert_eq!(ram.read_sa1(0x60_0000), Some(0x5));
+        assert_eq!(ram.read_sa1(0x60_0001), Some(0xA));
+        assert!(ram.write_sa1(0x60_0001, 0xFC)); // only four bits land
+        assert_eq!(ram.read_sa1(0x40_0000), Some(0xC5));
+        assert_eq!(ram.read(0x60_0000), None);
+        ram.sa1.as_mut().unwrap().bitmap = Bitmap::TwoBits;
+        assert_eq!(ram.read_sa1(0x60_0003), Some(0x3)); // `$C5`: 01 01 00 11
+        ram.sa1.as_mut().unwrap().bwram_window[1] = 0x80; // the window, in cells
+        assert_eq!(ram.read_sa1(0x00_6003), Some(0x3));
     }
 
     #[test]

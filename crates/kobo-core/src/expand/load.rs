@@ -114,7 +114,7 @@ pub fn expand_level_traced(
 /// Then come the layer 3 tiles, which the game uploads once on the
 /// "Nintendo Presents" screen and which survive every level load.
 fn boot(machine: &mut Machine) -> Result<(), ExpandError> {
-    machine.run_until(routines::RESET, routines::GAME_LOOP, RESET_STEP_LIMIT)?;
+    machine.run_from_reset(routines::GAME_LOOP, RESET_STEP_LIMIT)?;
     machine.call(Call::jsr(routines::CLEAR_LAYER3))?;
     machine.call(Call::jsr(routines::UPLOAD_LAYER3_GFX))
 }

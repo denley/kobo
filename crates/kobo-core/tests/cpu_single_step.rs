@@ -16,7 +16,8 @@ use kobo_core::cpu::{Bus, Cpu};
 use serde::Deserialize;
 
 /// Opcodes the core refuses by design: it models no interrupts, so
-/// `BRK`, `COP`, `WAI`, and `STP` stop a run with an error instead.
+/// `BRK`, `COP`, and `STP` stop a run with an error, and `WAI` waits for an
+/// interrupt the suite does not model.
 const UNMODELLED: [u8; 4] = [0x00, 0x02, 0xCB, 0xDB];
 /// `MVP` and `MVN`. The suite cuts every test off after 100 bus cycles,
 /// mid-move, while the core runs a block move to completion in one step.

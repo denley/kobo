@@ -5,7 +5,8 @@ use crate::cpu::smw_bus::SmwBus;
 use crate::ram::{self, Ram};
 
 /// Where the ROM's sprite loader keeps its per-entry "already loaded"
-/// flags: `$1938` (128 entries) in vanilla, or `$7FAF00` (256 entries)
+/// flags: `$1938` (128 entries, or wherever the RAM map has them) in
+/// vanilla, or `$7FAF00` (256 entries)
 /// when Lunar Magic 3's 255-sprites-per-level patch has replaced the
 /// loader's flag check at `$02A856` with a jump to its own code.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -32,7 +33,7 @@ impl LoadFlags {
         }
         Self {
             base: bus.ram.map().resolve(ram::SPRITE_LOAD_STATUS),
-            count: ram::SPRITE_LOAD_STATUS_LEN,
+            count: bus.ram.map().sprite_load_flags(),
         }
     }
 

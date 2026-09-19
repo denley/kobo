@@ -1,8 +1,9 @@
 //! ROM routines the capture passes call, from the vanilla layout. Lunar
 //! Magic keeps these entry points in place.
 
-/// The reset vector and the main game loop it ends in.
-pub const RESET: u32 = 0x00_8000;
+/// The reset vector, which SA-1 Pack points at its own start-up code, and
+/// the main game loop the reset code ends in.
+pub const RESET_VECTOR: u32 = 0x00_FFFC;
 pub const GAME_LOOP: u32 = 0x00_806B;
 /// `CODE_05D796`: resolves the level number and header pointers.
 pub const LOAD_HEADER_POINTERS: u32 = 0x05_D796;
@@ -53,6 +54,12 @@ pub const EXIT_IRQ: u32 = 0x00_83B2;
 /// `CODE_00A1DA`: one game-mode `$14` drawing pass, which fills OAM
 /// with the player, boss, and sprite-based arena walls and floor.
 pub const DRAW_LEVEL_FRAME: u32 = 0x00_A1DA;
+/// `ConsolidateOAM`, which every drawing pass ends by jumping to: packs
+/// the per-object size bytes at `$0420` into the OAM image's last 32
+/// bytes. SA-1 Pack replaces it with MaxTile's, which first rebuilds the
+/// whole image from its priority buffers, so an object is only where the
+/// game drew it until the frame gets here.
+pub const CONSOLIDATE_OAM: u32 = 0x00_8494;
 /// `CODE_02A802`: the body of `LoadSprFromLevel`, after its
 /// every-other-frame check. Spawns the level sprites at the column the
 /// camera position and scroll direction select. Lunar Magic reroutes

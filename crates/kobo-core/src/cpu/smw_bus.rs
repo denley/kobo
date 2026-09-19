@@ -4,10 +4,24 @@
 //! Only the pieces of hardware the loaders touch are modelled: the VRAM
 //! and CGRAM data ports, and general-purpose DMA to them. Everything
 //! else reads as zero and ignores writes.
+//!
+//! On an SA-1 cartridge the bus also runs the SA-1. Only one processor
+//! runs at a time: the SA-1 gets its turn when the S-CPU stops to wait,
+//! and runs until it in turn waits (its idle loop, or for the S-CPU to
+//! answer an IRQ). The game hands work over and then waits for it, so
+//! this is the order things happen in on the console too. It is not when
+//! the S-CPU starts the SA-1 or sends it an IRQ: SA-1 Pack's start-up
+//! clears the flag the SA-1 answers with just after releasing it from
+//! reset, counting on the SA-1 to take longer than that. The SA-1 sees
+//! the bus through [`Sa1View`].
 
-use crate::cpu::Bus;
+use crate::cpu::sa1::Processor;
+use crate::cpu::{Bus, Cpu, CpuError};
 use crate::ram::{Ram, RamMap};
 use crate::rom::Rom;
+
+/// Instruction limit for one turn of the SA-1.
+const SA1_STEP_LIMIT: u64 = 200_000_000;
 
 pub const VRAM_LEN: usize = 0x1_0000;
 pub const CGRAM_LEN: usize = 0x200;
@@ -36,6 +50,10 @@ pub struct SmwBus<'a> {
     vmadd: u16,
     /// CGRAM byte address (colour index * 2 + half).
     cgadd: u16,
+    /// Work RAM address of the data port `WMDATA` (`$2180`), 17 bits.
+    /// SA-1 Pack decompresses graphics into BW-RAM on the SA-1 and has
+    /// the S-CPU DMA them into work RAM through it.
+    wmadd: u32,
     /// Last values written to `BG1SC`-`BG4SC` (`$2107`-`$210A`): tilemap
     /// VRAM base and size per layer. Lunar Magic moves the layer 1 and 2
     /// tilemaps, so these are how to find them.
@@ -89,13 +107,14 @@ impl<'a> SmwBus<'a> {
     pub fn new(rom: &'a Rom) -> Self {
         Self {
             rom,
-            ram: Ram::new(RamMap::Vanilla),
+            ram: Ram::new(RamMap::of(rom)),
             vram: vec![0; VRAM_LEN],
             vram_written: vec![false; VRAM_LEN],
             cgram: vec![0; CGRAM_LEN],
             vmain: 0,
             vmadd: 0,
             cgadd: 0,
+            wmadd: 0,
             bg_sc: [0; 4],
             bg_character_base: [0; 4],
             bg_scroll: [[0; 2]; 4],
@@ -133,8 +152,48 @@ impl<'a> SmwBus<'a> {
         })
     }
 
+    /// Gives the SA-1 a turn: it runs until it waits. False if it got
+    /// nowhere, or there is none.
+    pub fn run_sa1(&mut self) -> bool {
+        let Some(sa1) = self.ram.sa1.as_deref_mut().filter(|sa1| sa1.runnable()) else {
+            return false;
+        };
+        let mut cpu = std::mem::take(&mut sa1.cpu);
+        let before = cpu.writes();
+        let result = cpu.run(&mut Sa1View(self), SA1_STEP_LIMIT, Cpu::returned);
+        let progressed = cpu.writes() != before;
+        let sa1 = self.ram.sa1.as_deref_mut().expect("checked above");
+        sa1.cpu = cpu;
+        sa1.fault = result.err();
+        progressed
+    }
+
+    /// The error that stopped the SA-1, which is why the S-CPU is about
+    /// to report waiting for it.
+    pub fn sa1_fault(&self) -> Option<CpuError> {
+        let fault = self.ram.sa1.as_ref()?.fault.clone()?;
+        Some(CpuError::Sa1(Box::new(fault)))
+    }
+
+    fn sa1_register(&mut self, processor: Processor, reg: u16) -> u8 {
+        let sa1 = self.ram.sa1.as_ref();
+        sa1.and_then(|sa1| sa1.read(processor, reg))
+            .unwrap_or_else(|| {
+                self.unmapped_reads += 1;
+                0
+            })
+    }
+
+    fn set_sa1_register(&mut self, processor: Processor, reg: u16, value: u8) {
+        let sa1 = self.ram.sa1.as_deref_mut();
+        if !sa1.is_some_and(|sa1| sa1.write(processor, reg, value)) {
+            self.unmapped_writes += 1;
+        }
+    }
+
     fn read_register(&mut self, reg: u16) -> u8 {
         match reg {
+            0x2200..=0x23FF => self.sa1_register(Processor::Main, reg),
             0x2140..=0x2143 => {
                 let i = (reg & 3) as usize;
                 if self.apu_in_transfer || i >= 2 {
@@ -144,6 +203,11 @@ impl<'a> SmwBus<'a> {
                 } else {
                     [0xAA, 0xBB][i]
                 }
+            }
+            0x2180 => {
+                let value = self.ram.peek(0x7E_0000 + self.wmadd);
+                self.wmadd = (self.wmadd + 1) & 0x1_FFFF;
+                value
             }
             0x4214 => self.quotient as u8,
             0x4215 => (self.quotient >> 8) as u8,
@@ -208,6 +272,7 @@ impl<'a> SmwBus<'a> {
 
     fn write_register(&mut self, reg: u16, value: u8) {
         match reg {
+            0x2200..=0x23FF => self.set_sa1_register(Processor::Main, reg, value),
             0x2101 => self.object_select = value,
             0x2105 => self.bg_mode = value,
             0x2107..=0x210A => self.bg_sc[(reg - 0x2107) as usize] = value,
@@ -263,6 +328,13 @@ impl<'a> SmwBus<'a> {
             0x2128..=0x2129 => self.window2[(reg - 0x2128) as usize] = value,
             0x212A..=0x212B => self.window_logic[(reg - 0x212A) as usize] = value,
             0x212E..=0x212F => self.window_masks[(reg - 0x212E) as usize] = value,
+            0x2180 => {
+                self.ram.poke(0x7E_0000 + self.wmadd, value);
+                self.wmadd = (self.wmadd + 1) & 0x1_FFFF;
+            }
+            0x2181 => self.wmadd = (self.wmadd & 0x1_FF00) | value as u32,
+            0x2182 => self.wmadd = (self.wmadd & 0x1_00FF) | (value as u32) << 8,
+            0x2183 => self.wmadd = (self.wmadd & 0x0_FFFF) | ((value & 1) as u32) << 16,
             0x2121 => self.cgadd = value as u16 * 2,
             0x2122 => {
                 self.cgram[self.cgadd as usize % CGRAM_LEN] = value;
@@ -375,9 +447,9 @@ impl<'a> SmwBus<'a> {
 impl Bus for SmwBus<'_> {
     fn read(&mut self, addr: u32) -> u8 {
         // Most reads are instruction fetches from the upper half of a
-        // bank, which is ROM everywhere but in the work RAM banks.
-        let work_ram_bank = addr >> 17 == 0x7E >> 1;
-        if addr & 0x8000 != 0 && !work_ram_bank {
+        // bank, which is ROM in every bank that is not RAM on some
+        // cartridge.
+        if addr & 0x8000 != 0 && !(0x40..=0x7F).contains(&(addr >> 16)) {
             return self.rom_read(addr);
         }
         if let Some(value) = self.ram.read(addr) {
@@ -398,6 +470,75 @@ impl Bus for SmwBus<'_> {
             _ => self.unmapped_writes += 1,
         }
     }
+
+    fn irq(&mut self) -> bool {
+        let sa1 = self.ram.sa1.as_ref();
+        sa1.is_some_and(|sa1| sa1.irq(Processor::Main))
+    }
+
+    fn irq_vector(&mut self, emulation: bool) -> u16 {
+        let sa1 = self.ram.sa1.as_ref();
+        sa1.and_then(|sa1| sa1.main_irq_vector())
+            .unwrap_or_else(|| {
+                let addr = if emulation { 0xFFFE } else { 0xFFEE };
+                u16::from_le_bytes([self.read(addr), self.read(addr + 1)])
+            })
+    }
+
+    fn wait(&mut self) -> bool {
+        self.run_sa1()
+    }
+}
+
+/// The bus as the SA-1 sees it: the cartridge and its own registers, and
+/// nothing of the console (no work RAM, no PPU or CPU registers).
+pub struct Sa1View<'a, 'r>(pub &'a mut SmwBus<'r>);
+
+impl Bus for Sa1View<'_, '_> {
+    fn read(&mut self, addr: u32) -> u8 {
+        let bus = &mut *self.0;
+        if addr & 0x8000 != 0 && !(0x40..=0x7F).contains(&(addr >> 16)) {
+            return bus.rom_read(addr);
+        }
+        if let Some(value) = bus.ram.read_sa1(addr) {
+            return value;
+        }
+        match ((addr >> 16) as u8, addr as u16) {
+            (0x00..=0x3F | 0x80..=0xBF, reg @ 0x2200..=0x23FF) => {
+                bus.sa1_register(Processor::Sa1, reg)
+            }
+            (0xC0..=0xFF, _) => bus.rom_read(addr),
+            _ => {
+                bus.unmapped_reads += 1;
+                0
+            }
+        }
+    }
+
+    fn write(&mut self, addr: u32, value: u8) {
+        let bus = &mut *self.0;
+        if bus.ram.write_sa1(addr, value) {
+            return;
+        }
+        match ((addr >> 16) as u8, addr as u16) {
+            (0x00..=0x3F | 0x80..=0xBF, reg @ 0x2200..=0x23FF) => {
+                bus.set_sa1_register(Processor::Sa1, reg, value)
+            }
+            _ => bus.unmapped_writes += 1,
+        }
+    }
+
+    fn irq(&mut self) -> bool {
+        let sa1 = self.0.ram.sa1.as_ref();
+        sa1.is_some_and(|sa1| sa1.irq(Processor::Sa1))
+    }
+
+    fn irq_vector(&mut self, _emulation: bool) -> u16 {
+        let sa1 = self.0.ram.sa1.as_ref();
+        sa1.map_or(0, |sa1| sa1.irq_vector())
+    }
+
+    // `wait` stays false: a waiting SA-1 ends its turn.
 }
 
 #[cfg(test)]
@@ -443,6 +584,152 @@ mod tests {
             [bus.read(0x4212), bus.read(0x4212), bus.read(0x4212)],
             [0, 0x40, 0]
         );
+    }
+
+    /// A 32 KiB SA-1 cartridge with `code` placed at bank 0 addresses.
+    fn sa1_rom(code: &[(u16, &[u8])]) -> Rom {
+        let mut data = vec![0u8; 0x8000];
+        data[0x7FC0 + 0x15] = 0x23;
+        for (addr, bytes) in code {
+            let at = (addr - 0x8000) as usize;
+            data[at..at + bytes.len()].copy_from_slice(bytes);
+        }
+        Rom::from_bytes(data).unwrap()
+    }
+
+    /// Points the SA-1's reset vector at `$8100` and its IRQ vector at
+    /// `$8140`, lets the SA-1 interrupt the S-CPU, and releases it.
+    const START_SA1: &[u8] = &[
+        0xA9, 0x00, 0x8D, 0x03, 0x22, // LDA #$00 : STA $2203
+        0xA9, 0x81, 0x8D, 0x04, 0x22, // LDA #$81 : STA $2204
+        0xA9, 0x40, 0x8D, 0x07, 0x22, // LDA #$40 : STA $2207
+        0xA9, 0x81, 0x8D, 0x08, 0x22, // LDA #$81 : STA $2208
+        0xA9, 0x80, 0x8D, 0x01, 0x22, // LDA #$80 : STA $2201
+        0x9C, 0x00, 0x22, // STZ $2200
+    ];
+
+    #[test]
+    fn the_processors_hand_work_to_each_other_and_wait() {
+        let mut main = START_SA1.to_vec();
+        main.extend([
+            0x58, // CLI
+            0xA9, 0x85, 0x8D, 0x00, 0x22, // LDA #$85 : STA $2200 (IRQ, message 5)
+            0xAD, 0x00, 0x30, 0xF0, 0xFB, // - LDA $3000 : BEQ -
+            0x6B, // RTL
+        ]);
+        let rom = sa1_rom(&[
+            (0x8000, &main),
+            (
+                // SA-1 reset: native mode, IRQs from the S-CPU on, idle.
+                0x8100,
+                &[
+                    0x18, 0xFB, // CLC : XCE
+                    0xA9, 0x80, 0x8D, 0x0A, 0x22, // LDA #$80 : STA $220A
+                    0x58, // CLI
+                    0xA5, 0x10, 0xF0, 0xFC, // - LDA $10 : BEQ -
+                    0xDB, // STP
+                ],
+            ),
+            (
+                // SA-1 IRQ: keeps the message, then has the S-CPU (vector
+                // `$8180`, message 7) do its part before finishing.
+                0x8140,
+                &[
+                    0xAD, 0x01, 0x23, 0x8D, 0x01, 0x30, // LDA $2301 : STA $3001
+                    0xA9, 0x80, 0x8D, 0x0B, 0x22, // LDA #$80 : STA $220B
+                    0xA9, 0x80, 0x8D, 0x0E, 0x22, // LDA #$80 : STA $220E
+                    0xA9, 0x81, 0x8D, 0x0F, 0x22, // LDA #$81 : STA $220F
+                    0xA9, 0xC7, 0x8D, 0x09, 0x22, // LDA #$C7 : STA $2209
+                    0xAD, 0x02, 0x30, 0xF0, 0xFB, // - LDA $3002 : BEQ -
+                    0xA9, 0x01, 0x8D, 0x00, 0x30, // LDA #$01 : STA $3000
+                    0x40, // RTI
+                ],
+            ),
+            (
+                // S-CPU IRQ, reached through the vector the SA-1 supplied.
+                0x8180,
+                &[
+                    0xAD, 0x00, 0x23, 0x8D, 0x03, 0x30, // LDA $2300 : STA $3003
+                    0xA9, 0x80, 0x8D, 0x02, 0x22, // LDA #$80 : STA $2202
+                    0xA9, 0x01, 0x8D, 0x02, 0x30, // LDA #$01 : STA $3002
+                    0x40, // RTI
+                ],
+            ),
+        ]);
+        let mut bus = SmwBus::new(&rom);
+        let mut cpu = Cpu::new();
+        cpu.call(&mut bus, 0x00_8000, 10_000).unwrap();
+        // Each side saw the other's message with the IRQ flag, and the
+        // S-CPU only got past its wait once the SA-1 had finished.
+        assert_eq!(bus.ram.peek(0x00_3001), 0x85);
+        assert_eq!(bus.ram.peek(0x00_3003), 0xC7);
+        assert_eq!(bus.ram.peek(0x00_3000), 1);
+        assert!(!bus.irq());
+        assert_eq!(bus.sa1_fault(), None);
+        // The SA-1 is back in its idle loop, which a turn gets nowhere in.
+        assert!(!bus.run_sa1());
+    }
+
+    #[test]
+    fn an_sa1_that_stops_is_why_the_wait_never_ends() {
+        let mut main = START_SA1.to_vec();
+        main.extend([0xAD, 0x00, 0x30, 0xF0, 0xFB, 0x6B]); // - LDA $3000 : BEQ - : RTL
+        let rom = sa1_rom(&[(0x8000, &main), (0x8100, &[0xDB])]); // STP
+        let mut bus = SmwBus::new(&rom);
+        let mut cpu = Cpu::new();
+        let error = cpu.call(&mut bus, 0x00_8000, 10_000).unwrap_err();
+        assert!(matches!(error, CpuError::Waiting { pb: 0, .. }), "{error}");
+        let halted = CpuError::Halted { pb: 0, pc: 0x8100 };
+        assert_eq!(bus.sa1_fault(), Some(CpuError::Sa1(Box::new(halted))));
+    }
+
+    #[test]
+    fn the_sa1_sees_the_cartridge_but_not_the_console() {
+        let rom = sa1_rom(&[(0x8000, &[0x12, 0x34])]);
+        let mut bus = SmwBus::new(&rom);
+        bus.write(0x7E_0010, 0xAA);
+        bus.write(0x00_3010, 0xBB);
+        bus.write(0x40_0123, 0xCC);
+        assert_eq!(bus.read(0x00_0010), 0xAA); // work RAM
+        let mut sa1 = Sa1View(&mut bus);
+        assert_eq!(sa1.read(0x00_0010), 0xBB); // I-RAM, mirrored down
+        assert_eq!(sa1.read(0x00_6123), 0xCC); // BW-RAM through the window
+        assert_eq!(sa1.read(0x00_8001), 0x34);
+        assert_eq!(sa1.read(0xC0_0001), 0x34); // the same ROM, whole banks
+        assert_eq!(sa1.read(0x7E_0010), 0); // no work RAM out here
+        sa1.write(0x00_2118, 0x55); // nor a PPU
+        assert_eq!(bus.vram[0], 0);
+        assert_eq!(bus.unmapped_writes, 1);
+    }
+
+    #[test]
+    fn the_work_ram_port_fills_work_ram() {
+        let rom = rom();
+        let mut bus = SmwBus::new(&rom);
+        for (reg, value) in [(0x2181, 0xFE), (0x2182, 0xFF), (0x2183, 0x01)] {
+            bus.write(reg, value);
+        }
+        // Four bytes from ROM `$008010` by DMA, across the 17-bit wrap.
+        for (reg, value) in [
+            (0x4300, 0x00),
+            (0x4301, 0x80),
+            (0x4302, 0x10),
+            (0x4303, 0x80),
+            (0x4304, 0x00),
+            (0x4305, 0x04),
+            (0x4306, 0x00),
+            (0x420B, 0x01),
+        ] {
+            bus.write(reg, value);
+        }
+        assert_eq!(bus.ram.peek(0x7F_FFFE), 0x10);
+        assert_eq!(bus.ram.peek(0x7F_FFFF), 0x11);
+        assert_eq!(bus.ram.peek(0x7E_0000), 0x12);
+        assert_eq!(bus.ram.peek(0x7E_0001), 0x13);
+        bus.write(0x2181, 0x00);
+        bus.write(0x2182, 0x00);
+        bus.write(0x2183, 0x00);
+        assert_eq!([bus.read(0x2180), bus.read(0x2180)], [0x12, 0x13]);
     }
 
     #[test]

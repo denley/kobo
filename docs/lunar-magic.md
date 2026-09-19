@@ -68,4 +68,5 @@ executable. Vanilla behaviour is in [smw.md](smw.md).
   `$02A856` into code that uses `$7FAF00` (256 entries) instead; `capture_sprites` detects
   that and clears or sets whichever table the loader reads. With only `$1938` cleared, the
   entrance screen's sprites never respawned in those hacks and came out as markers.
-- SA-1 hacks do not run yet: the SA-1 registers and its CPU are not modelled.
+- SA-1 hacks run on a second CPU; see [sa1.md](sa1.md). On one, SA-1 Pack's own loader hook is
+  at `$02A856`, not Lunar Magic's, and the flags are wherever the RAM map puts `$1938`.

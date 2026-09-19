@@ -1,8 +1,8 @@
 //! The CPU and bus a capture runs on, and how its routines are called.
 
-use super::ExpandError;
+use super::{ExpandError, routines};
 use crate::cpu::smw_bus::SmwBus;
-use crate::cpu::{Cpu, CpuError, Flags};
+use crate::cpu::{Bus, Cpu, CpuError, Flags};
 use crate::rom::Rom;
 
 /// Instruction limit for the game's own loading and per-frame routines.
@@ -18,8 +18,10 @@ enum Return {
 
 /// One call into the ROM: the routine and the register state its callers
 /// give it. Every call starts from freshly reset registers (8-bit
-/// accumulator and index, data bank and direct page zero) plus whatever
-/// is set here, so no routine sees what the previous one left behind.
+/// accumulator and index, data bank zero, the direct page on the game's
+/// own, interrupts enabled as they are outside the game's handlers) plus
+/// whatever is set here, so no routine sees what the previous one left
+/// behind.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Call {
     addr: u32,
@@ -98,9 +100,24 @@ impl<'r> Machine<'r> {
         }
     }
 
+    /// The registers every entry into the ROM starts from.
+    fn reset_registers(&mut self) {
+        self.cpu.reset_registers();
+        self.cpu.dp = self.bus.ram.map().direct_page();
+        // The only IRQs there are come from an SA-1 asking for something.
+        self.cpu.p &= !Flags::I;
+    }
+
     /// Runs a routine to its return. The registers it left are in `cpu`.
     pub fn try_call(&mut self, call: Call) -> Result<(), CpuError> {
-        self.cpu.reset_registers();
+        self.try_call_to(call, None).map(|_| ())
+    }
+
+    /// Runs a routine until it returns or first reaches `stop`. False if
+    /// it stopped there: the call is still open, for the caller to look
+    /// at the machine and then [`Machine::finish_call`].
+    pub fn try_call_to(&mut self, call: Call, stop: Option<u32>) -> Result<bool, CpuError> {
+        self.reset_registers();
         if call.wide_accumulator {
             self.cpu.p &= !Flags::M;
         }
@@ -110,9 +127,33 @@ impl<'r> Machine<'r> {
         self.cpu.db = call.data_bank;
         self.cpu.a = call.accumulator;
         match call.returns {
-            Return::Rtl => self.cpu.call(&mut self.bus, call.addr, call.limit),
-            Return::Rts => self.cpu.call_jsr(&mut self.bus, call.addr, call.limit),
+            Return::Rtl => self.cpu.enter(&mut self.bus, call.addr),
+            Return::Rts => self.cpu.enter_jsr(&mut self.bus, call.addr),
         }
+        self.finish(call.limit, stop)
+    }
+
+    /// Runs the call [`Machine::try_call_to`] left open to its return.
+    pub fn finish_call(&mut self, call: Call) -> Result<(), CpuError> {
+        self.finish(call.limit, None).map(|_| ())
+    }
+
+    fn finish(&mut self, limit: u64, stop: Option<u32>) -> Result<bool, CpuError> {
+        let returned = self
+            .cpu
+            .finish(&mut self.bus, limit, stop)
+            .map_err(|error| self.cause(error))?;
+        if returned {
+            // Work handed to an SA-1 that nothing waited for is still
+            // part of the routine.
+            self.bus.run_sa1();
+        }
+        Ok(returned)
+    }
+
+    /// An SA-1 that has stopped is why the S-CPU gave up waiting for it.
+    fn cause(&self, error: CpuError) -> CpuError {
+        self.bus.sa1_fault().unwrap_or(error)
     }
 
     /// [`Machine::try_call`] for routines the level cannot load without.
@@ -120,10 +161,20 @@ impl<'r> Machine<'r> {
         self.try_call(call).map_err(|source| self.error(source))
     }
 
+    /// Runs from power-on, through the cartridge's reset vector, until the
+    /// program counter reaches `stop`.
+    pub fn run_from_reset(&mut self, stop: u32, limit: u64) -> Result<(), ExpandError> {
+        self.cpu.reset_registers();
+        self.cpu.emulation = true;
+        let vector = routines::RESET_VECTOR;
+        let start = u16::from_le_bytes([self.bus.read(vector), self.bus.read(vector + 1)]);
+        self.resume_until(start as u32, stop, limit)
+    }
+
     /// Resets the registers and runs from `start` until the program
     /// counter reaches `stop`.
     pub fn run_until(&mut self, start: u32, stop: u32, limit: u64) -> Result<(), ExpandError> {
-        self.cpu.reset_registers();
+        self.reset_registers();
         self.resume_until(start, stop, limit)
     }
 
@@ -131,7 +182,7 @@ impl<'r> Machine<'r> {
     pub fn resume_until(&mut self, start: u32, stop: u32, limit: u64) -> Result<(), ExpandError> {
         self.cpu
             .run_until(&mut self.bus, start, stop, limit)
-            .map_err(|source| self.error(source))
+            .map_err(|source| self.error(self.cause(source)))
     }
 
     fn error(&self, source: CpuError) -> ExpandError {

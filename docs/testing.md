@@ -46,6 +46,13 @@ how each oracle is produced, where its data lives, and what is known not to matc
   Known exceptions in the corpus: `Smb2dx` (LM 1.63; 173 levels fail, its mode `$00`
   levels carry object layer 2 pointers) and `Super Hark Bros 2` level `00A` (mode `$0C`,
   896 of 2048 words), both failing before the vertical-level checks were added.
+- **SA-1**: there is no emulator oracle yet (`dump_levels.lua` reads `$7E` addresses). The
+  check is the reference ROM from [sa1.md](sa1.md) against the vanilla ROM with
+  `render_hashes`: the marker column must match on every level but the three boss arenas,
+  and the known differences in the drawn column are listed in
+  [known-gaps.md](known-gaps.md). `Super Diagonal Mario 2` is the corpus's one SA-1 hack;
+  all 512 levels render without a diagnostic, which says the code ran, not that the
+  pictures are right.
 - **Picture hashes**: `cargo run --release --example render_hashes -- rom.smc` prints a SHA-1
   of every level's picture, with sprites drawn and again as markers without the player. A
   change to `expand` or `render` that should leave every picture alone is checked by diffing

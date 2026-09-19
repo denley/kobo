@@ -6,6 +6,7 @@
 //! Kobo faithful to patched ROMs without re-implementing every routine.
 
 mod core65816;
+pub mod sa1;
 pub mod smw_bus;
 
-pub use core65816::{Bus, Cpu, CpuError, Flags};
+pub use core65816::{Bus, Cpu, CpuError, Flags, Run};
