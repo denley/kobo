@@ -66,11 +66,21 @@ executable. Vanilla behaviour is in [smw.md](smw.md).
   the mirrors, which go out every frame.
 - A ROM locked by its author has `JSL` to a short routine at the start of the decompression
   routine (`$00B8DE`), which changes the pointer in `$8A` before the file is read, so the GFX
-  pointer tables do not hold addresses. The files themselves are ordinary LC_LZ2. Six ROMs
-  of the corpus are locked (Invictus, both Super Dram Worlds, Smb2dx, two of the `SMW_2021`
-  set). `gfx::is_locked` recognises the routine and the GFX tooling refuses with
-  `GfxError::Locked`; levels load regardless, since the ROM's code runs. No ROM in the
-  corpus stores graphics as LC_LZ3, and nothing reads it.
+  pointer tables do not hold addresses. The files themselves are ordinary LC_LZ2. Seven
+  `.smc` ROMs of the corpus are locked (Invictus, both Super Dram Worlds, Smb2dx, Baby Kaizo
+  World 3, two of the `SMW_2021` set) and one QLDC entry. `gfx::is_locked` recognises the routine and the GFX tooling refuses with
+  `GfxError::Locked`; levels load regardless, since the ROM's code runs.
+- Lunar Magic can store a ROM's GFX and ExGFX as LC_LZ3 instead of LC_LZ2, all files at
+  once. It then puts `JSL` to its own routine, in a RATS block, at `$00B8E3` inside the
+  game's decompression routine, which it does for its faster LC_LZ2 routine as well (and
+  SA-1 Pack for its own), so the hijack does not say which format; nor does anything else
+  in the ROM. `gfx::Compression::detect` decodes the 50 table files both ways and takes the
+  format more of them come out whole in: 46-50 for the right one, at most 18 for the other
+  (a file of copies and fills alone reads the same in both). LC_LZ3 is `compress::lz3`:
+  command 3 is a zero fill with no operand, 4-6 copy from the output (as is, bits
+  reversed, backwards), and their source is a 15-bit big-endian offset or, with bit 7 of
+  its first byte set, seven bits counting back from the last byte written. One hack of the
+  corpus uses it: QLDC 2021 `34_idol`.
 - FastROM patches run the whole game from banks `$80` and up (Super Riff World 1.4 reaches
   its game loop at `$80806B`). `SmwBus::code_mirrors` gives both addresses of a routine for
   anything that waits for the program counter to get somewhere.

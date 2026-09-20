@@ -43,7 +43,7 @@ What a rendered level does not reproduce, and what the tooling does not handle.
 - HDMA is not run, so whatever a hack changes by scanline is missing: a gradient sky
   (Luminescent level `148` writes the fixed colour per line) comes out as the one colour the
   level's back area has.
-- The GFX tooling reads LC_LZ2 only, and nothing in the corpus stores LC_LZ3 (which Lunar
-  Magic offers). It refuses ROMs their authors locked (`GfxError::Locked`, see
+- The GFX tooling refuses ROMs their authors locked (`GfxError::Locked`, see
   [lunar-magic.md](lunar-magic.md)): their pointer tables are not addresses. Levels are
-  unaffected, since the ROM's own decompression runs for them.
+  unaffected, since the ROM's own decompression runs for them. There is no LC_LZ2 or
+  LC_LZ3 encoder yet, which the build will need.

@@ -33,7 +33,7 @@ mod sprite_capture;
 mod tiles;
 
 pub use diagnostics::{Diagnostic, Pass, summarize};
-pub use load::{ReadTrace, expand_level, expand_level_traced};
+pub use load::{ReadTrace, decompress_gfx_file, expand_level, expand_level_traced};
 pub use loaded::LoadedLevel;
 pub use oam::object_sizes;
 pub use sprite_capture::{LATE_SPRITE_FRAMES, capture_sprites};
@@ -49,6 +49,12 @@ pub enum ExpandError {
     #[error("level {level:03X}: {source}")]
     Cpu {
         level: u16,
+        #[source]
+        source: CpuError,
+    },
+    #[error("GFX{index:02X}: {source}")]
+    Gfx {
+        index: u8,
         #[source]
         source: CpuError,
     },

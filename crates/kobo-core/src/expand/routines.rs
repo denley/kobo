@@ -9,6 +9,9 @@ pub const GAME_LOOP: u32 = 0x00_806B;
 pub const LOAD_HEADER_POINTERS: u32 = 0x05_D796;
 /// `CODE_05801E`: clears the buffers and runs `LoadLevel`.
 pub const LOAD_LEVEL_DATA: u32 = 0x05_801E;
+/// `PrepareGraphicsFile`: decompresses the GFX file whose number is in Y
+/// into the buffer at `$7EAD00`. Returns with `RTL`.
+pub const DECOMPRESS_GFX_FILE: u32 = 0x00_BA28;
 /// `CODE_00B888`: decompresses GFX32/GFX33 into RAM. The game runs it
 /// once during the "Nintendo Presents" screen; the animated tile
 /// uploads read from that RAM.

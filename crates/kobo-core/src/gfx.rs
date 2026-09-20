@@ -1,6 +1,7 @@
 //! 8x8 tile graphics: SNES bit-plane formats and SMW's numbered GFX files.
 //!
-//! SMW stores GFX files `00` to `31` LC_LZ2-compressed. Vanilla files are
+//! SMW stores GFX files `00` to `31` LC_LZ2-compressed; Lunar Magic can
+//! recompress a hack's as LC_LZ3 ([`Compression`]). Vanilla files are
 //! 3bpp or 2bpp; Lunar Magic may re-insert files as 4bpp. Each file has a
 //! fixed tile count, so the bit depth follows from the decompressed size.
 //! `GFX27` holds the Mode 7 boss tiles, whose pixels are packed three bits
@@ -17,7 +18,7 @@
 use thiserror::Error;
 
 use crate::addr::SnesAddr;
-use crate::compress::lz2::{self, Lz2Error};
+use crate::compress::{Decompressed, LzError, lz2, lz3};
 use crate::rom::{Rom, RomError};
 
 /// Number of GFX files: `00` to `31` through the pointer tables, then
@@ -226,7 +227,7 @@ pub enum GfxError {
         index: u8,
         addr: SnesAddr,
         #[source]
-        source: Lz2Error,
+        source: LzError,
     },
 }
 
@@ -311,6 +312,54 @@ pub fn gfx_file_ptr(rom: &Rom, index: u8) -> Result<SnesAddr, GfxError> {
     ))
 }
 
+/// How a ROM's GFX files are compressed. Lunar Magic changes all of them
+/// at once and replaces the game's decompression routine to match.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Compression {
+    Lz2,
+    Lz3,
+}
+
+impl Compression {
+    pub fn decompress(self, input: &[u8]) -> Result<Decompressed, LzError> {
+        match self {
+            Self::Lz2 => lz2::decompress(input),
+            Self::Lz3 => lz3::decompress(input),
+        }
+    }
+
+    /// The format a ROM's files are in. Nothing in the ROM states it (the
+    /// routine Lunar Magic installs is its own), so this is the format in
+    /// which more of the pointer tables' files come out whole. The two
+    /// agree on a file that only copies and fills, which is why a count
+    /// decides and not one file: in the corpus it is 46 to 50 of the 50
+    /// for the format in use and at most 18 for the other.
+    pub fn detect(rom: &Rom) -> Result<Self, GfxError> {
+        let whole = |compression: Self| {
+            (0..GFX_TABLE_FILES)
+                .filter(|&index| decompress_file(rom, index, compression).is_ok())
+                .count()
+        };
+        if is_locked(rom) {
+            return Err(GfxError::Locked);
+        }
+        Ok(if whole(Self::Lz3) > whole(Self::Lz2) {
+            Self::Lz3
+        } else {
+            Self::Lz2
+        })
+    }
+}
+
+impl std::fmt::Display for Compression {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Lz2 => "LC_LZ2",
+            Self::Lz3 => "LC_LZ3",
+        })
+    }
+}
+
 /// A decompressed GFX file in its stored format.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct GfxFile {
@@ -322,6 +371,7 @@ pub struct GfxFile {
     pub addr: SnesAddr,
     /// Size of the compressed data including the terminator.
     pub compressed_len: usize,
+    pub compression: Compression,
 }
 
 impl GfxFile {
@@ -410,16 +460,23 @@ pub fn vram_upper_palette_tiles(index: u8, tileset: u8, tile_count: usize) -> Ve
     }
 }
 
-/// Reads and decompresses GFX file `index` (`00` to `33`).
+/// Reads and decompresses GFX file `index` (`00` to `33`), in whichever
+/// format the ROM's files are in.
 pub fn read_gfx_file(rom: &Rom, index: u8) -> Result<GfxFile, GfxError> {
+    decompress_file(rom, index, Compression::detect(rom)?)
+}
+
+fn decompress_file(rom: &Rom, index: u8, compression: Compression) -> Result<GfxFile, GfxError> {
     let addr = gfx_file_ptr(rom, index)?;
     let pc = rom.pc(addr).map_err(RomError::from)?;
     let input = &rom.data()[pc.as_usize()..];
-    let d = lz2::decompress(input).map_err(|source| GfxError::Decompress {
-        index,
-        addr,
-        source,
-    })?;
+    let d = compression
+        .decompress(input)
+        .map_err(|source| GfxError::Decompress {
+            index,
+            addr,
+            source,
+        })?;
     let format = infer_format(index, d.data.len())?;
     Ok(GfxFile {
         index,
@@ -427,6 +484,7 @@ pub fn read_gfx_file(rom: &Rom, index: u8) -> Result<GfxFile, GfxError> {
         data: d.data,
         addr,
         compressed_len: d.consumed,
+        compression,
     })
 }
 

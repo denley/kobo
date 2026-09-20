@@ -419,6 +419,8 @@ const fn ram(addr: u32) -> RamAddr {
 /// `$0100`: the game mode. Lunar Magic's tilemap upload checks it.
 pub const GAME_MODE: RamAddr = ram(0x7E_0100);
 /// `$0101`-`$0108`: the GFX files currently in VRAM. `$FF` forces uploads.
+/// Where the game decompresses a GFX file to before uploading it.
+pub const GFX_BUFFER: RamAddr = ram(0x7E_AD00);
 pub const LOADED_GFX_FILES: RamAddr = ram(0x7E_0101);
 pub const LOADED_GFX_FILES_LEN: u32 = 8;
 /// `$10`: zero once the game loop has finished a frame. The NMI handler

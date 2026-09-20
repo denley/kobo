@@ -642,9 +642,7 @@ fn rom_info(rom: &Rom) -> Result<()> {
 }
 
 fn gfx_list(rom: &Rom) -> Result<()> {
-    if gfx::is_locked(rom) {
-        return Err(gfx::GfxError::Locked.into());
-    }
+    println!("compression: {}", gfx::Compression::detect(rom)?);
     println!("file   addr     format  tiles  stored  compressed");
     for index in 0..GFX_FILE_COUNT {
         match gfx::read_gfx_file(rom, index) {

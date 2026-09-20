@@ -110,6 +110,25 @@ pub fn expand_level_traced(
     Ok((level, trace))
 }
 
+/// The first `len` bytes of GFX file `index` (`00` to `31`) as the ROM's
+/// own code decompresses it, whatever routine a hack has put in the
+/// game's place. This is what [`crate::gfx`]'s decoders are checked
+/// against; a level's graphics always come this way.
+pub fn decompress_gfx_file(rom: &Rom, index: u8, len: usize) -> Result<Vec<u8>, ExpandError> {
+    let mut machine = Machine::new(rom, 0);
+    let failed = |source| ExpandError::Gfx { index, source };
+    machine
+        .run_from_reset(routines::GAME_LOOP, RESET_STEP_LIMIT)
+        .map_err(|error| match error {
+            ExpandError::Cpu { source, .. } => failed(source),
+            other => other,
+        })?;
+    machine
+        .try_call(Call::jsl(routines::DECOMPRESS_GFX_FILE).index_y(index as u16))
+        .map_err(failed)?;
+    Ok(machine.bus.ram.bytes(ram::GFX_BUFFER, len))
+}
+
 /// Brings the machine to where the game is when a level load starts.
 /// The reset code runs up to the main loop: it builds the RAM-resident
 /// OAM reset routine, uploads the SPC engine (against a stub that echoes

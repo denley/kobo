@@ -32,6 +32,7 @@ pub(super) struct Call {
     wide_index: bool,
     data_bank: u8,
     accumulator: u16,
+    index_y: u16,
     limit: u64,
 }
 
@@ -44,6 +45,7 @@ impl Call {
             wide_index: false,
             data_bank: 0,
             accumulator: 0,
+            index_y: 0,
             limit: STEP_LIMIT,
         }
     }
@@ -77,6 +79,11 @@ impl Call {
 
     pub const fn accumulator(mut self, value: u16) -> Self {
         self.accumulator = value;
+        self
+    }
+
+    pub const fn index_y(mut self, value: u16) -> Self {
+        self.index_y = value;
         self
     }
 
@@ -137,6 +144,7 @@ impl<'r> Machine<'r> {
         }
         self.cpu.db = call.data_bank;
         self.cpu.a = call.accumulator;
+        self.cpu.y = call.index_y;
         match call.returns {
             Return::Rtl => self.cpu.enter(&mut self.bus, call.addr),
             Return::Rts => self.cpu.enter_jsr(&mut self.bus, call.addr),

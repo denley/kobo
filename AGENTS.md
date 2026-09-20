@@ -209,7 +209,7 @@ describes that module's code rather than the game). Do not grow this file with t
   Asar, and the ability to expose the core to Python, Lua, JS, and WebAssembly later.
 - **Headless 65816 core for object rendering.** `kobo_core::cpu` executes the ROM's own
   level-loading routines rather than re-implementing every object; validated against emulator
-  dumps of every vanilla level. Small formats (LC_LZ2, GFX, palettes) are hand-written because
+  dumps of every vanilla level. Small formats (LC_LZ2 and LC_LZ3, GFX, palettes) are hand-written because
   the build must also encode them.
 
 ## Open decisions

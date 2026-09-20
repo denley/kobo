@@ -1,100 +1,24 @@
 //! LC_LZ2, the compression SMW uses for GFX files and other assets.
 //!
-//! A stream is a sequence of chunks, each starting with a header byte:
-//! the top three bits are the command and the low five bits are the
-//! length minus one. A command of 7 marks a long header: the command moves
-//! to bits 2 to 4 and the length becomes ten bits spanning the low two bits
-//! and the following byte. A header byte of `$FF` ends the stream.
-//!
-//! Commands:
+//! Commands (see [`super`] for the chunk headers):
 //! 0 direct copy, 1 byte fill, 2 word fill, 3 incrementing fill, 4 copy
 //! from an earlier point in the output (big-endian 16-bit offset).
 
-use thiserror::Error;
-
-/// Output offsets are 16-bit, so no stream can address more than this.
-pub const MAX_OUTPUT: usize = 0x1_0000;
-
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum Lz2Error {
-    #[error("compressed data ends at offset {0} without a terminator")]
-    Truncated(usize),
-    #[error("unknown command {cmd} at offset {offset}")]
-    BadCommand { cmd: u8, offset: usize },
-    #[error(
-        "back-reference to output offset {src} at input offset {offset} points past the {len} bytes produced so far"
-    )]
-    BadBackRef {
-        src: usize,
-        len: usize,
-        offset: usize,
-    },
-    #[error("decompressed output exceeds {MAX_OUTPUT} bytes")]
-    TooLarge,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct Decompressed {
-    pub data: Vec<u8>,
-    /// Number of input bytes consumed, including the terminator.
-    pub consumed: usize,
-}
+use super::{Decompressed, LzError};
 
 /// Decompresses one LC_LZ2 stream from the start of `input`. Trailing
 /// bytes after the terminator are ignored.
-pub fn decompress(input: &[u8]) -> Result<Decompressed, Lz2Error> {
-    let mut out = Vec::new();
-    let mut pos = 0;
-    let byte = |at: usize| input.get(at).copied().ok_or(Lz2Error::Truncated(at));
-    loop {
-        let start = pos;
-        let header = byte(pos)?;
-        pos += 1;
-        if header == 0xFF {
-            return Ok(Decompressed {
-                data: out,
-                consumed: pos,
-            });
-        }
-        let (cmd, len) = if header >> 5 == 7 {
-            let low = byte(pos)?;
-            pos += 1;
-            let len = (((header & 0x03) as usize) << 8) | low as usize;
-            ((header >> 2) & 0x07, len + 1)
-        } else {
-            (header >> 5, (header & 0x1F) as usize + 1)
-        };
-        if out.len() + len > MAX_OUTPUT {
-            return Err(Lz2Error::TooLarge);
-        }
+pub fn decompress(input: &[u8]) -> Result<Decompressed, LzError> {
+    super::decompress(input, |cmd, len, start, reader, out| {
         match cmd {
-            0 => {
-                let src = input
-                    .get(pos..pos + len)
-                    .ok_or(Lz2Error::Truncated(input.len()))?;
-                out.extend_from_slice(src);
-                pos += len;
-            }
-            1 => {
-                let b = byte(pos)?;
-                pos += 1;
-                out.extend(std::iter::repeat_n(b, len));
-            }
-            2 => {
-                let pair = [byte(pos)?, byte(pos + 1)?];
-                pos += 2;
-                out.extend((0..len).map(|i| pair[i & 1]));
-            }
             3 => {
-                let b = byte(pos)?;
-                pos += 1;
+                let b = reader.byte()?;
                 out.extend((0..len).map(|i| b.wrapping_add(i as u8)));
             }
             4 => {
-                let src = ((byte(pos)? as usize) << 8) | byte(pos + 1)? as usize;
-                pos += 2;
+                let src = ((reader.byte()? as usize) << 8) | reader.byte()? as usize;
                 if src >= out.len() {
-                    return Err(Lz2Error::BadBackRef {
+                    return Err(LzError::BadBackRef {
                         src,
                         len: out.len(),
                         offset: start,
@@ -106,9 +30,10 @@ pub fn decompress(input: &[u8]) -> Result<Decompressed, Lz2Error> {
                     out.push(b);
                 }
             }
-            _ => return Err(Lz2Error::BadCommand { cmd, offset: start }),
+            _ => return Ok(false),
         }
-    }
+        Ok(true)
+    })
 }
 
 #[cfg(test)]
@@ -191,20 +116,20 @@ mod tests {
 
     #[test]
     fn errors() {
-        assert_eq!(decompress(&[]), Err(Lz2Error::Truncated(0)));
-        assert_eq!(decompress(&[0x02, b'a']), Err(Lz2Error::Truncated(2)));
-        assert_eq!(decompress(&[0x00, b'a']), Err(Lz2Error::Truncated(2)));
+        assert_eq!(decompress(&[]), Err(LzError::Truncated(0)));
+        assert_eq!(decompress(&[0x02, b'a']), Err(LzError::Truncated(2)));
+        assert_eq!(decompress(&[0x00, b'a']), Err(LzError::Truncated(2)));
         assert_eq!(
             decompress(&[0xA0, 0x00, 0xFF]),
-            Err(Lz2Error::BadCommand { cmd: 5, offset: 0 })
+            Err(LzError::BadCommand { cmd: 5, offset: 0 })
         );
         assert_eq!(
             decompress(&[0xE0 | (7 << 2), 0x00, 0xFF]),
-            Err(Lz2Error::BadCommand { cmd: 7, offset: 0 })
+            Err(LzError::BadCommand { cmd: 7, offset: 0 })
         );
         assert_eq!(
             decompress(&[0x00, b'a', 0x80, 0x00, 0x05, 0xFF]),
-            Err(Lz2Error::BadBackRef {
+            Err(LzError::BadBackRef {
                 src: 5,
                 len: 1,
                 offset: 2
@@ -220,6 +145,6 @@ mod tests {
             input.extend([0xE0 | (1 << 2) | 0x03, 0xFF, 0x00]);
         }
         input.push(0xFF);
-        assert_eq!(decompress(&input), Err(Lz2Error::TooLarge));
+        assert_eq!(decompress(&input), Err(LzError::TooLarge));
     }
 }

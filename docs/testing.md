@@ -77,6 +77,17 @@ how each oracle is produced, where its data lives, and what is known not to matc
   FastROM bank ([lunar-magic.md](lunar-magic.md)), and layer 2 left wherever level-init
   code put it ([smw.md](smw.md)).
 - Lunar Magic exports (hashes in `tests/fixtures/`) are the oracle for GFX, palette, and Map16.
+- **Decompression**: `tests/gfx_decompression.rs` decodes every GFX file of the pointer
+  tables natively and has the ROM decompress the same file on the headless CPU
+  (`expand::decompress_gfx_file`, the game's `PrepareGraphicsFile` with whatever routine a
+  hack put behind it); the two must agree. It runs on the vanilla ROM and on `KOBO_LM_ROMS`,
+  skipping locked ROMs. QLDC 2021 `34_idol` (a BPS patch) is the one LC_LZ3 hack in the
+  corpus, so list it to exercise that decoder; all 50 of its files agree, as do those of
+  LC_LZ2 hacks on LoROM, SA-1, and a 6 MiB SA-1 image. Lunar Magic's `-ExportGFX` of it
+  agrees on all 52 files as well (`fixtures/lunar_magic_gfx_export.txt`, by ROM hash).
+  Lunar Magic asks before it touches a headerless ROM, which a headless run never gets
+  past: a patched BPS comes out headerless, so export from a copy with 512 zero bytes in
+  front.
 - **CPU suite**: `tests/cpu_single_step.rs` runs the 65816 core against SingleStepTests
   (10,000 native-mode tests per opcode, about a second in release) when `KOBO_65816_TESTS`
   points at the suite's `v1` directory. The native files are in
