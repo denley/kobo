@@ -339,7 +339,7 @@ fn expanded_height_lays_screens_out_with_a_taller_stride() {
 
 #[test]
 fn sprite_objects_respect_layer_priorities() {
-    use kobo_core::video::{SpriteObject, SpriteScene};
+    use kobo_core::video::{Character, DynamicObjects, SpriteObject, SpriteScene};
     let (mut loaded, gfx, palette) = scene();
     loaded.tiles.layer2_tilemap = None;
     loaded.tiles.screens = 1;
@@ -375,15 +375,39 @@ fn sprite_objects_respect_layer_priorities() {
             },
         ],
         object_select: 0x03,
-        undrawn: vec![],
-        layer2_objects: vec![],
-        diagnostics: vec![],
+        ..Default::default()
     };
     let mut layers = render::level_layers(&loaded, &gfx);
     render::draw_sprite_scene(&mut layers, &scene, [0, 0], &vram);
     let img = render::compose_level(&loaded, &layers, &pal);
     assert_eq!(img.pixels[0], [0, 255, 0]); // priority 2 beats low-priority layer 1
     assert_eq!(img.pixels[16], [255, 0, 0]); // but not high-priority layer 1
+
+    // A capture that uploaded its own characters is drawn with them, over
+    // the red tile; character 2 is empty in VRAM, for everyone else.
+    let small = SpriteObject {
+        x: 0,
+        y: 0,
+        tile: 2,
+        attr: 0x20,
+        large: false,
+    };
+    let uploaded = SpriteScene {
+        objects: vec![small.translated(0, 8)],
+        dynamic: vec![DynamicObjects {
+            objects: vec![small],
+            characters: vec![Character {
+                address: 0xC000 + 2 * 32,
+                data: vram[0xC000..0xC020].try_into().unwrap(),
+            }],
+        }],
+        ..scene.clone()
+    };
+    let mut layers = render::level_layers(&loaded, &gfx);
+    render::draw_sprite_scene(&mut layers, &uploaded, [0, 0], &vram);
+    let img = render::compose_level(&loaded, &layers, &pal);
+    assert_eq!(img.pixels[0], [0, 255, 0]);
+    assert_eq!(img.pixels[8 * 256], [255, 0, 0]);
 
     // An object riding on layer 2 shows wherever that layer is drawn,
     // once per 256 pixels: at x = 40 + 16 - 256k with the layer 16 right.

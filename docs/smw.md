@@ -16,13 +16,21 @@ are SMWDisX's.
   `$00B9F6`. Lunar Magic keeps these tables and rewrites the entries (often into FastROM
   banks `$80+`). Data is LC_LZ2. Vanilla files are 3bpp (2bpp for `27`-`2B`, `2F`); Lunar
   Magic re-inserts files as 4bpp, so bit depth is inferred from decompressed size and the
-  file's fixed tile count (128, except `2F`-`31` = 64). `GFX27` is not planar tiles at any depth
-  and is treated as raw bytes; its layout is unknown.
+  file's fixed tile count (128, except `2F`-`31` = 64). `GFX27` is the Mode 7 tiles of Iggy's
+  platform and the Reznor sign: 128 tiles of 3-bit pixels packed most significant bit first,
+  three bytes to a row of eight, which `CODE_00AB42` unpacks a pixel to a byte into the high
+  bytes of VRAM (`gfx::GfxFormat::Packed3`).
+- `GFX32` (Mario, 744 tiles, stored 4bpp) and `GFX33` (animated tiles, 384 tiles, stored 3bpp)
+  are LC_LZ2 like the rest but have no pointer table entry: `CODE_00B888` loads them from
+  immediates, `LDY #GFX33` at `$00B88A`, the bank of both in the `LDA #` at `$00B88F`, and
+  `LDA #GFX32` at `$00B8D7`. It decompresses `GFX33` to `$7E2000`, widens it to 4bpp at
+  `$7E7D00`, then decompresses `GFX32` to `$7E2000`. Lunar Magic rewrites the three operands
+  when it moves the files, stores `GFX33` as 4bpp, and replaces the widening loop with a
+  direct decompression to `$7E7D00`.
 - The game's `UploadGFXFile` sets the fourth plane to the tile silhouette for the first 16x16
   block of `GFX01`/`17`/`31` (the berry, drawn with colours 9-F) and for all of `GFX1E` (and
   `GFX08` in tilesets `$11+`). Lunar Magic's export mirrors this except it skips `17` and flags a
   fixed subset of `08`; see `gfx::upper_palette_tiles` vs `gfx::vram_upper_palette_tiles`.
-  `GFX32`/`GFX33` are stored differently and are not handled.
 - GFX lists: `$00A92B` object tilesets (FG1, FG2, BG1, FG3), `$00A8C3` sprite tilesets (SP1-4),
   4 bytes per row, 26 rows. VRAM: FG1/FG2/BG1/FG3 at 8x8 tiles `$000`/`$080`/`$100`/`$180`;
   SP1-4 at word `$6000`/`$6800`/`$7000`/`$7800`; layer 3 `GFX28`-`2B` at word `$4000`.
@@ -251,6 +259,37 @@ are SMWDisX's.
   `89`, `8C`, `8E`, `C7`, and the slotless ones. Every such pass is listed in
   `SpriteScene::diagnostics` with the CPU error. Rendering stacks by Mode 1 priority:
   layer 2 low (5), layer 1 low (6), layer 2 high (8), layer 1 high (9), objects 2/4/7/10.
+
+- Slots. The loader searches down from a maximum the sprite memory setting (`$1692`) picks
+  (`SpriteSlotMax`, with reserved ranges for one or two sprite numbers per setting) to the
+  first free slot, so a sprite's slot depends on which sprites are alive when its column loads,
+  and some sprites look at theirs: the Yoshi's House birds take their colour from it, the
+  Blurps of level `011` and others their animation phase, and the line-guided rope its length
+  (nine segments from slot 6 up under a setting other than zero, else five; `CODE_01DC54`). The
+  loader works on the column `$120` pixels ahead of a camera moving right or down and `$30`
+  behind one moving left or up (`DATA_02A7F6`), most sprites erase themselves `$40` beyond the
+  screen, and on entry `CODE_02AC5C` loads 32 columns from `$60` before the camera, left to
+  right (top to bottom in a vertical level), calling the loader twice for each. The capture
+  therefore loads a column twice. First with the slots taken that the sprites of the columns
+  before it get: those before it in the entry load, or past that the columns within `$160`
+  pixels on the entrance's side, in the order the camera passes them. Only the slot statuses
+  are carried over, not the cluster sprites, generator, or scroll command those columns set up,
+  and the slots are emptied again before any frame runs. Then, as before, with every slot free,
+  which picks up whatever found no slot the first time. With that the birds of level `104` have
+  Mesen's colours.
+- Every frame of a sprite pass is followed by the ROM's whole NMI handler with the lag flag
+  `$10` clear, as the console would run it: some sprites have no tiles until it has run.
+  `CODE_01E198` (the Podoboo) and `CODE_02EA25` (a baby Yoshi) rewrite the object's tile to
+  `06` and point `$0D8B`/`$0D95` (`DynGfxTilePtr+6`/`+$10`) at that frame in the animated
+  tile buffer (`$7E8500` on); Yoshi does the same with two tiles, `06` and `08`, and the
+  next pair of pointers. `MarioGFXDMA` then copies them to VRAM words `$6060` and `$6160` along with the
+  player's tiles, since the player sets the tile count `$0D84` to `$0A` every frame. Custom
+  dynamic sprites upload from code their patch hooks into the handler. The capture therefore
+  runs on video memory of its own, reset to the level's before every spot, and keeps the
+  characters of a pass's objects that differ from the level's (`SpriteScene::dynamic`,
+  `video::DynamicObjects`): two sprites can put different pictures in the same tile, so the
+  scene cannot share one VRAM. The player pass still runs the OAM upload and `MarioGFXDMA`
+  alone, because its video memory is the level's.
 
 - OAM is read as the PPU gets it. After every frame the ROM's own upload runs
   (`DoSomeSpriteDMA`, `$008449`: a DMA of `$0200`-`$041F` to `$2104`), and the bus keeps

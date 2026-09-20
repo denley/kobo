@@ -239,6 +239,62 @@ impl SpriteObject {
             ..self
         }
     }
+
+    /// VRAM byte address of the 8x8 character `column` across and `row`
+    /// down the unflipped object. `object_select` is `OBSEL`, which holds
+    /// the base of the two name tables; a large object's characters
+    /// follow its first one across and down the 16-wide table, wrapping
+    /// within it on both axes.
+    pub fn character_address(&self, object_select: u8, column: usize, row: usize) -> usize {
+        let tile = self.tile as usize;
+        let number = (((tile & 0xF0) + row * 16) & 0xF0) | ((tile + column) & 15);
+        let select = object_select as usize;
+        let table = if self.attr & 1 != 0 {
+            (((select >> 3) & 3) + 1) * 0x2000
+        } else {
+            0
+        };
+        (((select & 7) << 14) + table + number * OBJECT_CHARACTER_LEN) & 0xFFFF
+    }
+}
+
+/// Bytes of one 8x8 object character: objects are always 4bpp.
+pub const OBJECT_CHARACTER_LEN: usize = 32;
+
+/// An 8x8 character as a sprite pass left it in VRAM.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Character {
+    /// VRAM byte address.
+    pub address: u16,
+    pub data: [u8; OBJECT_CHARACTER_LEN],
+}
+
+/// Objects drawn with characters the game uploads as it draws them, so
+/// that they are not in the level's VRAM: the Podoboo has its frame copied
+/// over tile `06` by the player's per-frame tile upload, and custom
+/// dynamic sprites upload theirs from their own NMI code. Two such
+/// sprites can use the same tile for different pictures, so each capture
+/// keeps its own.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DynamicObjects {
+    /// Front to back, in level coordinates.
+    pub objects: Vec<SpriteObject>,
+    /// The characters of `objects` that differ from the level's VRAM.
+    pub characters: Vec<Character>,
+}
+
+impl DynamicObjects {
+    /// `vram` with this capture's characters in place.
+    pub fn patched(&self, vram: &[u8]) -> Vec<u8> {
+        let mut vram = vram.to_vec();
+        for character in &self.characters {
+            let at = character.address as usize;
+            if let Some(bytes) = vram.get_mut(at..at + OBJECT_CHARACTER_LEN) {
+                bytes.copy_from_slice(&character.data);
+            }
+        }
+        vram
+    }
 }
 
 /// A level sprite entry that drew nothing, for the renderer to mark.
@@ -257,6 +313,8 @@ pub struct UndrawnSprite {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SpriteScene {
     pub objects: Vec<SpriteObject>,
+    /// Captures drawn with characters of their own, behind `objects`.
+    pub dynamic: Vec<DynamicObjects>,
     /// `OBSEL`: object sizes and character base.
     pub object_select: u8,
     /// Entries with no graphics.

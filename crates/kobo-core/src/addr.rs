@@ -110,6 +110,46 @@ pub enum MapError {
     OutOfRange(PcAddr, Mapping),
 }
 
+/// The SA-1's Super MMC bank registers `CXB`, `DXB`, `EXB`, and `FXB`
+/// (`$2220`-`$2223`), one per quarter of the ROM's two views: the HiROM
+/// view in banks `$C0`-`$FF`, 1 MiB to a register, and the LoROM view in
+/// the upper halves of banks `$00`-`$3F` and `$80`-`$BF`. Bits 2-0 pick
+/// the 1 MiB block of the image a quarter of the HiROM view shows; the
+/// LoROM view shows the same block if bit 7 is set, and else block 0, 1,
+/// 2, or 3, whichever quarter it is.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct SuperMmc(pub [u8; 4]);
+
+impl SuperMmc {
+    /// The registers as the chip resets them: both views show the first
+    /// 4 MiB in order.
+    pub const RESET: Self = Self([0, 1, 2, 3]);
+
+    /// Converts a SNES address to a ROM file offset, or `None` if it is
+    /// in neither view.
+    pub const fn snes_to_pc(self, addr: SnesAddr) -> Option<PcAddr> {
+        let a = addr.raw();
+        if (a & 0x40_8000) == 0x00_8000 {
+            // LoROM view: banks 00-1F, 20-3F, 80-9F, and A0-BF.
+            let quarter = ((a >> 21) & 1) | ((a >> 22) & 2);
+            let register = self.0[quarter as usize] as u32;
+            let block = if register & 0x80 != 0 {
+                register & 7
+            } else {
+                quarter
+            };
+            Some(PcAddr(
+                (block << 20) | ((a & 0x1F_0000) >> 1) | (a & 0x7FFF),
+            ))
+        } else if (a & 0xC0_0000) == 0xC0_0000 {
+            let block = self.0[((a >> 20) & 3) as usize] as u32 & 7;
+            Some(PcAddr((block << 20) | (a & 0x0F_FFFF)))
+        } else {
+            None
+        }
+    }
+}
+
 /// SA-1 Super MMC slots. Index is the top three bits of the SNES bank, value
 /// is the megabyte of ROM mapped there. `None` slots are not ROM.
 const SA1_SLOTS: [Option<u32>; 8] = [
@@ -140,7 +180,18 @@ impl Mapping {
 
     /// Whether the cartridge has an SA-1.
     pub const fn is_sa1(self) -> bool {
-        matches!(self, Self::Sa1Rom | Self::BigSa1Rom)
+        self.super_mmc().is_some()
+    }
+
+    /// The Super MMC bank assignment an SA-1 mapping stands for, which is
+    /// what SA-1 Pack writes at start-up and leaves alone: `00 01 02 03`,
+    /// or `04 05 06 07` for an image over 4 MiB.
+    pub const fn super_mmc(self) -> Option<SuperMmc> {
+        match self {
+            Self::LoRom => None,
+            Self::Sa1Rom => Some(SuperMmc::RESET),
+            Self::BigSa1Rom => Some(SuperMmc([4, 5, 6, 7])),
+        }
     }
 
     /// Converts a SNES address to a ROM file offset.
@@ -157,30 +208,9 @@ impl Mapping {
                 }
                 Ok(PcAddr(((a & 0x7F_0000) >> 1) | (a & 0x7FFF)))
             }
-            Self::Sa1Rom => {
-                if (a & 0x40_8000) == 0x00_8000 {
-                    // LoROM-style view: banks 00-3F and 80-BF, upper halves.
-                    let slot = SA1_SLOTS[((a & 0xE0_0000) >> 21) as usize].ok_or(err)?;
-                    Ok(PcAddr(slot | ((a & 0x1F_0000) >> 1) | (a & 0x7FFF)))
-                } else if (a & 0xC0_0000) == 0xC0_0000 {
-                    // HiROM-style view: banks C0-FF, full banks.
-                    let idx = ((a & 0x10_0000) >> 20) | ((a & 0x20_0000) >> 19);
-                    let slot = SA1_SLOTS[idx as usize].ok_or(err)?;
-                    Ok(PcAddr(slot | (a & 0x0F_FFFF)))
-                } else {
-                    Err(err)
-                }
-            }
-            Self::BigSa1Rom => {
-                if (a & 0x40_8000) == 0x00_8000 {
-                    Ok(PcAddr(
-                        ((a & 0x80_0000) >> 2) | ((a & 0x3F_0000) >> 1) | (a & 0x7FFF),
-                    ))
-                } else if (a & 0xC0_0000) == 0xC0_0000 {
-                    Ok(PcAddr(0x40_0000 | (a & 0x3F_FFFF)))
-                } else {
-                    Err(err)
-                }
+            Self::Sa1Rom | Self::BigSa1Rom => {
+                let mmc = self.super_mmc().expect("an SA-1 mapping");
+                mmc.snes_to_pc(addr).ok_or(err)
             }
         }
     }
@@ -348,6 +378,23 @@ mod tests {
             let a = m.pc_to_snes(pc(p)).unwrap();
             assert_eq!(m.snes_to_pc(a), Ok(pc(p)), "{a}");
         }
+    }
+
+    #[test]
+    fn super_mmc_blocks_follow_the_registers() {
+        // Block 5 behind the first quarter, in the HiROM view alone.
+        let mmc = SuperMmc([5, 1, 2, 3]);
+        assert_eq!(mmc.snes_to_pc(s(0xC01234)), Some(pc(0x501234)));
+        assert_eq!(mmc.snes_to_pc(s(0x008000)), Some(pc(0x000000)));
+        // Bit 7 puts it in the LoROM view too.
+        let mmc = SuperMmc([0x85, 1, 2, 0x84]);
+        assert_eq!(mmc.snes_to_pc(s(0x008000)), Some(pc(0x500000)));
+        assert_eq!(mmc.snes_to_pc(s(0x1FFFFF)), Some(pc(0x5FFFFF)));
+        assert_eq!(mmc.snes_to_pc(s(0x208000)), Some(pc(0x100000)));
+        assert_eq!(mmc.snes_to_pc(s(0xA08000)), Some(pc(0x400000)));
+        assert_eq!(mmc.snes_to_pc(s(0xF00000)), Some(pc(0x400000)));
+        assert_eq!(mmc.snes_to_pc(s(0x400000)), None);
+        assert_eq!(mmc.snes_to_pc(s(0x001234)), None);
     }
 
     #[test]

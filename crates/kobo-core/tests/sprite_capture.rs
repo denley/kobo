@@ -143,6 +143,48 @@ fn awkward_sprites_draw() {
 /// The castle candle flames are cluster sprites the `E6` entry spawns,
 /// positioned on layer 2.
 #[test]
+fn a_podoboo_is_drawn_with_the_tiles_its_pass_uploaded() {
+    let Some(rom) = common::vanilla() else { return };
+    // The Podoboo redirects its object to tile `06` and has the NMI copy
+    // its frame there, so its characters are not in the level's VRAM.
+    let loaded = expand::expand_level(&rom, 0x01A).unwrap();
+    let list = sprites::read_sprites_at(&rom, loaded.sprite_data_ptr()).unwrap();
+    let scene = expand::capture_sprites(&rom, &loaded, &list).unwrap();
+    let podoboos = list.sprites.iter().filter(|e| e.id == 0x33).count();
+    assert_eq!(scene.dynamic.len(), podoboos);
+    for capture in &scene.dynamic {
+        assert!(capture.objects.iter().all(|o| o.tile & 0xEE == 0x06));
+        let tile_06 = 0xC000 + 0x06 * 32;
+        assert_eq!(capture.characters[0].address, tile_06);
+        let vram = &loaded.video.vram;
+        for character in &capture.characters {
+            let at = character.address as usize;
+            assert_ne!(character.data, vram[at..at + 32]);
+            assert!(character.data.iter().any(|&b| b != 0));
+        }
+        assert_eq!(capture.patched(vram).len(), vram.len());
+    }
+    // Nothing else in the level needs tiles of its own.
+    assert!(scene.objects.len() > 20);
+}
+
+#[test]
+fn sprites_get_the_slots_their_neighbours_leave_them() {
+    let Some(rom) = common::vanilla() else { return };
+    // The four birds on the roof of Yoshi's House (`8A`) take their colour
+    // from their slot: captured one at a time in an empty table they
+    // would all get the same slot, and all be yellow.
+    let (_, scene) = capture(&rom, 0x104);
+    let mut palettes: Vec<u8> = (scene.objects.iter())
+        .filter(|o| (0x40..0x80).contains(&o.x) && (0xD0..0xF0).contains(&o.y))
+        .map(|o| o.attr >> 1 & 7)
+        .collect();
+    palettes.sort_unstable();
+    palettes.dedup();
+    assert_eq!(palettes.len(), 4, "bird palettes {palettes:?}");
+}
+
+#[test]
 fn candle_flames_ride_on_layer_2() {
     let Some(rom) = common::vanilla() else { return };
     let (_, scene) = capture(&rom, 0x101);

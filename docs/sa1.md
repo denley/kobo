@@ -12,11 +12,14 @@ are the ones to read.
   over 4 MiB, and `RamMap::of` takes either to mean `RamMap::Sa1Pack`. Nothing looks for
   SA-1 Pack itself.
 - The Super MMC (`$2220`-`$2223`) picks the 1 MiB block behind each quarter of the HiROM
-  view (`$C0`-`$FF`) and, with bit 7, of the LoROM view. It is not modelled as registers:
-  SA-1 Pack writes the table at `$008A60` to them at start-up and never again, `00 01 02 03`
+  view (`$C0`-`$FF`) and, with bit 7, of the LoROM view (`addr::SuperMmc`). SA-1 Pack
+  writes the table at `$008A60` to the registers at start-up and never again, `00 01 02 03`
   for an image up to 4 MiB (both views show the same 4 MiB) and `04 05 06 07` with `6mb.asm`
   or `8mb.asm` (the first 4 MiB in the LoROM view alone, the rest in the HiROM view alone).
-  The second is Asar's `bigsa1rom`, and `Mapping::BigSa1Rom` here.
+  The second is Asar's `bigsa1rom`, and `Mapping::BigSa1Rom` here. A `Mapping` is that
+  assignment, which is what everything reading a ROM's tables uses; the bus follows the
+  registers once the game has written them, so code that switches banks as it runs reads
+  what the cartridge would give it. No ROM in the corpus does.
 - A reference ROM is vanilla with SA-1 Pack applied, which should load every level as vanilla
   does: copy the headerless vanilla ROM and run `asar sa1.asm rom.sfc` in the source's `asm/`
   (Asar 1.91 works). It lives in `~/.local/share/kobo/roms/sa1/` and, like any ROM, is never
@@ -90,15 +93,31 @@ are the ones to read.
   ends with an IRQ to the SA-1 (`$2301` bit 5), whose handler sets `$018C` for the code
   that waits on it. SA-1 Pack itself does not use it outside character conversion; hacks
   do (QLDC 2021 `24_HD_DankBaron` level `10B`). It takes no time here.
+- Character conversion, first type (`DCNT` = `$B0`), is how SA-1 Pack uploads dynamic
+  sprites: code queues up to ten slots in the table at `$3190` (count in `$317F`), and
+  `snes_nmi` has the SA-1 turn the conversion on (message 1 to `$2200`; the handler writes
+  `$2230` and sets `$318D`), then for each slot writes `CDMA` (`$2231`: bits 1-0 the depth,
+  8, 4, or 2 bits to a pixel, bits 4-2 the bitmap's width as a power of two in characters),
+  the bitmap's BW-RAM address to `SDA` and to the DMA channel, and the I-RAM buffer
+  `$3700` to `DDA`, all from the S-CPU. Writing `$2236` starts it and raises the S-CPU's
+  IRQ (`$2300` bit 5, enabled by `$2201` bit 5, cleared through `$2202`), which
+  `snes_irq` passes on in `$318D`, where the NMI is waiting with interrupts on. The S-CPU's
+  DMA then reads the bitmap's address and gets the PPU's planar characters instead, 64, 32,
+  or 16 bytes each, the first pixel of a bitmap byte in its low bits
+  (`cpu::sa1::Conversion`): every read of banks `$40`-`$4F` by the S-CPU is converted until
+  `CDMA` bit 7 or `DCNT` ends it. The I-RAM buffer the chip converts through is not
+  written. `24_HD_DankBaron` level `10B` is the one user in the corpus (four slots at
+  `$402000`, 4 bits, four characters wide: the player's flying machine, 32x32, into sprite
+  tiles `1C0` on), and its tiles come out whole; nothing compares them to an emulator.
 
 ## What it changes in the vanilla levels
 
 Checked against Mesen 2 (`docs/testing.md`): the reference ROM's tile grids (512 levels),
 layer 3 tilemaps, and entrance-screen sprite slots match the emulator's, and its pictures
 match the emulator's frames as closely as vanilla's do. Against the vanilla ROM it renders
-476 of 512 levels identically and 23 with the same objects overlapping in another order
-(MaxTile's priorities). The rest differ because a sprite's slot differs, and the game
-looks at the slot:
+487 of 512 levels identically. The rest have the same objects overlapping in another order
+(MaxTile's priorities), or differ because a sprite's slot differs, and the game looks at
+the slot:
 
 - The line-guided rope (`64`) has nine segments instead of five in a slot from 6 up when
   the sprite memory setting is not zero (`CODE_01DC54`). Every level has setting `$08` now
@@ -112,6 +131,8 @@ looks at the slot:
 
 ## Not modelled
 
-Timers, character conversion DMA (SA-1 Pack uses it in NMI for dynamic sprites), the
-variable-length bit reader, write protection, the SA-1's NMI, and Super MMC registers: a
-ROM that switches banks while it runs reads the wrong data.
+Timers, the second type of character conversion (the SA-1 feeding bitmap lines through
+registers), the variable-length bit reader, write protection, and the SA-1's NMI. Across
+every level of the 39 SA-1 hacks in the corpus, the only registers written that are not
+modelled are the write protection ones (`$2226`-`$222A`) and the SA-1's NMI vector
+(`$2205`-`$2206`), both set once by SA-1 Pack's start-up, and `$2306`, which is read-only.

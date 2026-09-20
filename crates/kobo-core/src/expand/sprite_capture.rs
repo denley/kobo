@@ -5,25 +5,33 @@
 //! - a *column* per camera position that puts some sprite entry where the
 //!   ROM's sprite loader looks, starting from the loaded level;
 //! - *spawn rounds* within it, each calling the loader once and starting
-//!   where the last one left off;
+//!   where the last one left off, after a first round in which the
+//!   sprites of the columns the game loads before this one hold their
+//!   slots;
 //! - a *spot* pass per place a round put sprites, starting from that
 //!   round's spawn, which runs the level loop until the sprite has drawn;
 //! - a *baseline* pass per spot, again from the loaded level, whose
 //!   objects are what the level draws without the sprite;
 //! - and a *slotless* pass per column for the entries that took no slot.
+//!
+//! Every frame is followed by the ROM's NMI handler, so a pass's video
+//! memory holds the tiles its sprite had uploaded. The capture runs on
+//! video memory of its own, which each spot starts from the level's.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use super::diagnostics::{Diagnostic, Pass};
 use super::load_flags::LoadFlags;
 use super::machine::{Call, Machine};
-use super::oam::{self, SCREEN_H, SCREEN_W};
+use super::oam::{self, Blank, SCREEN_H, SCREEN_W};
 use super::{ExpandError, LoadedLevel, routines};
 use crate::cpu::CpuError;
 use crate::ram::{self, Ram};
 use crate::rom::Rom;
 use crate::sprites::{SpriteEntry, SpriteList};
-use crate::video::{SpriteObject, SpriteScene, UndrawnSprite};
+use crate::video::{
+    Character, DynamicObjects, OBJECT_CHARACTER_LEN, SpriteObject, SpriteScene, UndrawnSprite,
+};
 
 /// Most frames a sprite pass runs waiting for the sprite to initialise.
 const SPRITE_FRAMES: usize = 8;
@@ -35,6 +43,16 @@ const SLOTLESS_FRAMES: usize = 2;
 const SPAWN_ROUNDS: usize = 8;
 /// Most times a sprite pass moves the camera after a sprite.
 const CAMERA_MOVES: usize = 3;
+/// How far behind the loading column sprites are still alive when the
+/// camera scrolls there: the loader works `$120` pixels ahead of a camera
+/// moving right or down, and most sprites erase themselves `$40` behind
+/// it (`SubOffscreen`). The same holds the other way round (`$30` ahead,
+/// `$130` behind), a column more or less.
+const LIVE_BEHIND_LOADER: i32 = 0x160;
+/// The columns the game loads on entering a level (`CODE_02AC5C`), from
+/// left to right or top to bottom: from `$60` pixels before the camera,
+/// 32 of them.
+const ENTRY_COLUMNS: std::ops::Range<i32> = -0x60..0x1A0;
 /// A cluster sprite the game draws at its position minus layer 2's, both
 /// in eight bits, so that it rides on layer 2 and repeats every 256
 /// pixels along it. Its OAM objects are fixed: cluster slot
@@ -89,7 +107,11 @@ impl Bounds {
 struct LevelLoop<'r> {
     machine: Machine<'r>,
     camera: (i32, i32),
+    /// `OBSEL` and the object sizes it selects.
+    object_select: u8,
     sizes: [(i32, i32); 2],
+    /// VRAM as level preparation left it, which the scene is drawn from.
+    level_vram: Vec<u8>,
     /// Frames run since the counter was last reset.
     frames: usize,
     /// The last frame's OAM image as the game drew it.
@@ -103,6 +125,37 @@ impl LevelLoop<'_> {
 
     fn restore(&mut self, snapshot: &Ram) {
         self.ram().clone_from(snapshot);
+    }
+
+    /// Puts video memory back to the level's, so that a pass shows what
+    /// it uploaded itself and nothing of the pass before it.
+    fn reset_video(&mut self) {
+        self.machine.bus.vram.clone_from(&self.level_vram);
+    }
+
+    /// The characters of `objects` that the passes since
+    /// [`LevelLoop::reset_video`] have changed, in address order.
+    fn uploaded_characters(&self, objects: &[SpriteObject]) -> Vec<Character> {
+        let vram = &self.machine.bus.vram;
+        let mut addresses = BTreeSet::new();
+        for object in objects {
+            let (width, height) = self.sizes[object.large as usize];
+            for row in 0..height as usize / 8 {
+                for column in 0..width as usize / 8 {
+                    addresses.insert(object.character_address(self.object_select, column, row));
+                }
+            }
+        }
+        addresses
+            .into_iter()
+            .filter_map(|at| {
+                let data = vram.get(at..at + OBJECT_CHARACTER_LEN)?;
+                (data != &self.level_vram[at..at + OBJECT_CHARACTER_LEN]).then(|| Character {
+                    address: at as u16,
+                    data: data.try_into().expect("sliced to length"),
+                })
+            })
+            .collect()
     }
 
     /// Holds the camera at `camera` and parks Mario just off the left
@@ -145,7 +198,7 @@ impl LevelLoop<'_> {
     /// screen coordinates.
     fn frame(&mut self) -> Result<Vec<SpriteObject>, CpuError> {
         self.park_player();
-        let frame = oam::draw_frame(&mut self.machine)?;
+        let frame = oam::draw_frame(&mut self.machine, Blank::Nmi)?;
         self.frames += 1;
         self.drawn = frame.drawn;
         let (image, first) = frame.uploaded;
@@ -189,11 +242,12 @@ impl LevelLoop<'_> {
 /// (sprites that stay hidden at first, like a Podoboo under the lava,
 /// get up to [`LATE_SPRITE_FRAMES`]). OAM is read back in level
 /// coordinates, less whatever a pass without the sprite draws from the
-/// same camera. Entries that filled no slot (shooters, generators,
-/// scroll commands, cluster sprite spawners) share one more pass from
-/// the loader's camera. A pass the CPU core gives up on draws nothing
-/// and is listed in `diagnostics`; what draws nothing is listed in
-/// `undrawn` for the caller to mark.
+/// same camera, along with the characters the pass uploaded for them
+/// (`SpriteScene::dynamic`). Entries that filled no slot (shooters,
+/// generators, scroll commands, cluster sprite spawners) share one more
+/// pass from the loader's camera. A pass the CPU core gives up on draws
+/// nothing and is listed in `diagnostics`; what draws nothing is listed
+/// in `undrawn` for the caller to mark.
 ///
 /// Boss arenas draw their sprites in `LevelScene::boss` instead and get an empty
 /// scene here.
@@ -218,8 +272,10 @@ pub fn capture_sprites(
             .or_default()
             .push(entry);
     }
+    let cameras: Vec<_> = columns.keys().copied().collect();
     for (camera, entries) in columns {
-        capture.capture_column(camera, &entries);
+        let earlier = capture.loaded_before(camera, &cameras);
+        capture.capture_column(camera, &earlier, &entries);
     }
     Ok(capture.finish())
 }
@@ -227,6 +283,8 @@ pub fn capture_sprites(
 struct SpriteCapture<'a, 'r> {
     level_loop: LevelLoop<'r>,
     vertical: bool,
+    /// Where the level is entered, along the axis it scrolls on.
+    entry: i32,
     list: &'a SpriteList,
     bounds: Bounds,
     load_flags: LoadFlags,
@@ -250,6 +308,7 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
     fn new(rom: &'r Rom, level: &LoadedLevel, list: &'a SpriteList) -> Self {
         let mut machine = Machine::new(rom, level.tiles.level);
         machine.bus.ram = level.ram.clone();
+        machine.bus.vram.clone_from(&level.video.vram);
         let load_flags = LoadFlags::detect(&mut machine.bus);
         // Start from empty sprite tables: the entrance screen's sprites
         // were spawned during level preparation, and each pass respawns
@@ -268,11 +327,14 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
             level_loop: LevelLoop {
                 machine,
                 camera: (0, 0),
+                object_select: level.video.object_select,
                 sizes: oam::object_sizes(level.video.object_select),
+                level_vram: level.video.vram.clone(),
                 frames: 0,
                 drawn: level.ram.bytes(ram::OAM, oam::OAM_LEN),
             },
             vertical: level.tiles.vertical,
+            entry: level.scene.camera[level.tiles.vertical as usize] as i16 as i32,
             list,
             bounds: Bounds {
                 width: w as i32 * 16,
@@ -314,17 +376,56 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
         }
     }
 
+    /// The loader cameras among `cameras` whose sprites hold slots when
+    /// the game first loads the column at `camera`, in the order it loaded
+    /// them, for a player who comes from the entrance and leaves every
+    /// sprite where it is: the columns before this one on entering the
+    /// level, and beyond those the columns the camera has just scrolled
+    /// past, whose sprites have not yet fallen far enough behind to erase
+    /// themselves.
+    fn loaded_before(&self, camera: (i32, i32), cameras: &[(i32, i32)]) -> Vec<(i32, i32)> {
+        let along = |camera: (i32, i32)| if self.vertical { camera.1 } else { camera.0 };
+        let at = along(camera);
+        let entry = ENTRY_COLUMNS.start + self.entry..ENTRY_COLUMNS.end + self.entry;
+        let (live, backwards) = if entry.contains(&at) {
+            (entry.start..at, false)
+        } else if at < entry.start {
+            (at + 1..at + 1 + LIVE_BEHIND_LOADER, true)
+        } else {
+            (at - LIVE_BEHIND_LOADER..at, false)
+        };
+        let mut earlier: Vec<_> = cameras
+            .iter()
+            .copied()
+            .filter(|&other| live.contains(&along(other)))
+            .collect();
+        if backwards {
+            earlier.reverse();
+        }
+        earlier
+    }
+
     fn diagnose(&mut self, pass: Pass, error: CpuError) {
         self.scene.diagnostics.push(Diagnostic { pass, error });
     }
 
-    /// Adds objects drawn from `camera` to the scene, in level coordinates.
-    fn keep(&mut self, camera: (i32, i32), objects: &[SpriteObject]) {
-        for object in objects {
-            let object = object.translated(camera.0, camera.1);
-            if self.seen.insert(object) {
-                self.scene.objects.push(object);
-            }
+    /// Adds what a pass drew from `camera` to the scene, in level
+    /// coordinates: with the level's objects, or as a capture of its own
+    /// if the pass uploaded characters for it.
+    fn keep(&mut self, camera: (i32, i32), drawn: Drawn) {
+        let objects: Vec<_> = drawn
+            .objects
+            .iter()
+            .map(|object| object.translated(camera.0, camera.1))
+            .filter(|object| self.seen.insert(*object))
+            .collect();
+        if drawn.characters.is_empty() {
+            self.scene.objects.extend(objects);
+        } else if !objects.is_empty() {
+            self.scene.dynamic.push(DynamicObjects {
+                objects,
+                characters: drawn.characters,
+            });
         }
     }
 
@@ -359,7 +460,8 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
 
     /// What the level draws by itself after `frames` frames at `camera`.
     /// Every load flag is set: the level loop runs the sprite loader too,
-    /// and a baseline that spawned the sprite would subtract it.
+    /// and a baseline that spawned the sprite would subtract it. Video
+    /// memory is left as it was found.
     fn baseline(
         &mut self,
         camera: (i32, i32),
@@ -370,46 +472,96 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
         self.level_loop.stop_scrolling();
         self.level_loop.place_camera(camera);
         let counted = self.level_loop.frames;
-        let mut objects = Vec::new();
+        let vram = self.level_loop.machine.bus.vram.clone();
+        let mut objects = Ok(Vec::new());
         for _ in 0..frames {
-            objects = self.level_loop.frame()?;
+            objects = self.level_loop.frame();
+            if objects.is_err() {
+                break;
+            }
         }
         self.level_loop.frames = counted;
-        Ok(objects.into_iter().collect())
+        self.level_loop.machine.bus.vram = vram;
+        Ok(objects?.into_iter().collect())
     }
 
     /// Captures everything the loader spawns with the camera at `camera`,
-    /// then the column's entries that took no slot.
-    fn capture_column(&mut self, camera: (i32, i32), entries: &[&SpriteEntry]) {
+    /// then the column's entries that took no slot. Some sprites look at
+    /// their slot (the Yoshi's House birds take their colour from it, a
+    /// line-guided rope its length), so the column is loaded first with
+    /// the sprites of the columns in `earlier` holding theirs.
+    fn capture_column(
+        &mut self,
+        camera: (i32, i32),
+        earlier: &[(i32, i32)],
+        entries: &[&SpriteEntry],
+    ) {
+        // A loader that fails here fails again below, and is reported there.
+        if !earlier.is_empty() && self.hold_slots(earlier).is_ok() {
+            self.level_loop.place_camera(camera);
+            let _ = self.spawn_round();
+        }
         self.level_loop.restore(&self.loaded_level);
         self.level_loop.place_camera(camera);
         // The loader stops after a scroll sprite and skips sprites it has
         // no free slot for; the game calls it again every other frame.
         // Each round here captures what it spawned and frees the slots.
         for _ in 0..SPAWN_ROUNDS {
-            if !self.spawn_round(camera) {
-                break;
+            match self.spawn_round() {
+                Ok(true) => {}
+                Ok(false) => break,
+                // Whatever this column holds that crashes the loader
+                // leaves its entries as markers.
+                Err(error) => {
+                    self.diagnose(Pass::SpriteLoader { camera }, error);
+                    self.level_loop.restore(&self.loaded_level);
+                    self.level_loop.place_camera(camera);
+                    break;
+                }
             }
         }
         self.capture_slotless(camera, entries);
     }
 
-    /// Calls the sprite loader once and captures each spot it filled.
-    /// False once a call loads nothing new.
-    fn spawn_round(&mut self, camera: (i32, i32)) -> bool {
+    /// The ROM's sprite loader, for the column at the camera. It reads its
+    /// slot tables through the data bank its bank 2 callers set.
+    fn load_column(&mut self) -> Result<(), CpuError> {
+        let loader = Call::jsr(routines::SPAWN_SPRITES).data_bank(0x02);
+        self.level_loop.machine.try_call(loader)
+    }
+
+    /// Starts over from the loaded level with the slots taken that the
+    /// sprites of the columns at `cameras` get, loaded in that order.
+    /// Nothing else of those columns is kept (cluster sprites, a
+    /// generator, a scroll command), and nothing is in the slots to run.
+    fn hold_slots(&mut self, cameras: &[(i32, i32)]) -> Result<(), CpuError> {
+        self.level_loop.restore(&self.loaded_level);
+        for &camera in cameras {
+            self.level_loop.place_camera(camera);
+            self.level_loop.stop_scrolling();
+            self.load_column()?;
+        }
+        let held: Vec<u32> = (self.level_loop.slots())
+            .filter(|&slot| self.level_loop.status(slot) != STATUS_FREE)
+            .collect();
+        self.level_loop.restore(&self.loaded_level);
+        for slot in held {
+            let ram = self.level_loop.ram();
+            ram.set_u8_at(ram::SPRITE_STATUS, slot, *STATUS_ALIVE.start());
+        }
+        Ok(())
+    }
+
+    /// Calls the sprite loader once and captures each spot it filled, of
+    /// the slots that were free. False once a call loads nothing new.
+    fn spawn_round(&mut self) -> Result<bool, CpuError> {
+        let camera = self.level_loop.camera;
         self.level_loop.stop_scrolling();
         let flags_before = self.load_flags.read(self.level_loop.ram());
-        // The loader reads its slot tables through the data bank its
-        // bank 2 callers set.
-        let loader = Call::jsr(routines::SPAWN_SPRITES).data_bank(0x02);
-        if let Err(error) = self.level_loop.machine.try_call(loader) {
-            // Whatever this column holds that crashes the loader leaves
-            // its entries as markers.
-            self.diagnose(Pass::SpriteLoader { camera }, error);
-            self.level_loop.restore(&self.loaded_level);
-            self.level_loop.place_camera(camera);
-            return false;
-        }
+        let held: Vec<u32> = (self.level_loop.slots())
+            .filter(|&slot| self.level_loop.status(slot) != STATUS_FREE)
+            .collect();
+        self.load_column()?;
         // A scroll sprite in this column has just installed its command.
         self.level_loop.stop_scrolling();
         let after_loader = self.level_loop.ram().clone();
@@ -419,7 +571,7 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
         let mut spots: BTreeMap<(i32, i32), (Vec<u32>, u8)> = BTreeMap::new();
         for slot in self.level_loop.slots() {
             let status = self.level_loop.status(slot);
-            if status != STATUS_INIT && !STATUS_ALIVE.contains(&status) {
+            if held.contains(&slot) || (status != STATUS_INIT && !STATUS_ALIVE.contains(&status)) {
                 continue;
             }
             let (x, y) = self.level_loop.position(slot);
@@ -447,7 +599,7 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
         self.level_loop.restore(&after_loader);
         self.level_loop.free_slots(&[]);
         self.level_loop.place_camera(camera);
-        fresh
+        Ok(fresh)
     }
 
     /// Captures the sprites in `slots`, which the loader put at `spot`,
@@ -455,6 +607,7 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
     fn capture_spot(&mut self, spot: (i32, i32), slots: &[u32], id: u8) {
         self.level_loop.free_slots(slots);
         self.level_loop.place_camera(self.bounds.centre(spot));
+        self.level_loop.reset_video();
         self.level_loop.frames = 0;
         let tile = (spot.0.div_euclid(16), spot.1.div_euclid(16));
         // A sprite whose code crashes the CPU (or a level whose own
@@ -462,10 +615,11 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
         let drawn = self.draw_spot(slots).unwrap_or_else(|error| {
             let (x, y) = tile;
             self.diagnose(Pass::Sprite { id, x, y }, error);
-            Vec::new()
+            Drawn::default()
         });
-        self.keep(self.level_loop.camera, &drawn);
-        if drawn.is_empty() {
+        let nothing = drawn.objects.is_empty();
+        self.keep(self.level_loop.camera, drawn);
+        if nothing {
             self.scene.undrawn.push(UndrawnSprite {
                 x: tile.0.max(0) as usize,
                 y: tile.1.max(0) as usize,
@@ -480,7 +634,7 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
     /// second; some sprites wait a few more frames before they first
     /// appear, and one that has drawn nothing by then gets frames for as
     /// long as it lives.
-    fn draw_spot(&mut self, slots: &[u32]) -> Result<Vec<SpriteObject>, CpuError> {
+    fn draw_spot(&mut self, slots: &[u32]) -> Result<Drawn, CpuError> {
         let mut follower = Follower {
             slot: slots[0],
             moves: 0,
@@ -499,17 +653,11 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
         let resume = self.level_loop.ram().clone();
         let (camera, frames) = (self.level_loop.camera, self.level_loop.frames);
         let level_draws = self.baseline(camera, frames)?;
-        let own = |objects: Vec<SpriteObject>| -> Vec<SpriteObject> {
-            objects
-                .into_iter()
-                .filter(|object| !level_draws.contains(object))
-                .collect()
-        };
-        let mut drawn = own(objects);
-        if drawn.is_empty() {
+        let mut drawn = Drawn::own(&self.level_loop, objects, &level_draws);
+        if drawn.objects.is_empty() {
             // Hidden so far: keep going while the sprite lives.
             self.level_loop.restore(&resume);
-            while drawn.is_empty()
+            while drawn.objects.is_empty()
                 && self.level_loop.frames < LATE_SPRITE_FRAMES
                 && slots
                     .iter()
@@ -517,7 +665,7 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
             {
                 let objects = self.level_loop.frame()?;
                 if !follower.follow(&mut self.level_loop, self.bounds) {
-                    drawn = own(objects);
+                    drawn = Drawn::own(&self.level_loop, objects, &level_draws);
                 }
             }
         }
@@ -538,6 +686,7 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
             return;
         }
         self.load_flags.fill(self.level_loop.ram(), 1);
+        self.level_loop.reset_video();
         self.level_loop.frames = 0;
         // A frame the CPU core gives up on draws nothing; the pass goes on
         // and reports the first such error.
@@ -559,9 +708,10 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
         if let Some(error) = failure {
             self.diagnose(Pass::Slotless { camera }, error);
         }
-        objects.retain(|object| !level_draws.contains(object));
-        self.keep(camera, &objects);
-        if objects.is_empty() && !riding {
+        let drawn = Drawn::own(&self.level_loop, objects, &level_draws);
+        let nothing = drawn.objects.is_empty();
+        self.keep(camera, drawn);
+        if nothing && !riding {
             self.scene
                 .undrawn
                 .extend(
@@ -606,6 +756,34 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
             }
         }
         found
+    }
+}
+
+/// What a pass drew of its own, in screen coordinates, and the characters
+/// it uploaded to draw it with.
+#[derive(Default)]
+struct Drawn {
+    objects: Vec<SpriteObject>,
+    characters: Vec<Character>,
+}
+
+impl Drawn {
+    /// The objects of the frame `level_loop` has just run that are not
+    /// among `level_draws`, what the level draws without the sprite.
+    fn own(
+        level_loop: &LevelLoop,
+        objects: Vec<SpriteObject>,
+        level_draws: &HashSet<SpriteObject>,
+    ) -> Self {
+        let objects: Vec<_> = objects
+            .into_iter()
+            .filter(|object| !level_draws.contains(object))
+            .collect();
+        let characters = level_loop.uploaded_characters(&objects);
+        Self {
+            objects,
+            characters,
+        }
     }
 }
 

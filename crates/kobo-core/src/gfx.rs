@@ -3,14 +3,16 @@
 //! SMW stores GFX files `00` to `31` LC_LZ2-compressed. Vanilla files are
 //! 3bpp or 2bpp; Lunar Magic may re-insert files as 4bpp. Each file has a
 //! fixed tile count, so the bit depth follows from the decompressed size.
-//! `GFX27` is not laid out as planar 8x8 tiles and is treated as raw bytes.
+//! `GFX27` holds the Mode 7 boss tiles, whose pixels are packed three bits
+//! each ([`GfxFormat::Packed3`]).
+//!
+//! `GFX32` (Mario) and `GFX33` (animated tiles) are LC_LZ2 too but have no
+//! entry in the pointer tables: `CODE_00B888` loads their addresses as
+//! immediates, which Lunar Magic rewrites when it moves the files.
 //!
 //! Lunar Magic exports 3bpp files converted to 4bpp and leaves other depths
 //! as stored; [`GfxFile::to_lm_export`] reproduces that so exports can be
 //! compared byte for byte.
-//!
-//! `GFX32` (Mario) and `GFX33` (animated tiles) are stored differently and
-//! are not handled yet.
 
 use thiserror::Error;
 
@@ -18,14 +20,23 @@ use crate::addr::SnesAddr;
 use crate::compress::lz2::{self, Lz2Error};
 use crate::rom::{Rom, RomError};
 
+/// Number of GFX files: `00` to `31` through the pointer tables, then
+/// `32` and `33`.
+pub const GFX_FILE_COUNT: u8 = 0x34;
 /// Number of GFX files reachable through the pointer tables.
-pub const GFX_FILE_COUNT: u8 = 0x32;
+const GFX_TABLE_FILES: u8 = 0x32;
 
 /// The three vanilla pointer tables, one byte of each pointer per table.
 /// Lunar Magic keeps these tables in place and rewrites the entries.
 const GFX_PTR_LO: SnesAddr = SnesAddr::new(0x00B992);
 const GFX_PTR_HI: SnesAddr = SnesAddr::new(0x00B9C4);
 const GFX_PTR_BANK: SnesAddr = SnesAddr::new(0x00B9F6);
+
+/// Operands in `CODE_00B888`: `LDY #GFX33`, the `LDA #bank` after it, and
+/// `LDA #GFX32` at `CODE_00B8D7`. The bank is set once, for both files.
+const GFX33_PTR: SnesAddr = SnesAddr::new(0x00B88B);
+const GFX32_33_BANK: SnesAddr = SnesAddr::new(0x00B890);
+const GFX32_PTR: SnesAddr = SnesAddr::new(0x00B8D8);
 
 /// GFX file lists per tileset, 4 files each: FG1, FG2, BG1, FG3 for
 /// objects and SP1 to SP4 for sprites.
@@ -146,6 +157,22 @@ pub fn decode_tiles(bpp: Bpp, data: &[u8]) -> Vec<Tile8> {
         .collect()
 }
 
+/// Decodes every whole tile of [`GfxFormat::Packed3`] data.
+pub fn decode_packed3_tiles(data: &[u8]) -> Vec<Tile8> {
+    (data.as_chunks::<PACKED3_BYTES_PER_TILE>().0.iter())
+        .map(|tile| {
+            let mut pixels = [[0u8; 8]; 8];
+            for (row, &[high, middle, low]) in pixels.iter_mut().zip(tile.as_chunks::<3>().0) {
+                let bits = u32::from_be_bytes([0, high, middle, low]);
+                for (x, px) in row.iter_mut().enumerate() {
+                    *px = (bits >> (21 - 3 * x) & 7) as u8;
+                }
+            }
+            Tile8 { pixels }
+        })
+        .collect()
+}
+
 /// Re-lays 3bpp tile data out as 4bpp with an empty fourth plane. This is
 /// the form Lunar Magic exports 3bpp files in.
 pub fn convert_3bpp_to_4bpp(data: &[u8]) -> Vec<u8> {
@@ -171,7 +198,7 @@ pub fn convert_4bpp_to_3bpp(data: &[u8]) -> Vec<u8> {
 
 #[derive(Debug, Error)]
 pub enum GfxError {
-    #[error("GFX file index {0:02X} is out of range (00 to 31)")]
+    #[error("GFX file index {0:02X} is out of range (00 to 33)")]
     BadIndex(u8),
     #[error("tileset {0} has no GFX list entry (0 to 25)")]
     BadTileset(u8),
@@ -195,26 +222,35 @@ pub enum GfxError {
 pub enum GfxFormat {
     /// Planar 8x8 tiles at the given depth.
     Planar(Bpp),
-    /// Not planar tiles; the layout is not understood yet.
-    Raw,
+    /// 8x8 tiles of 3-bit pixels packed most significant bit first, three
+    /// bytes to a row of eight. `CODE_00AB42` unpacks `GFX27` a pixel to a
+    /// byte into the high bytes of VRAM, where Mode 7 keeps its characters.
+    Packed3,
 }
 
-/// Number of 8x8 tiles in a GFX file, or `None` for files that are not
-/// planar tiles. Most files hold 128; a few layer 3 files hold 64.
-pub fn gfx_file_tile_count(index: u8) -> Result<Option<usize>, GfxError> {
+/// Bytes of one tile in [`GfxFormat::Packed3`].
+const PACKED3_BYTES_PER_TILE: usize = 24;
+
+/// Number of 8x8 tiles in a GFX file. Most files hold 128, a few layer 3
+/// files 64, and the two outside the pointer tables what their RAM buffers
+/// (`$7E2000` and `$7E7D00`) take.
+pub fn gfx_file_tile_count(index: u8) -> Result<usize, GfxError> {
     match index {
-        0x27 => Ok(None),
-        0x2F..=0x31 => Ok(Some(64)),
-        0x00..=0x31 => Ok(Some(128)),
+        0x2F..=0x31 => Ok(64),
+        0x00..=0x31 => Ok(128),
+        0x32 => Ok(744),
+        0x33 => Ok(384),
         _ => Err(GfxError::BadIndex(index)),
     }
 }
 
-/// Infers the stored format from the decompressed size.
+/// Infers the stored format from the decompressed size. `GFX27` is as long
+/// as a 3bpp file and is told apart by its number.
 pub fn infer_format(index: u8, len: usize) -> Result<GfxFormat, GfxError> {
-    let Some(tiles) = gfx_file_tile_count(index)? else {
-        return Ok(GfxFormat::Raw);
-    };
+    let tiles = gfx_file_tile_count(index)?;
+    if index == 0x27 && len == tiles * PACKED3_BYTES_PER_TILE {
+        return Ok(GfxFormat::Packed3);
+    }
     match len.checked_div(tiles).filter(|_| len.is_multiple_of(tiles)) {
         Some(16) => Ok(GfxFormat::Planar(Bpp::Two)),
         Some(24) => Ok(GfxFormat::Planar(Bpp::Three)),
@@ -227,6 +263,13 @@ pub fn infer_format(index: u8, len: usize) -> Result<GfxFormat, GfxError> {
 pub fn gfx_file_ptr(rom: &Rom, index: u8) -> Result<SnesAddr, GfxError> {
     if index >= GFX_FILE_COUNT {
         return Err(GfxError::BadIndex(index));
+    }
+    if index >= GFX_TABLE_FILES {
+        let ptr = if index == 0x32 { GFX32_PTR } else { GFX33_PTR };
+        let bank = rom.read_u8(GFX32_33_BANK)?;
+        return Ok(SnesAddr::new(
+            ((bank as u32) << 16) | rom.read_u16(ptr)? as u32,
+        ));
     }
     let i = index as u32;
     let lo = rom.read_u8(GFX_PTR_LO.add(i))?;
@@ -251,24 +294,31 @@ pub struct GfxFile {
 }
 
 impl GfxFile {
-    /// Bit depth for planar files, `None` for raw ones.
+    /// Bit depth for planar files, `None` for packed ones.
     pub fn bpp(&self) -> Option<Bpp> {
         match self.format {
             GfxFormat::Planar(bpp) => Some(bpp),
-            GfxFormat::Raw => None,
+            GfxFormat::Packed3 => None,
         }
     }
 
-    /// Number of tiles; zero for raw files.
-    pub fn tile_count(&self) -> usize {
-        self.bpp()
-            .map_or(0, |bpp| self.data.len() / bpp.bytes_per_tile())
+    /// Colours a tile of this file can hold.
+    pub fn colors(&self) -> usize {
+        self.bpp().map_or(8, Bpp::colors)
     }
 
-    /// Decoded tiles; empty for raw files.
+    pub fn tile_count(&self) -> usize {
+        self.data.len()
+            / self
+                .bpp()
+                .map_or(PACKED3_BYTES_PER_TILE, Bpp::bytes_per_tile)
+    }
+
     pub fn tiles(&self) -> Vec<Tile8> {
-        self.bpp()
-            .map_or_else(Vec::new, |bpp| decode_tiles(bpp, &self.data))
+        match self.format {
+            GfxFormat::Planar(bpp) => decode_tiles(bpp, &self.data),
+            GfxFormat::Packed3 => decode_packed3_tiles(&self.data),
+        }
     }
 
     /// The bytes Lunar Magic's `-ExportGFX` would write for this file.
@@ -288,7 +338,7 @@ impl GfxFile {
                 }
                 out
             }
-            GfxFormat::Planar(_) | GfxFormat::Raw => self.data.clone(),
+            GfxFormat::Planar(_) | GfxFormat::Packed3 => self.data.clone(),
         }
     }
 }
@@ -329,7 +379,7 @@ pub fn vram_upper_palette_tiles(index: u8, tileset: u8, tile_count: usize) -> Ve
     }
 }
 
-/// Reads and decompresses GFX file `index` (`00` to `31`).
+/// Reads and decompresses GFX file `index` (`00` to `33`).
 pub fn read_gfx_file(rom: &Rom, index: u8) -> Result<GfxFile, GfxError> {
     let addr = gfx_file_ptr(rom, index)?;
     let pc = rom.pc(addr).map_err(RomError::from)?;
@@ -395,6 +445,19 @@ mod tests {
     }
 
     #[test]
+    fn packed3_pixels_run_across_byte_boundaries() {
+        let mut bytes = [0u8; 24];
+        // Row 0 holds pixels 0 to 7 in order (octal 01234567); row 7 ends
+        // on a 5.
+        bytes[..3].copy_from_slice(&0o01234567u32.to_be_bytes()[1..]);
+        bytes[23] = 0b101;
+        let tiles = decode_packed3_tiles(&bytes);
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles[0].pixels[0], [0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(tiles[0].pixels[7], [0, 0, 0, 0, 0, 0, 0, 5]);
+    }
+
+    #[test]
     fn encode_decode_round_trips() {
         for (bpp, mask) in [(Bpp::Two, 3), (Bpp::Three, 7), (Bpp::Four, 15)] {
             let t = gradient(mask);
@@ -415,11 +478,13 @@ mod tests {
 
     #[test]
     fn format_inference() {
-        use GfxFormat::{Planar, Raw};
+        use GfxFormat::{Packed3, Planar};
         assert_eq!(infer_format(0x00, 3072).unwrap(), Planar(Bpp::Three));
         assert_eq!(infer_format(0x00, 4096).unwrap(), Planar(Bpp::Four));
         assert_eq!(infer_format(0x28, 2048).unwrap(), Planar(Bpp::Two));
-        assert_eq!(infer_format(0x27, 3072).unwrap(), Raw);
+        assert_eq!(infer_format(0x27, 3072).unwrap(), Packed3);
+        assert_eq!(infer_format(0x32, 23808).unwrap(), Planar(Bpp::Four));
+        assert_eq!(infer_format(0x33, 9216).unwrap(), Planar(Bpp::Three));
         assert_eq!(infer_format(0x2F, 1024).unwrap(), Planar(Bpp::Two));
         assert_eq!(infer_format(0x30, 1536).unwrap(), Planar(Bpp::Three));
         assert!(matches!(
@@ -431,8 +496,8 @@ mod tests {
             })
         ));
         assert!(matches!(
-            infer_format(0x32, 4096),
-            Err(GfxError::BadIndex(0x32))
+            infer_format(0x34, 4096),
+            Err(GfxError::BadIndex(0x34))
         ));
     }
 }

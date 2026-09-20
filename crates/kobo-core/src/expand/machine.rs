@@ -177,6 +177,12 @@ impl<'r> Machine<'r> {
     /// There is no entering one further in or stopping it short: SA-1
     /// Pack and other patches replace both ends of the handlers.
     pub fn interrupt(&mut self, interrupt: Interrupt) -> Result<(), ExpandError> {
+        self.try_interrupt(interrupt)
+            .map_err(|source| self.error(source))
+    }
+
+    /// [`Machine::interrupt`] for the passes a level can do without.
+    pub fn try_interrupt(&mut self, interrupt: Interrupt) -> Result<(), CpuError> {
         self.reset_registers();
         let handler = match interrupt {
             Interrupt::Nmi => self.bus.nmi_vector(),
@@ -186,9 +192,7 @@ impl<'r> Machine<'r> {
             }
         };
         self.cpu.enter_handler(&mut self.bus, handler);
-        self.finish(HANDLER_STEP_LIMIT, None)
-            .map(|_| ())
-            .map_err(|source| self.error(source))
+        self.finish(HANDLER_STEP_LIMIT, None).map(|_| ())
     }
 
     /// Runs from power-on, through the cartridge's reset vector, until the

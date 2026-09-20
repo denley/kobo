@@ -559,7 +559,9 @@ pub fn character_pixel(vram: &[u8], start: usize, bpp: Bpp, px: usize, py: usize
 /// the first opaque object at a pixel wins, and carries its OAM priority
 /// against the background layers.
 ///
-/// Objects riding on layer 2 go wherever `layer2_offset` (see
+/// Captures with characters of their own ([`crate::video::DynamicObjects`])
+/// are drawn from `vram` with those in place. Objects riding on layer 2
+/// go wherever `layer2_offset` (see
 /// [`crate::video::LevelScene::layer2_offset`]) puts that layer, once per
 /// 256 pixels across the level.
 pub fn draw_sprite_scene(
@@ -569,6 +571,10 @@ pub fn draw_sprite_scene(
     vram: &[u8],
 ) {
     draw_objects(layers, &scene.objects, scene.object_select, vram);
+    for dynamic in &scene.dynamic {
+        let vram = dynamic.patched(vram);
+        draw_objects(layers, &dynamic.objects, scene.object_select, &vram);
+    }
     let [dx, dy] = layer2_offset;
     let repeated: Vec<_> = (0..=layers.width as i32 / 256 + 1)
         .flat_map(|screen| {
@@ -620,21 +626,15 @@ fn object_pixel(
     dx: i32,
     dy: i32,
 ) -> Option<u8> {
-    let (tile, attr) = (object.tile as usize, object.attr);
+    let attr = object.attr;
     let tx = if attr & 0x40 != 0 { width - 1 - dx } else { dx } as usize;
     let ty = if attr & 0x80 != 0 {
         height - 1 - dy
     } else {
         dy
     } as usize;
-    let number = (((tile & 0xF0) + ty / 8 * 16) & 0xF0) | ((tile + tx / 8) & 15);
-    let base = ((object_select as usize & 7) << 14)
-        + if attr & 1 != 0 {
-            (((object_select as usize >> 3) & 3) + 1) * 0x2000
-        } else {
-            0
-        };
-    let color = character_pixel(vram, base + number * 32, Bpp::Four, tx % 8, ty % 8);
+    let start = object.character_address(object_select, tx / 8, ty / 8);
+    let color = character_pixel(vram, start, Bpp::Four, tx % 8, ty % 8);
     (color != 0).then_some(color)
 }
 

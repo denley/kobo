@@ -57,6 +57,16 @@ fn gfx_file_shapes() {
     assert_eq!(f.bpp(), Some(Bpp::Two));
     assert_eq!(f.tile_count(), 128);
     let f = gfx::read_gfx_file(&rom, 0x27).unwrap();
-    assert_eq!(f.format, GfxFormat::Raw);
-    assert_eq!(f.data.len(), 3072);
+    assert_eq!(f.format, GfxFormat::Packed3);
+    assert_eq!(f.tile_count(), 128);
+    // Mario is stored at full depth; the animated tiles are widened on
+    // their way into RAM.
+    let f = gfx::read_gfx_file(&rom, 0x32).unwrap();
+    assert_eq!(f.bpp(), Some(Bpp::Four));
+    assert_eq!(f.tile_count(), 744);
+    assert_eq!(f.addr, kobo_core::SnesAddr::new(0x088000));
+    let f = gfx::read_gfx_file(&rom, 0x33).unwrap();
+    assert_eq!(f.bpp(), Some(Bpp::Three));
+    assert_eq!(f.tile_count(), 384);
+    assert_eq!(f.addr, kobo_core::SnesAddr::new(0x08BFC0));
 }

@@ -3,7 +3,7 @@
 use super::diagnostics::{Diagnostic, Pass};
 use super::load_flags::LoadFlags;
 use super::machine::{Call, Machine};
-use super::oam;
+use super::oam::{self, Blank};
 use super::routines;
 use crate::cpu::CpuError;
 use crate::ram;
@@ -59,12 +59,12 @@ fn enter(machine: &mut Machine) -> Result<Vec<SpriteObject>, CpuError> {
     load_flags.fill(ram, 1);
     ram.set_u8(ram::SPRITE_GENERATOR, 0);
     ram.set_u8(ram::GAME_MODE, 0x14);
-    let mut frame = oam::draw_frame(machine)?;
+    let mut frame = oam::draw_frame(machine, Blank::OamUpload)?;
     for _ in 1..PLAYER_FRAMES {
         if machine.bus.ram.u8(ram::PLAYER_ANIMATION) == 0 {
             break;
         }
-        frame = oam::draw_frame(machine)?;
+        frame = oam::draw_frame(machine, Blank::OamUpload)?;
     }
     machine.try_call(Call::jsr(routines::UPLOAD_PLAYER_TILES))?;
     let (image, first) = frame.uploaded_from(PLAYER_OAM_SLOTS);

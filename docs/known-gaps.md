@@ -21,20 +21,19 @@ What a rendered level does not reproduce, and what the tooling does not handle.
   ROM code; an undrawn-sprite census over every level of the corpus runs without errors
   apart from levels whose loader already fails, but nothing compares custom sprites to an
   emulator. Boss arenas show the OAM of the first drawing pass instead.
-- Sprites whose tiles are uploaded per frame into the player's dynamic tile area (the
-  Podoboo; VRAM bytes `$C0C0`-`$C305` were seen to matter) are drawn from whatever the
-  player pass left there: the sprite passes never run the NMI upload (`MarioGFXDMA`), and the
-  scene is drawn from the level's VRAM, not the pass's.
-- A sprite is captured alone, in the slot the loader gives it then, and some sprites look
-  at their slot: the Yoshi's House birds take their colour from it, several animations
-  their phase, and the line-guided rope its length (nine segments from slot 6 up under a
-  sprite memory setting other than zero, else five). In the game the sprites of a screen
-  share the slots, so such a sprite may come out in another colour, phase, or length than a
-  player sees.
-- SA-1 ROMs ([sa1.md](sa1.md)): character conversion DMA (SA-1 Pack's dynamic sprites), the
-  SA-1's timers, and Super MMC bank switching while the game runs are not modelled. Of the
-  39 SA-1 hacks in the corpus, 38 render all 512 levels; QLDC 2021 `76_Bench-kun` fails in
+- A sprite is captured alone, and some sprites look at their slot: the Yoshi's House birds
+  take their colour from it, several animations their phase, and the line-guided rope its
+  length. It gets the slot the ROM's loader gives it with the columns before it loaded in
+  order from the entrance and every sprite of them still in place, which is what a player
+  sees who walks there and leaves everything alone. One who kills or outruns sprites, or
+  arrives through another entrance, may see another colour, phase, or length.
+- SA-1 ROMs ([sa1.md](sa1.md)): the SA-1's timers, the second type of character conversion,
+  the variable-length bit reader, and write protection are not modelled; no hack in the
+  corpus uses the first three, and the last only matters to a game that relies on a write
+  being refused. Of the 39 SA-1 hacks in the corpus, 38 render all 512 levels; QLDC 2021 `76_Bench-kun` fails in
   the 18 Mode 7 boss rooms with a `COP` at `$00E296`, which is the hack's own doing (the
   patch at `$10E288` calls `$00987D` with `JSL` and the routine returns with `RTS`, into
   data). Nothing compares the hacks' pictures to an emulator.
-- `GFX27`'s layout is unknown; `GFX32`/`GFX33` are not handled by the GFX tooling.
+- The GFX tooling reads LC_LZ2 only. Invictus's files hold commands 5 and 6, which LC_LZ2
+  does not have (Lunar Magic can store graphics as LC_LZ3 instead), so `gfx list` shows
+  errors for them. Levels are unaffected, since the ROM's own decompression runs for them.

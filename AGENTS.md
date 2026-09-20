@@ -65,7 +65,8 @@ Early stage: roadmap step 1 is in progress.
   - `crates/kobo-cli`: the `kobo` binary. Thin shell over the core; no logic of its own.
 - `kobo_core::addr` is the only place that knows how SNES addresses map to file offsets.
   Every ROM read takes a `SnesAddr` and goes through the ROM's `Mapping` (LoROM, SA-1, or
-  SA-1 over 4 MiB).
+  SA-1 over 4 MiB); the bus follows an SA-1's bank registers (`SuperMmc`) once the game
+  has written them.
   Conversions mirror Asar's conventions so addresses agree with the rest of the toolchain.
 - `kobo_core::ram` is the only place that knows where the game keeps its variables. A
   `RamAddr` names a variable by its vanilla `$7E`/`$7F` address, a `RamMap` resolves it to a
@@ -87,7 +88,10 @@ Early stage: roadmap step 1 is in progress.
   and `sprite_capture`, `player`, `boss`, `layer3`, and `map16` are the passes over the
   loaded level. `oam` reads a frame's objects as the PPU gets them: the ROM's OAM upload
   runs after every frame and the bus keeps what arrives at `$2102`-`$2104`, so the ROM
-  decides which object is in front; do not read `$0200` and `$3F` instead. `routines` holds the ROM addresses. `expand_level` returns a
+  decides which object is in front; do not read `$0200` and `$3F` instead. A sprite pass
+  runs the ROM's whole NMI handler for it, on video memory of its own, since some sprites
+  have no tiles until it has run; what a pass uploaded for its objects is kept with them
+  (`SpriteScene::dynamic`). `routines` holds the ROM addresses. `expand_level` returns a
   `LoadedLevel` of four parts: `tiles` (`LevelTiles`: the grid, Map16 definitions, and layer
   layouts, which is what the level *is*), `video` (`VideoMemory`: VRAM, CGRAM, `BGnSC`,
   `OBSEL`), `scene` (`LevelScene`: screen setup, camera, layer 3, player, boss arena), and

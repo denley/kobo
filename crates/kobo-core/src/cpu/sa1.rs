@@ -4,12 +4,13 @@
 //! What is modelled is what a game needs to hand work across: the
 //! control registers with their message nibbles and IRQ flags, the
 //! vectors, the BW-RAM windows, the arithmetic unit, and DMA between the
-//! cartridge's memories. Timers, character conversion, the
-//! variable-length bit reader, and write protection are not; the Super
-//! MMC stays at the bank assignment the ROM's [`crate::addr::Mapping`]
-//! describes.
+//! cartridge's memories, character conversion of the first type (which
+//! SA-1 Pack uploads dynamic sprites through), and the Super MMC's bank
+//! registers. Timers, the second type of character conversion, the
+//! variable-length bit reader, and write protection are not.
 
 use super::{Cpu, CpuError};
+use crate::addr::SuperMmc;
 
 /// Which of the two processors is on the bus.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -66,12 +67,55 @@ pub struct DmaTransfer {
     pub len: u16,
 }
 
+/// Character conversion of the first type (`DCNT` = `$B0`) while it runs:
+/// the S-CPU reads BW-RAM and gets, in place of the bitmap that is there,
+/// the same picture as the PPU's planar 8x8 characters, which its own DMA
+/// can then copy to VRAM. The bitmap is rows of packed pixels, the first
+/// pixel in the lowest bits, `1 << width` characters across.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Conversion {
+    /// BW-RAM address of the bitmap (`SDA`), where character 0 reads from.
+    source: u32,
+    /// `CDMA` bits 1-0: 8, 4, or 2 bits to a pixel.
+    depth: u8,
+    /// `CDMA` bits 4-2.
+    width: u8,
+}
+
+impl Conversion {
+    /// The byte the S-CPU reads at BW-RAM address `addr`, given `bwram`
+    /// to read the bitmap with. A character is 64, 32, or 16 bytes, so
+    /// the offset from the bitmap's address says which character it is
+    /// and which byte of it.
+    pub fn read(self, addr: u32, mut bwram: impl FnMut(u32) -> u8) -> u8 {
+        let depth = self.depth.min(2) as u32;
+        // Bytes in a character's row of the bitmap, and in a whole row.
+        let bytes = 8 >> depth;
+        let line = (8 << self.width as u32) >> depth;
+        let offset = addr.wrapping_sub(self.source) & 0x0F_FFFF;
+        let (character, byte) = (offset >> (6 - depth), offset & ((64 >> depth) - 1));
+        let (row, column) = (character >> self.width, character & ((1 << self.width) - 1));
+        // Planes come in pairs, 16 bytes each: a byte of either per line.
+        let (y, plane) = ((byte & 15) >> 1, (byte >> 4) * 2 + (byte & 1));
+        let start = self.source + (row * 8 + y) * line + column * bytes;
+        let pixels = (0..bytes).fold(0u64, |pixels, i| {
+            pixels | (bwram(start + i) as u64) << (8 * i)
+        });
+        (0..8).fold(0, |out, x| {
+            let pixel = pixels >> (x * (8 >> depth));
+            out | ((pixel >> plane) as u8 & 1) << (7 - x)
+        })
+    }
+}
+
 /// `DCNT`, `SDA`, `DDA`, and `DTC`. The source is ROM, BW-RAM, or I-RAM
 /// and the destination I-RAM or BW-RAM; writing the last byte of the
 /// destination address that its memory uses starts the copy.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 struct Dma {
     control: u8,
+    /// `CDMA`: the bitmap's depth and width, and bit 7 to end a conversion.
+    conversion: u8,
     source: u32,
     dest: u32,
     len: u16,
@@ -93,6 +137,18 @@ impl Dma {
             source: place(self.control & 3, self.source)?,
             dest: place(2 - (self.control >> 2 & 1), self.dest)?,
             len: self.len,
+        })
+    }
+}
+
+impl Dma {
+    /// The conversion the registers describe, if `DCNT` enables one of
+    /// the first type.
+    fn conversion(self) -> Option<Conversion> {
+        (self.control & 0xB0 == 0xB0).then_some(Conversion {
+            source: 0x40_0000 | (self.source & 0x0F_FFFF),
+            depth: self.conversion & 3,
+            width: self.conversion >> 2 & 7,
         })
     }
 }
@@ -128,10 +184,19 @@ pub struct Sa1 {
     /// view instead.
     pub bwram_window: [u8; 2],
     pub bitmap: Bitmap,
+    /// `CXB`-`FXB`, once the game has written any of them. Until then
+    /// the ROM is where its [`crate::addr::Mapping`] says, which is where
+    /// SA-1 Pack's start-up code is about to put it.
+    pub super_mmc: Option<SuperMmc>,
     arithmetic: Arithmetic,
     dma: Dma,
     /// A transfer the registers have started, for the bus to carry out.
     dma_started: Option<DmaTransfer>,
+    /// The character conversion in progress, and the IRQ that tells the
+    /// S-CPU it has begun and the first character can be read.
+    conversion: Option<Conversion>,
+    conversion_irq: bool,
+    conversion_irq_enabled: bool,
 }
 
 impl Default for Sa1 {
@@ -150,9 +215,13 @@ impl Default for Sa1 {
             main_nmi_vector_selected: false,
             bwram_window: [0; 2],
             bitmap: Bitmap::default(),
+            super_mmc: None,
             arithmetic: Arithmetic::default(),
             dma: Dma::default(),
             dma_started: None,
+            conversion: None,
+            conversion_irq: false,
+            conversion_irq_enabled: false,
         }
     }
 }
@@ -217,7 +286,9 @@ impl Sa1 {
     /// The IRQ line into `processor`.
     pub fn irq(&self, processor: Processor) -> bool {
         match processor {
-            Processor::Main => self.to_main.line(),
+            Processor::Main => {
+                self.to_main.line() || (self.conversion_irq && self.conversion_irq_enabled)
+            }
             Processor::Sa1 => self.to_sa1.line() || (self.dma.irq && self.dma.irq_enabled),
         }
     }
@@ -228,6 +299,11 @@ impl Sa1 {
         let transfer = self.dma_started.take()?;
         self.dma.irq = true;
         Some(transfer)
+    }
+
+    /// The character conversion the S-CPU's BW-RAM reads go through.
+    pub fn conversion(&self) -> Option<Conversion> {
+        self.conversion
     }
 
     pub fn irq_vector(&self) -> u16 {
@@ -252,6 +328,7 @@ impl Sa1 {
         Some(match (processor, reg) {
             (Processor::Main, 0x2300) => {
                 flags(self.to_main)
+                    | (self.conversion_irq as u8) << 5
                     | (self.main_irq_vector_selected as u8) << 6
                     | (self.main_nmi_vector_selected as u8) << 4
             }
@@ -279,8 +356,14 @@ impl Sa1 {
                 }
                 self.held = held;
             }
-            (Processor::Main, 0x2201) => self.to_main.irq_enabled = value & 0x80 != 0,
-            (Processor::Main, 0x2202) => self.to_main.irq &= value & 0x80 == 0,
+            (Processor::Main, 0x2201) => {
+                self.to_main.irq_enabled = value & 0x80 != 0;
+                self.conversion_irq_enabled = value & 0x20 != 0;
+            }
+            (Processor::Main, 0x2202) => {
+                self.to_main.irq &= value & 0x80 == 0;
+                self.conversion_irq &= value & 0x20 == 0;
+            }
             (Processor::Main, 0x2203) => set_low(&mut self.reset_vector, value),
             (Processor::Main, 0x2204) => set_high(&mut self.reset_vector, value),
             (Processor::Main, 0x2207) => set_low(&mut self.irq_vector, value),
@@ -302,6 +385,10 @@ impl Sa1 {
             (Processor::Sa1, 0x220D) => set_high(&mut self.main_nmi_vector, value),
             (Processor::Sa1, 0x220E) => set_low(&mut self.main_irq_vector, value),
             (Processor::Sa1, 0x220F) => set_high(&mut self.main_irq_vector, value),
+            (Processor::Main, 0x2220..=0x2223) => {
+                let SuperMmc(blocks) = self.super_mmc.get_or_insert(SuperMmc::RESET);
+                blocks[(reg - 0x2220) as usize] = value;
+            }
             (Processor::Main, 0x2224) => self.bwram_window[0] = value & 0x1F,
             (Processor::Sa1, 0x2225) => self.bwram_window[1] = value,
             (Processor::Sa1, 0x223F) => {
@@ -311,20 +398,35 @@ impl Sa1 {
                     Bitmap::FourBits
                 };
             }
-            (Processor::Sa1, 0x2230) => self.dma.control = value,
-            (Processor::Sa1, 0x2232..=0x2234) => {
-                set_byte(&mut self.dma.source, reg - 0x2232, value)
+            (Processor::Sa1, 0x2230) => {
+                self.dma.control = value;
+                if self.dma.conversion().is_none() {
+                    self.conversion = None;
+                }
             }
-            (Processor::Sa1, 0x2235..=0x2237) => {
+            // The addresses and `CDMA` are either processor's: the S-CPU
+            // sets a conversion up, since it is the one to read it.
+            (_, 0x2231) => {
+                self.dma.conversion = value;
+                if value & 0x80 != 0 {
+                    self.conversion = None;
+                }
+            }
+            (_, 0x2232..=0x2234) => set_byte(&mut self.dma.source, reg - 0x2232, value),
+            (_, 0x2235..=0x2237) => {
                 set_byte(&mut self.dma.dest, reg - 0x2235, value);
-                // I-RAM addresses end at the middle byte.
-                let last = if self.dma.control & 4 != 0 {
-                    0x2237
-                } else {
-                    0x2236
+                // I-RAM addresses end at the middle byte, and a
+                // conversion's buffer is in I-RAM.
+                let last = match self.dma.control & 0x24 {
+                    4 => 0x2237,
+                    _ => 0x2236,
                 };
                 if reg == last {
                     self.dma_started = self.dma.transfer();
+                    if let Some(conversion) = self.dma.conversion() {
+                        self.conversion = Some(conversion);
+                        self.conversion_irq = true;
+                    }
                 }
             }
             (Processor::Sa1, 0x2238) => set_low(&mut self.dma.len, value),
@@ -458,5 +560,53 @@ mod tests {
         sa1.write(Processor::Sa1, 0x2209, 0x50);
         assert_eq!(sa1.main_nmi_vector(), Some(0x816A));
         assert_eq!(sa1.read(Processor::Main, 0x2300), Some(0xD0));
+    }
+    #[test]
+    fn the_super_mmc_starts_from_reset_once_it_is_written() {
+        let mut sa1 = Sa1::default();
+        assert_eq!(sa1.super_mmc, None);
+        // Only the S-CPU has the registers.
+        assert!(!sa1.write(Processor::Sa1, 0x2221, 0x85));
+        assert!(sa1.write(Processor::Main, 0x2221, 0x85));
+        assert_eq!(sa1.super_mmc, Some(SuperMmc([0, 0x85, 2, 3])));
+    }
+
+    #[test]
+    fn character_conversion_turns_a_bitmap_into_planes() {
+        let mut sa1 = Sa1::default();
+        sa1.write(Processor::Main, 0x2201, 0x20);
+        sa1.write(Processor::Sa1, 0x2230, 0xB0);
+        // 4 bits to a pixel, four characters across, bitmap at `$402000`.
+        for (reg, value) in [(0x2231, 0x09), (0x2233, 0x20), (0x2234, 0x40)] {
+            assert!(sa1.write(Processor::Main, reg, value));
+        }
+        assert_eq!(sa1.conversion(), None);
+        sa1.write(Processor::Main, 0x2235, 0x00);
+        sa1.write(Processor::Main, 0x2236, 0x37);
+        assert!(sa1.irq(Processor::Main));
+        assert_eq!(sa1.read(Processor::Main, 0x2300), Some(0x20));
+        sa1.write(Processor::Main, 0x2202, 0x20);
+        assert!(!sa1.irq(Processor::Main));
+
+        // Character 5 is the second of the second row. A bitmap row is 16
+        // bytes, so its line 2 starts at byte (8 + 2) * 16 + 4: pixels
+        // 0 to 7 there are colours 1, 2, 4, 8, 15, 0, 0, 3.
+        let mut bitmap = [0u8; 0x200];
+        bitmap[164..168].copy_from_slice(&[0x21, 0x84, 0x0F, 0x30]);
+        let conversion = sa1.conversion().unwrap();
+        let read = |byte: u32| {
+            conversion.read(0x40_2000 + 5 * 32 + byte, |at| {
+                bitmap[(at - 0x40_2000) as usize]
+            })
+        };
+        assert_eq!(read(4), 0b1000_1001); // plane 0 of line 2
+        assert_eq!(read(5), 0b0100_1001); // plane 1
+        assert_eq!(read(16 + 4), 0b0010_1000); // plane 2
+        assert_eq!(read(16 + 5), 0b0001_1000); // plane 3
+        assert_eq!(read(0), 0);
+
+        // `CDMA` bit 7 ends it.
+        sa1.write(Processor::Main, 0x2231, 0x80);
+        assert_eq!(sa1.conversion(), None);
     }
 }

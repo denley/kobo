@@ -81,7 +81,7 @@ enum GfxCommand {
         #[command(flatten)]
         rom: RomArg,
     },
-    /// Write GFX00 to GFX31 as .bin files in Lunar Magic's export layout.
+    /// Write GFX00 to GFX33 as .bin files in Lunar Magic's export layout.
     Export {
         #[command(flatten)]
         rom: RomArg,
@@ -650,7 +650,7 @@ fn gfx_list(rom: &Rom) -> Result<()> {
                 index,
                 f.addr,
                 f.bpp()
-                    .map_or("raw".to_string(), |b| format!("{}bpp", b.bits())),
+                    .map_or("packed".to_string(), |b| format!("{}bpp", b.bits())),
                 f.tile_count(),
                 f.data.len(),
                 f.compressed_len
@@ -676,22 +676,23 @@ fn gfx_export(rom: &Rom, dir: &PathBuf) -> Result<()> {
 fn gfx_png(rom: &Rom, index: &str, out: &PathBuf, columns: u32, bpp: Option<u8>) -> Result<()> {
     let index = u8::from_str_radix(index, 16).context("GFX index must be hex, e.g. 1A")?;
     let f = gfx::read_gfx_file(rom, index)?;
-    let bpp = match bpp {
-        None => f.bpp().ok_or_else(|| {
-            anyhow::anyhow!("GFX{index:02X} is not planar tile data; pass --bpp to force a depth")
-        })?,
-        Some(2) => Bpp::Two,
-        Some(3) => Bpp::Three,
-        Some(4) => Bpp::Four,
+    let forced = match bpp {
+        None => None,
+        Some(2) => Some(Bpp::Two),
+        Some(3) => Some(Bpp::Three),
+        Some(4) => Some(Bpp::Four),
         Some(other) => bail!("unsupported bit depth {other}; use 2, 3, or 4"),
     };
-    let tiles = gfx::decode_tiles(bpp, &f.data);
-    let img = tile_sheet(&tiles, columns, &grayscale(bpp.colors()));
+    let (tiles, colors) = match forced {
+        Some(bpp) => (gfx::decode_tiles(bpp, &f.data), bpp.colors()),
+        None => (f.tiles(), f.colors()),
+    };
+    let img = tile_sheet(&tiles, columns, &grayscale(colors));
     img.write_png(out)?;
     println!(
-        "GFX{index:02X}: {} tiles, {}bpp, {}x{} -> {}",
+        "GFX{index:02X}: {} tiles, {} colours, {}x{} -> {}",
         tiles.len(),
-        bpp.bits(),
+        colors,
         img.width,
         img.height,
         out.display()

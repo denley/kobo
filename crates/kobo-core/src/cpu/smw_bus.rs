@@ -292,25 +292,17 @@ impl<'a> SmwBus<'a> {
         if let Some(trace) = &mut self.trace_rom_reads {
             trace.push(addr);
         }
-        match self
-            .rom
-            .mapping()
-            .snes_to_pc(crate::addr::SnesAddr::new(addr))
-        {
-            Ok(pc) => self
-                .rom
-                .data()
-                .get(pc.as_usize())
-                .copied()
-                .unwrap_or_else(|| {
-                    self.unmapped_reads += 1;
-                    0
-                }),
-            Err(_) => {
-                self.unmapped_reads += 1;
-                0
-            }
-        }
+        // An SA-1 game can move the ROM about under both processors.
+        let addr = crate::addr::SnesAddr::new(addr);
+        let pc = match self.ram.sa1.as_ref().and_then(|sa1| sa1.super_mmc) {
+            Some(mmc) => mmc.snes_to_pc(addr),
+            None => self.rom.mapping().snes_to_pc(addr).ok(),
+        };
+        let byte = pc.and_then(|pc| self.rom.data().get(pc.as_usize()).copied());
+        byte.unwrap_or_else(|| {
+            self.unmapped_reads += 1;
+            0
+        })
     }
 
     fn vram_step(&self) -> u16 {
@@ -533,6 +525,12 @@ impl Bus for SmwBus<'_> {
         // cartridge.
         if addr & 0x8000 != 0 && !(0x40..=0x7F).contains(&(addr >> 16)) {
             return self.rom_read(addr);
+        }
+        if (0x40..=0x4F).contains(&(addr >> 16))
+            && let Some(conversion) = self.ram.sa1.as_ref().and_then(|sa1| sa1.conversion())
+        {
+            // The S-CPU's DMA, reading characters out of a bitmap.
+            return conversion.read(addr, |at| self.ram.read(at).unwrap_or(0));
         }
         if let Some(value) = self.ram.read(addr) {
             return value;
