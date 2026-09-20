@@ -1,8 +1,8 @@
 //! A bus that maps a SMW ROM plus work RAM, and captures what the game
 //! uploads to video memory.
 //!
-//! Only the pieces of hardware the loaders touch are modelled: the VRAM
-//! and CGRAM data ports, and general-purpose DMA to them. Everything
+//! Only the pieces of hardware the loaders touch are modelled: the VRAM,
+//! CGRAM, and OAM data ports, and general-purpose DMA to them. Everything
 //! else reads as zero and ignores writes.
 //!
 //! On an SA-1 cartridge the bus also runs the SA-1. Only one processor
@@ -25,6 +25,9 @@ const SA1_STEP_LIMIT: u64 = 200_000_000;
 
 pub const VRAM_LEN: usize = 0x1_0000;
 pub const CGRAM_LEN: usize = 0x200;
+/// The PPU's object memory: four bytes for each of 128 objects, then
+/// their size and X-high bits four objects to a byte.
+pub const OAM_LEN: usize = 0x220;
 
 #[derive(Clone, Copy, Default, Debug)]
 struct DmaChannel {
@@ -45,6 +48,16 @@ pub struct SmwBus<'a> {
     /// tell uploaded data from the untouched zero fill.
     pub vram_written: Vec<bool>,
     pub cgram: Vec<u8>,
+    /// Object memory as the game's OAM upload last left it.
+    pub oam: Vec<u8>,
+    /// `OAMADD` (`$2102`-`$2103`): the word address a write to either
+    /// register reloads the port from, and the priority rotation bit.
+    oam_reload: u16,
+    oam_rotation: bool,
+    /// The port's byte address. The first 512 bytes are written a word at
+    /// a time, the low byte waiting in the latch for the high one.
+    oam_address: u16,
+    oam_latch: u8,
     vmain: u8,
     /// VRAM word address.
     vmadd: u16,
@@ -73,6 +86,9 @@ pub struct SmwBus<'a> {
     mode7_latch: u8,
     pub irq_scanline: u16,
     pub interrupt_enable: u8,
+    /// `TIMEUP` (`$4211`): the PPU's timer has asked for an IRQ, until
+    /// the handler reads it.
+    timer_irq: bool,
     hblank: bool,
     /// CPU multiply and divide registers (`$4202`-`$4206` in, `$4214`-`$4217`
     /// out). Sprite code leans on them.
@@ -111,6 +127,11 @@ impl<'a> SmwBus<'a> {
             vram: vec![0; VRAM_LEN],
             vram_written: vec![false; VRAM_LEN],
             cgram: vec![0; CGRAM_LEN],
+            oam: vec![0; OAM_LEN],
+            oam_reload: 0,
+            oam_rotation: false,
+            oam_address: 0,
+            oam_latch: 0,
             vmain: 0,
             vmadd: 0,
             cgadd: 0,
@@ -128,6 +149,7 @@ impl<'a> SmwBus<'a> {
             mode7_latch: 0,
             irq_scanline: 0,
             interrupt_enable: 0,
+            timer_irq: false,
             hblank: false,
             multiplicand: 0,
             dividend: 0,
@@ -150,6 +172,33 @@ impl<'a> SmwBus<'a> {
         (0..3).fold(0, |value, i| {
             value | (self.read(addr + i) as u32) << (8 * i)
         })
+    }
+
+    /// The object the PPU draws in front of all others, the rest
+    /// following in order and wrapping round: object 0, unless the game
+    /// turned priority rotation on, which starts from the object `OAMADD`
+    /// was left pointing into.
+    pub fn first_object(&self) -> usize {
+        if self.oam_rotation {
+            (self.oam_reload >> 1) as usize & 0x7F
+        } else {
+            0
+        }
+    }
+
+    /// The S-CPU's NMI handler in bank 0: the cartridge's native-mode
+    /// vector, unless an SA-1 has replaced it.
+    pub fn nmi_vector(&mut self) -> u16 {
+        let sa1 = self.ram.sa1.as_ref();
+        sa1.and_then(|sa1| sa1.main_nmi_vector())
+            .unwrap_or_else(|| u16::from_le_bytes([self.read(0xFFEA), self.read(0xFFEB)]))
+    }
+
+    /// Sets the timer IRQ flag the game's IRQ handler looks for in
+    /// `TIMEUP`. The handler is for the caller to enter: the PPU's
+    /// timer does not run here.
+    pub fn raise_timer_irq(&mut self) {
+        self.timer_irq = true;
     }
 
     /// Gives the SA-1 a turn: it runs until it waits. False if it got
@@ -185,9 +234,20 @@ impl<'a> SmwBus<'a> {
     }
 
     fn set_sa1_register(&mut self, processor: Processor, reg: u16, value: u8) {
-        let sa1 = self.ram.sa1.as_deref_mut();
-        if !sa1.is_some_and(|sa1| sa1.write(processor, reg, value)) {
+        let Some(sa1) = self.ram.sa1.as_deref_mut() else {
             self.unmapped_writes += 1;
+            return;
+        };
+        if !sa1.write(processor, reg, value) {
+            self.unmapped_writes += 1;
+        }
+        // The SA-1's DMA, which takes no time here.
+        if let Some(transfer) = sa1.take_dma() {
+            let mut sa1 = Sa1View(self);
+            for i in 0..transfer.len as u32 {
+                let value = sa1.read(transfer.source + i);
+                sa1.write(transfer.dest + i, value);
+            }
         }
     }
 
@@ -209,6 +269,7 @@ impl<'a> SmwBus<'a> {
                 self.wmadd = (self.wmadd + 1) & 0x1_FFFF;
                 value
             }
+            0x4211 => (std::mem::take(&mut self.timer_irq) as u8) << 7,
             0x4214 => self.quotient as u8,
             0x4215 => (self.quotient >> 8) as u8,
             0x4216 => self.product as u8,
@@ -274,6 +335,27 @@ impl<'a> SmwBus<'a> {
         match reg {
             0x2200..=0x23FF => self.set_sa1_register(Processor::Main, reg, value),
             0x2101 => self.object_select = value,
+            0x2102 => {
+                self.oam_reload = (self.oam_reload & 0x100) | value as u16;
+                self.oam_address = self.oam_reload << 1;
+            }
+            0x2103 => {
+                self.oam_reload = (self.oam_reload & 0xFF) | ((value & 1) as u16) << 8;
+                self.oam_rotation = value & 0x80 != 0;
+                self.oam_address = self.oam_reload << 1;
+            }
+            0x2104 => {
+                let at = self.oam_address as usize;
+                if at >= 0x200 {
+                    self.oam[0x200 + (at & 0x1F)] = value;
+                } else if at & 1 == 0 {
+                    self.oam_latch = value;
+                } else {
+                    self.oam[at - 1] = self.oam_latch;
+                    self.oam[at] = value;
+                }
+                self.oam_address = (self.oam_address + 1) & 0x3FF;
+            }
             0x2105 => self.bg_mode = value,
             0x2107..=0x210A => self.bg_sc[(reg - 0x2107) as usize] = value,
             0x210B..=0x210C => {
@@ -730,6 +812,45 @@ mod tests {
         bus.write(0x2182, 0x00);
         bus.write(0x2183, 0x00);
         assert_eq!([bus.read(0x2180), bus.read(0x2180)], [0x12, 0x13]);
+    }
+
+    #[test]
+    fn the_oam_port_takes_words_and_remembers_where_to_start() {
+        let rom = rom();
+        let mut bus = SmwBus::new(&rom);
+        for (i, value) in (0..OAM_LEN as u32).zip((1..=0xFFu8).cycle()) {
+            bus.ram.poke(0x7E_0200 + i, value);
+        }
+        // The game's upload: all of `$0200`-`$041F` by DMA from address 0.
+        for (reg, value) in [
+            (0x2102, 0x00),
+            (0x2103, 0x00),
+            (0x4300, 0x00),
+            (0x4301, 0x04),
+            (0x4302, 0x00),
+            (0x4303, 0x02),
+            (0x4304, 0x00),
+            (0x4305, 0x20),
+            (0x4306, 0x02),
+            (0x420B, 0x01),
+        ] {
+            bus.write(reg, value);
+        }
+        assert_eq!(bus.oam, bus.ram.bytes(crate::ram::OAM, OAM_LEN));
+        assert_eq!(bus.first_object(), 0);
+        bus.write(0x2103, 0x80);
+        bus.write(0x2102, 200);
+        assert_eq!(bus.first_object(), 100);
+        // A low byte waits for its high byte; the last 32 bytes do not.
+        bus.write(0x2104, 0xAA);
+        assert_eq!(bus.oam[400], bus.ram.peek(0x7E_0200 + 400));
+        bus.write(0x2104, 0xBB);
+        assert_eq!(&bus.oam[400..402], &[0xAA, 0xBB]);
+        bus.write(0x2102, 0x00);
+        bus.write(0x2103, 0x01);
+        bus.write(0x2104, 0xCC);
+        assert_eq!(bus.oam[0x200], 0xCC);
+        assert_eq!(bus.first_object(), 0);
     }
 
     #[test]

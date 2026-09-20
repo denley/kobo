@@ -3,7 +3,7 @@
 use super::diagnostics::{Diagnostic, Pass};
 use super::load_flags::LoadFlags;
 use super::machine::{Call, Machine};
-use super::oam::{self, HIDDEN_Y, OAM_OBJECTS};
+use super::oam;
 use super::routines;
 use crate::cpu::CpuError;
 use crate::ram;
@@ -24,10 +24,10 @@ const PLAYER_OAM_SLOTS: std::ops::Range<usize> = 64..72;
 /// then runs so the objects' graphics are in VRAM and CGRAM (the bus keeps
 /// those; RAM is restored). Only his own OAM slots are read: the cluster
 /// sprites the loader spawned are still drawn in this pass, and the
-/// sprite passes already capture them. They are read from the image as
-/// drawn ([`oam::draw_frame`]), since SA-1 Pack moves every object at
-/// the end of the frame. The objects come back in level coordinates from
-/// the camera the pass ended with.
+/// sprite passes already capture them. They are found in the image as
+/// drawn ([`oam::Frame`]), since SA-1 Pack moves every object at the end
+/// of the frame. The objects come back in level coordinates from the
+/// camera the pass ended with.
 ///
 /// The level loop runs the hack's per-level code, which can be broken
 /// (Invictus level 136 returns with `RTS` from a `JSL`). The level itself
@@ -59,18 +59,15 @@ fn enter(machine: &mut Machine) -> Result<Vec<SpriteObject>, CpuError> {
     load_flags.fill(ram, 1);
     ram.set_u8(ram::SPRITE_GENERATOR, 0);
     ram.set_u8(ram::GAME_MODE, 0x14);
-    let mut drawn = oam::read_oam(&machine.bus.ram);
-    for _ in 0..PLAYER_FRAMES {
-        drawn = oam::draw_frame(machine)?;
+    let mut frame = oam::draw_frame(machine)?;
+    for _ in 1..PLAYER_FRAMES {
         if machine.bus.ram.u8(ram::PLAYER_ANIMATION) == 0 {
             break;
         }
+        frame = oam::draw_frame(machine)?;
     }
     machine.try_call(Call::jsr(routines::UPLOAD_PLAYER_TILES))?;
-    let (mut image, first) = drawn;
-    for slot in (0..OAM_OBJECTS).filter(|slot| !PLAYER_OAM_SLOTS.contains(slot)) {
-        image[slot * 4 + 1] = HIDDEN_Y;
-    }
+    let (image, first) = frame.uploaded_from(PLAYER_OAM_SLOTS);
     let ram = &machine.bus.ram;
     let camera = (
         ram.u16(ram::LAYER1_X) as i16 as i32,

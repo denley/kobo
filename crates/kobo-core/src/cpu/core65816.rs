@@ -1960,13 +1960,25 @@ impl Cpu {
     }
 
     /// Enters a subroutine as if by `JSL` from the sentinel address, so
-    /// that its `RTL` (or, from an interrupt frame, its `RTI`) leaves the
-    /// CPU [`Cpu::returned`].
+    /// that its `RTL` leaves the CPU [`Cpu::returned`].
     pub fn enter(&mut self, bus: &mut impl Bus, addr: u32) {
         self.push8(bus, RETURN_PB);
         self.push16(bus, RETURN_PC.wrapping_sub(1));
         self.pb = (addr >> 16) as u8;
         self.pc = addr as u16;
+        self.return_sp = None;
+    }
+
+    /// Enters the interrupt handler at `handler` in bank 0 as if the
+    /// interrupt had come at the sentinel address, in native mode, so
+    /// that its `RTI` leaves the CPU [`Cpu::returned`].
+    pub fn enter_handler(&mut self, bus: &mut impl Bus, handler: u16) {
+        self.push8(bus, RETURN_PB);
+        self.push16(bus, RETURN_PC);
+        self.push8(bus, self.p);
+        self.p = (self.p | Flags::I) & !Flags::D;
+        self.pb = 0;
+        self.pc = handler;
         self.return_sp = None;
     }
 

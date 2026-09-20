@@ -25,20 +25,16 @@ What a rendered level does not reproduce, and what the tooling does not handle.
   Podoboo; VRAM bytes `$C0C0`-`$C305` were seen to matter) are drawn from whatever the
   player pass left there: the sprite passes never run the NMI upload (`MarioGFXDMA`), and the
   scene is drawn from the level's VRAM, not the pass's.
-- SA-1 ROMs ([sa1.md](sa1.md)): nothing has been compared to an emulator yet, since the
-  oracle script reads `$7E` addresses. Against the vanilla ROM, vanilla with SA-1 Pack
-  renders 476 of 512 levels identically and 23 with the same objects overlapping in another
-  order (MaxTile's priorities). Ten have other objects (`00F`, `0DD`, `0FC`, `104`, `11D`,
-  `12A`, `12C`, `1DD`, `1E8`, `1E9`: an extra object, another animation frame, another
-  palette in `104`), which SA-1 Pack's changed sprite memory settings and random number
-  use could explain but nothing has shown; a fault in the SA-1 model would look the same.
-  Boss arenas (`098`, `0D9`, `198`) differ in their flames. OAM is still read starting from
-  `$3F`, which SA-1 Pack no longer applies, so overlapping objects in an arena may be in
-  the wrong order. Images over 4 MiB fail on every level, in code running from banks
-  `$C0`-`$FF` (QLDC 2021 `24_HD_DankBaron`, `70_DPBOX`, `79_Hwailaluta`): the Super MMC is
-  not modelled. Three QLDC 2021 entries fail in the Mode 7 boss rooms and nowhere else
-  (`62_Rykon-V73` and `84_TickTockClock` in the same 21 levels with a jump to `$000000`,
-  `76_Bench-kun` in 18 with a `COP`); the same rooms load in the other SA-1 hacks, and
-  whether these use something unmodelled or are broken in the hacks is not known. Code
-  using SA-1 DMA or character conversion is not handled.
+- A sprite is captured alone, in the slot the loader gives it then, and some sprites look
+  at their slot: the Yoshi's House birds take their colour from it, several animations
+  their phase, and the line-guided rope its length (nine segments from slot 6 up under a
+  sprite memory setting other than zero, else five). In the game the sprites of a screen
+  share the slots, so such a sprite may come out in another colour, phase, or length than a
+  player sees.
+- SA-1 ROMs ([sa1.md](sa1.md)): character conversion DMA (SA-1 Pack's dynamic sprites), the
+  SA-1's timers, and Super MMC bank switching while the game runs are not modelled. Of the
+  39 SA-1 hacks in the corpus, 38 render all 512 levels; QLDC 2021 `76_Bench-kun` fails in
+  the 18 Mode 7 boss rooms with a `COP` at `$00E296`, which is the hack's own doing (the
+  patch at `$10E288` calls `$00987D` with `JSL` and the routine returns with `RTS`, into
+  data). Nothing compares the hacks' pictures to an emulator.
 - `GFX27`'s layout is unknown; `GFX32`/`GFX33` are not handled by the GFX tooling.

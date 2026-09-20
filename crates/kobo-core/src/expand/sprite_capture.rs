@@ -93,7 +93,7 @@ struct LevelLoop<'r> {
     /// Frames run since the counter was last reset.
     frames: usize,
     /// The last frame's OAM image as the game drew it.
-    drawn: oam::OamImage,
+    drawn: Vec<u8>,
 }
 
 impl LevelLoop<'_> {
@@ -145,9 +145,10 @@ impl LevelLoop<'_> {
     /// screen coordinates.
     fn frame(&mut self) -> Result<Vec<SpriteObject>, CpuError> {
         self.park_player();
-        self.drawn = oam::draw_frame(&mut self.machine)?;
+        let frame = oam::draw_frame(&mut self.machine)?;
         self.frames += 1;
-        let (image, first) = oam::read_oam(&self.machine.bus.ram);
+        self.drawn = frame.drawn;
+        let (image, first) = frame.uploaded;
         Ok(oam::screen_objects(&image, first, self.sizes))
     }
 
@@ -269,7 +270,7 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
                 camera: (0, 0),
                 sizes: oam::object_sizes(level.video.object_select),
                 frames: 0,
-                drawn: oam::read_oam(&level.ram),
+                drawn: level.ram.bytes(ram::OAM, oam::OAM_LEN),
             },
             vertical: level.tiles.vertical,
             list,
@@ -579,7 +580,7 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
         let ram = &self.level_loop.machine.bus.ram;
         // Fixed objects are where the game drew them, not where the end
         // of the frame may have moved them to.
-        let (image, _) = &self.level_loop.drawn;
+        let image = &self.level_loop.drawn;
         let mut found = false;
         for cluster in &LAYER2_CLUSTERS {
             for slot in cluster.slots.clone() {

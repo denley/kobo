@@ -137,7 +137,7 @@ impl RamMap {
     pub fn of(rom: &Rom) -> Self {
         match rom.mapping() {
             Mapping::LoRom => Self::Vanilla,
-            Mapping::Sa1Rom => Self::Sa1Pack,
+            Mapping::Sa1Rom | Mapping::BigSa1Rom => Self::Sa1Pack,
         }
     }
 
@@ -421,6 +421,9 @@ pub const GAME_MODE: RamAddr = ram(0x7E_0100);
 /// `$0101`-`$0108`: the GFX files currently in VRAM. `$FF` forces uploads.
 pub const LOADED_GFX_FILES: RamAddr = ram(0x7E_0101);
 pub const LOADED_GFX_FILES_LEN: u32 = 8;
+/// `$10`: zero once the game loop has finished a frame. The NMI handler
+/// sets it, and skips its uploads if the loop had not got that far.
+pub const LAG_FLAG: RamAddr = ram(0x7E_0010);
 /// `$13`: the frame counter, including paused frames.
 pub const TRUE_FRAME: RamAddr = ram(0x7E_0013);
 
@@ -495,6 +498,11 @@ pub const LAYER1_SCROLL_DIR: RamAddr = ram(0x7E_0055);
 /// zero freezes the camera.
 pub const HORIZ_SCROLL_SETTING: RamAddr = ram(0x7E_1411);
 pub const VERT_SCROLL_SETTING: RamAddr = ram(0x7E_1412);
+/// `$1404`: vertical scrolling at will: the camera follows the player up
+/// and down without waiting for him to land. Game mode `$11` sets it for
+/// the first camera update, which clears it again once the camera is
+/// where it wants to be.
+pub const SCROLL_AT_WILL: RamAddr = ram(0x7E_1404);
 /// `$143E`/`$143F`: the layer 1 and layer 2 scroll commands a scroll
 /// sprite (`E7`-`F5`) installed; zero when the level has none.
 /// Autoscroll commands drive the camera every frame.
@@ -557,8 +565,6 @@ pub const SUB_SCREEN: RamAddr = ram(0x7E_0D9E);
 /// arena, bit 6 one that uploads boss tiles, bit 0 one without the
 /// ceiling and floor IRQs.
 pub const IRQ_NMI_COMMAND: RamAddr = ram(0x7E_0D9B);
-/// `$11`: which of an arena's IRQs comes next.
-pub const IRQ_TYPE: RamAddr = ram(0x7E_0011);
 /// `$04A0`: window 1's left and right edges per scanline, as the HDMA
 /// feeds them to the PPU.
 pub const WINDOW_TABLE: RamAddr = ram(0x7E_04A0);

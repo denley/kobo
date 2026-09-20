@@ -128,8 +128,9 @@ struct Expanded {
     layer2_tilemap: Option<(Vec<u8>, Vec<u8>)>,
 }
 
-/// The loading half of game mode `$11`: resolves the level's header
-/// pointers and expands its objects into the tile grid.
+/// Game mode `$11`: resolves the level's header pointers, places the
+/// player and the camera at the entrance, and expands the level's
+/// objects into the tile grid.
 fn load_level(machine: &mut Machine) -> Result<Expanded, ExpandError> {
     // Enter the level the way a screen exit on screen 0 would. The
     // overworld path cannot express every level number through `$0109`,
@@ -147,13 +148,23 @@ fn load_level(machine: &mut Machine) -> Result<Expanded, ExpandError> {
     ram.set_u8(ram::GAME_MODE, 0x11);
     machine.call(Call::jsl(routines::LOAD_HEADER_POINTERS))?;
     // Game mode $11 seeds the camera update's previous positions from the
-    // entrance and sets the maximum screen count before loading.
+    // entrance, sets the player up, and places the layers for the entry
+    // camera before it loads anything: `LOAD_LEVEL_DATA` ends by spawning
+    // the sprites around that camera. The screen count is still the
+    // maximum then, and vertical scrolling at will is on, which lets the
+    // update bring the camera to the player at once where the header's
+    // position would not show him (vertical level `12A` starts 192
+    // pixels higher for it).
     let ram = &mut machine.bus.ram;
     for i in 0..ram::LAYER_POSITIONS_LEN {
         let value = ram.u8_at(ram::LAYER1_X, i);
         ram.set_u8_at(ram::NEXT_LAYER1_X, i, value);
     }
-    ram.set_u8(ram::LAST_SCREEN_HORIZ, 0x20);
+    machine.call(Call::jsr(routines::INIT_LEVEL_RAM))?;
+    machine.bus.ram.set_u8(ram::LAST_SCREEN_HORIZ, 0x20);
+    machine.call(Call::jsr(routines::INIT_LAYER2_SCROLL))?;
+    machine.bus.ram.set_u8(ram::SCROLL_AT_WILL, 1);
+    machine.call(Call::jsl(routines::UPDATE_CAMERA))?;
     machine.call(Call::jsl(routines::LOAD_LEVEL_DATA))?;
     let ram = &machine.bus.ram;
     let vertical = ram.u8(ram::SCREEN_MODE) & 0x01 != 0;
@@ -177,19 +188,12 @@ fn load_level(machine: &mut Machine) -> Result<Expanded, ExpandError> {
     })
 }
 
-/// The rest of game mode `$11`, then all of game mode `$12`: this is what
-/// draws boss arenas, sets up layer 3, and uploads GFX and palettes.
+/// All of game mode `$12`: this is what draws boss arenas, sets up layer
+/// 3, and uploads GFX and palettes.
 fn prepare_level(machine: &mut Machine) -> Result<(), ExpandError> {
     let ram = &mut machine.bus.ram;
     ram.fill(ram::LOADED_GFX_FILES, ram::LOADED_GFX_FILES_LEN, 0xFF);
     machine.call(Call::jsr(routines::DECOMPRESS_PLAYER_GFX))?;
-    machine.call(Call::jsr(routines::INIT_LEVEL_RAM))?;
-    machine.call(Call::jsr(routines::INIT_LAYER2_SCROLL))?;
-    // Game mode $11 then runs the camera update once, which places layer 2
-    // for the entry camera. The game enables vertical scrolling at will
-    // first; that is left off so the camera stays at the entrance instead
-    // of starting to drift towards the player.
-    machine.call(Call::jsl(routines::UPDATE_CAMERA))?;
     machine.bus.ram.set_u8(ram::GAME_MODE, 0x12);
     machine.call(Call::jsr(routines::PREPARE_LEVEL))
 }

@@ -164,8 +164,8 @@ impl Rom {
             return Err(RomError::TooSmall);
         }
         let map_mode = bytes[INTERNAL_HEADER.as_usize() + 0x15];
-        let mapping =
-            Mapping::from_map_mode(map_mode).ok_or(RomError::UnsupportedMapping(map_mode))?;
+        let mapping = Mapping::from_map_mode(map_mode, bytes.len())
+            .ok_or(RomError::UnsupportedMapping(map_mode))?;
         Ok(Self {
             data: bytes,
             copier_header,

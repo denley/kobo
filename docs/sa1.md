@@ -8,8 +8,15 @@ are the ones to read.
 
 ## Recognising one
 
-- Map mode `$23` at `$00FFD5` gives `Mapping::Sa1Rom`, and `RamMap::of` takes that to mean
-  `RamMap::Sa1Pack`. Nothing looks for SA-1 Pack itself.
+- Map mode `$23` at `$00FFD5` gives `Mapping::Sa1Rom`, or `Mapping::BigSa1Rom` for an image
+  over 4 MiB, and `RamMap::of` takes either to mean `RamMap::Sa1Pack`. Nothing looks for
+  SA-1 Pack itself.
+- The Super MMC (`$2220`-`$2223`) picks the 1 MiB block behind each quarter of the HiROM
+  view (`$C0`-`$FF`) and, with bit 7, of the LoROM view. It is not modelled as registers:
+  SA-1 Pack writes the table at `$008A60` to them at start-up and never again, `00 01 02 03`
+  for an image up to 4 MiB (both views show the same 4 MiB) and `04 05 06 07` with `6mb.asm`
+  or `8mb.asm` (the first 4 MiB in the LoROM view alone, the rest in the HiROM view alone).
+  The second is Asar's `bigsa1rom`, and `Mapping::BigSa1Rom` here.
 - A reference ROM is vanilla with SA-1 Pack applied, which should load every level as vanilla
   does: copy the headerless vanilla ROM and run `asar sa1.asm rom.sfc` in the source's `asm/`
   (Asar 1.91 works). It lives in `~/.local/share/kobo/roms/sa1/` and, like any ROM, is never
@@ -23,8 +30,11 @@ are the ones to read.
   (`$2224` for the S-CPU, `$2225` for the SA-1, whose bit 7 selects the bitmap view), BW-RAM
   as 2- or 4-bit cells in banks `$60`-`$6F`, the ROM, its registers, and nothing of the
   console: no work RAM, no PPU. It takes its reset and IRQ vectors from `$2203`/`$2207`, and
-  can replace the S-CPU's IRQ vector (`$220E`, selected by `$2209` bit 6). SA-1 Pack does:
-  its S-CPU IRQ handler is in work RAM at `$1D00`.
+  can replace the S-CPU's IRQ and NMI vectors (`$220E` and `$220C`, selected by `$2209`
+  bits 6 and 4). SA-1 Pack does both: its S-CPU IRQ handler is in work RAM at `$1D00`, and
+  the NMI vector is the cartridge's own again. Both handlers begin and end in SA-1 Pack's
+  code (`snes_nmi`, `snes_nmi_end`), which saves another set of registers than vanilla's
+  and writes `$4200` last, from X.
 - SA-1 Pack's calls are IRQs with a mailbox. S-CPU to SA-1: pointer in `$3180`-`$3182`,
   `JSR $1E80` (work RAM) writes `#$80` to `$2200` and spins on `$3189`; the SA-1's handler
   does `JML [$3180]` and increments `$0189` (the same byte: I-RAM is at both). SA-1 to
@@ -69,12 +79,39 @@ are the ones to read.
   124-127) is read when the frame gets to `$008494`, with sizes from the unpacked table at
   `$0420` (`expand::oam::draw_frame`). MaxTile also changes which sprite is in front of
   which, deliberately.
-- The OAM upload no longer applies `$3F` (`org $00846A : RTS`); MaxTile puts the objects
-  from `$3F` on in its first buffer instead.
+- The OAM upload (now from `$006200`, the BW-RAM window) no longer applies `$3F`
+  (`org $00846A : RTS`), so the PPU draws from object 0; MaxTile puts the objects from
+  `$3F` on in its first buffer instead. The renderer runs the ROM's upload and reads what
+  the PPU was sent (see [smw.md](smw.md)), so the order is the ROM's either way; objects
+  the game draws at fixed indices are picked out before `oam_compress` and found again
+  afterwards by what they are (`expand::oam::Frame::uploaded_from`).
+- SA-1 DMA (`$2230`-`$2239`) copies between ROM, BW-RAM, and I-RAM, starts when the last
+  byte of the destination address is written (`$2236` for I-RAM, `$2237` for BW-RAM), and
+  ends with an IRQ to the SA-1 (`$2301` bit 5), whose handler sets `$018C` for the code
+  that waits on it. SA-1 Pack itself does not use it outside character conversion; hacks
+  do (QLDC 2021 `24_HD_DankBaron` level `10B`). It takes no time here.
+
+## What it changes in the vanilla levels
+
+Checked against Mesen 2 (`docs/testing.md`): the reference ROM's tile grids (512 levels),
+layer 3 tilemaps, and entrance-screen sprite slots match the emulator's, and its pictures
+match the emulator's frames as closely as vanilla's do. Against the vanilla ROM it renders
+476 of 512 levels identically and 23 with the same objects overlapping in another order
+(MaxTile's priorities). The rest differ because a sprite's slot differs, and the game
+looks at the slot:
+
+- The line-guided rope (`64`) has nine segments instead of five in a slot from 6 up when
+  the sprite memory setting is not zero (`CODE_01DC54`). Every level has setting `$08` now
+  and its loader hands slots out from 19 down, so every rope is long
+  (`00F`, `0DD`, `12A`, `12C`; Mesen shows the long rope in `0DD`).
+- Animation frames and palettes taken from the slot number: the Yoshi's House birds'
+  colours (`104`), another frame in `0FC` and `1DD`.
+- Sprites vanilla had no slot for: the fifth Eerie of a generator group (`DE`) in `11D`,
+  `1E8`, and `1E9`, where setting `$0B` allows five slots.
+- Boss arenas (`098`, `0D9`, `198`) differ in their flames.
 
 ## Not modelled
 
-Timers, SA-1 DMA and character conversion (SA-1 Pack uses it in NMI for dynamic sprites),
-the variable-length bit reader, write protection, the SA-1's NMI, and Super MMC bank
-switching: ROM reads use the default assignment, so an image over 4 MiB (`8mb.asm` maps
-banks `$C0`-`$FF` to the second half) reads the wrong data there.
+Timers, character conversion DMA (SA-1 Pack uses it in NMI for dynamic sprites), the
+variable-length bit reader, write protection, the SA-1's NMI, and Super MMC registers: a
+ROM that switches banks while it runs reads the wrong data.

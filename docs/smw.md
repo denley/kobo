@@ -63,9 +63,15 @@ are SMWDisX's.
   reloading. The screen-exit entry skips it; the oracle script predicts it from the ROM
   tables and dumps the second level frame.
 - `expand::expand_level` seeds the RAM-resident OAM routine by running the reset code, then
-  runs `CODE_05D796` (header pointers), `CODE_05801E` (clear buffers, `LoadLevel`), the rest
-  of game mode `$11` (`CODE_00B888` GFX32/33 to RAM, `CODE_00A635`, `CODE_00A796`, and one
-  `UpdateScreenPosition` after seeding `$1462`-`$1469` from `$1A`-`$21`), and all of
+  runs game mode `$11` in the game's order: `CODE_05D796` (header pointers and entrance),
+  `$1A`-`$21` copied to `$1462`-`$1469`, `CODE_00A635`, `$5E = $20`, `CODE_00A796`, one
+  `UpdateScreenPosition` with vertical scrolling at will on (`$1404`), and only then
+  `CODE_05801E` (clear buffers, `LoadLevel`), which ends by spawning the sprites around the
+  camera (`CODE_02A751`) and running them once. The order matters to both: the scroll at
+  will lets that first camera update jump to the player where the header's layer 1
+  position would leave him off the screen (vertical levels `0DB` and `12A` start 192 pixels
+  higher for it, and layer 2 with them), and sprites spawned before `CODE_00A635` has placed
+  the camera are those of screen 0. Then `CODE_00B888` (GFX32/33 to RAM) and all of
   game mode `$12` (`GM12PrepLevel`, `$00A59C`), which draws boss floors, sets up layer 3 (tides
   zero rows 16-26 of the layer 2 screens), and uploads GFX, palettes, and initial tilemaps.
   `$0100` is set to `$11` and then `$12` on the way: Lunar Magic's replacement for the initial
@@ -196,8 +202,9 @@ are SMWDisX's.
   dozen; pipes and doors in vanilla start at zero), then `MarioGFXDMA` (`$00A300`) uploads
   his tiles (VRAM words `$6000`, `$6100`, `$67F0`) and palette (CGRAM `$86`-`$8F`), which
   stay in `vram`/`cgram`. Only OAM slots 64-71 (`$0300`-`$031F`, what `DrawMarioAndYoshi`
-  writes) are kept, read as the frame reaches `ConsolidateOAM` (see [sa1.md](sa1.md)), in
-  level coordinates from the camera the pass ended with. The other
+  writes) are kept: they are picked out as the frame reaches `ConsolidateOAM` and found
+  again in the uploaded image (see [sa1.md](sa1.md)), in level coordinates from the camera
+  the pass ended with. The other
   objects in that pass are cluster sprites the entrance screen's level sprites spawned
   (castle candle flames, ghost house Boo ceilings); the sprite passes clear the cluster
   tables and capture the ones their entries respawn, so keeping them here doubled the Boos. Boss
@@ -216,7 +223,7 @@ are SMWDisX's.
   other slots and the generator `$18B9` are cleared, every load flag is set so the level
   loop loads nothing else, the camera is centred on the sprite with `$1411`/`$1412` zero,
   and `GM14Level` (`$00A1DA`) frames run until the slots have left status 1 (init) and at
-  least two frames have passed, at most 8, reading `$0200`-`$043F` starting from `$3F`. A
+  least two frames have passed, at most 8, reading OAM as the PPU gets it (below). A
   sprite that has drawn nothing by then gets up to 160 frames while it lives (a Podoboo
   waits under the lava), and the camera follows a sprite that leaves the screen, up to
   three times (a line-guided chainsaw's init moves it 320 pixels left). A pass without any
@@ -245,13 +252,30 @@ are SMWDisX's.
   `SpriteScene::diagnostics` with the CPU error. Rendering stacks by Mode 1 priority:
   layer 2 low (5), layer 1 low (6), layer 2 high (8), layer 1 high (9), objects 2/4/7/10.
 
+- OAM is read as the PPU gets it. After every frame the ROM's own upload runs
+  (`DoSomeSpriteDMA`, `$008449`: a DMA of `$0200`-`$041F` to `$2104`), and the bus keeps
+  what arrives at `$2102`-`$2104`. The upload ends by writing `$80` to `$2103` and `$3F` to
+  `$2102`: priority rotation on, so the object `$3F` points into (`$3F / 2`) is drawn in
+  front and the rest follow in order, wrapping round. Levels leave `$3F` zero; Roy's,
+  Morton's, and Ludwig's rooms set it to 200 (object 100 first).
+  A ROM that changes the upload (SA-1 Pack returns before the two writes) gets its own
+  order (`SmwBus::first_object`).
+
 ## Boss arenas
 
-- Mode 7 boss arenas render a 256x224 scene from captured video registers, with the ROM's
-  NMI/IRQ handlers selecting the Mode 1 ceiling/floor bands and Mode 7 transform. One
-  game drawing pass supplies the objects (`BossScene::objects`, including arena walls and
-  Bowser's floor) and player/boss VRAM uploads. Its RAM changes are restored so collision
-  grids remain at the loader state. This is an initial arena view, not a cycle-timed gameplay
+- Mode 7 boss arenas render a 256x224 scene from captured video registers. One game drawing
+  pass supplies the objects (`BossScene::objects`, including arena walls and Bowser's
+  floor), and then the interrupts of the frame run, each whole, from its vector to its
+  `RTI` (`Machine::interrupt`): the NMI with the lag flag `$10` clear, which uploads the
+  player's and the boss's tiles and OAM and leaves the registers of the band at the top of
+  the screen, then an IRQ for as long as the last handler armed one (`$4200` bit 5, at the
+  line in `$4209`; the handler finds `TIMEUP` set), each leaving the next band's
+  registers: the ceiling from the NMI, the floor from the ceiling's IRQ, none in Bowser's
+  room. Entering a handler part-way or stopping it at an address does not survive patches:
+  SA-1 Pack replaces both handlers' prologue and epilogue (another stack frame, `$4200`
+  written at the very end), and a patch in three QLDC 2021 entries reroutes `$00835C`
+  past `$008294`, where the pass used to stop. The pass's RAM changes are restored so collision grids remain
+  at the loader state. This is an initial arena view, not a cycle-timed gameplay
   screenshot.
 - The arena is drawn through the same `render::LevelLayers` and `compose` as any level, as one
   fixed screen: each band's layer 1 (Mode 7's single layer stacks between object priorities

@@ -41,16 +41,6 @@ pub const LM_MAP16_POINTER: u32 = 0x06_F540;
 /// block from the layer 1 pages, so `LM_MAP16_POINTER` cannot find
 /// them. Older versions keep the vanilla table.
 pub const BG_MAP16_BASE_HOOK: u32 = 0x05_8DA4;
-/// Inside the NMI handler: writes the Mode 7 boss arena's video
-/// registers (mode, tilemap, character base, scroll, matrix).
-pub const MODE7_NMI_REGISTERS: u32 = 0x00_82F7;
-/// Where the NMI handler arms the status bar IRQ; Y holds its scanline.
-pub const SET_STATUS_BAR_IRQ: u32 = 0x00_8294;
-/// The IRQ handler's boss-arena branch, which switches video modes at
-/// the ceiling and floor lines.
-pub const BOSS_IRQ: u32 = 0x00_83BA;
-/// Common exit of the IRQ handler.
-pub const EXIT_IRQ: u32 = 0x00_83B2;
 /// `CODE_00A1DA`: one game-mode `$14` drawing pass, which fills OAM
 /// with the player, boss, and sprite-based arena walls and floor.
 pub const DRAW_LEVEL_FRAME: u32 = 0x00_A1DA;
@@ -60,13 +50,16 @@ pub const DRAW_LEVEL_FRAME: u32 = 0x00_A1DA;
 /// whole image from its priority buffers, so an object is only where the
 /// game drew it until the frame gets here.
 pub const CONSOLIDATE_OAM: u32 = 0x00_8494;
+/// `DoSomeSpriteDMA`: the NMI handler's OAM upload, a DMA of the whole
+/// image to `$2104` that ends by pointing `OAMADD` at `$3F` with priority
+/// rotation on, which makes the object there the frontmost. SA-1 Pack
+/// returns before that, MaxTile having put the objects in order.
+pub const UPLOAD_OAM: u32 = 0x00_8449;
 /// `CODE_02A802`: the body of `LoadSprFromLevel`, after its
 /// every-other-frame check. Spawns the level sprites at the column the
 /// camera position and scroll direction select. Lunar Magic reroutes
 /// its inner loop but keeps this entry.
 pub const SPAWN_SPRITES: u32 = 0x02_A802;
-/// `CODE_0098A9`: uploads the boss's graphics to VRAM.
-pub const UPLOAD_BOSS_TILES: u32 = 0x00_98A9;
 /// `MarioGFXDMA` (`$00A300`): the NMI's per-frame upload of the
 /// player's tiles (VRAM words `$6000`-`$60FF`, `$6100`-`$61FF`, and
 /// `$67F0`) and palette (CGRAM `$86`-`$8F`), from the pointers the

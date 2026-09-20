@@ -3,10 +3,11 @@
 //!
 //! What is modelled is what a game needs to hand work across: the
 //! control registers with their message nibbles and IRQ flags, the
-//! vectors, the BW-RAM windows, and the arithmetic unit. Timers, DMA with
-//! character conversion, the variable-length bit reader, and write
-//! protection are not; the Super MMC stays at the bank assignment
-//! [`crate::addr::Mapping::Sa1Rom`] describes.
+//! vectors, the BW-RAM windows, the arithmetic unit, and DMA between the
+//! cartridge's memories. Timers, character conversion, the
+//! variable-length bit reader, and write protection are not; the Super
+//! MMC stays at the bank assignment the ROM's [`crate::addr::Mapping`]
+//! describes.
 
 use super::{Cpu, CpuError};
 
@@ -56,6 +57,51 @@ impl Link {
     }
 }
 
+/// A copy the SA-1's DMA has been asked for, in bus addresses as the SA-1
+/// sees them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct DmaTransfer {
+    pub source: u32,
+    pub dest: u32,
+    pub len: u16,
+}
+
+/// `DCNT`, `SDA`, `DDA`, and `DTC`. The source is ROM, BW-RAM, or I-RAM
+/// and the destination I-RAM or BW-RAM; writing the last byte of the
+/// destination address that its memory uses starts the copy.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+struct Dma {
+    control: u8,
+    source: u32,
+    dest: u32,
+    len: u16,
+    irq: bool,
+    irq_enabled: bool,
+}
+
+impl Dma {
+    /// The transfer the registers describe, if `DCNT` enables one this
+    /// models: character conversion is not.
+    fn transfer(self) -> Option<DmaTransfer> {
+        let place = |memory: u8, addr: u32| match memory {
+            0 => Some(addr),
+            1 => Some(0x40_0000 | (addr & 0x03_FFFF)),
+            2 => Some(0x00_3000 | (addr & 0x07FF)),
+            _ => None,
+        };
+        (self.control & 0xA0 == 0x80).then_some(DmaTransfer {
+            source: place(self.control & 3, self.source)?,
+            dest: place(2 - (self.control >> 2 & 1), self.dest)?,
+            len: self.len,
+        })
+    }
+}
+
+fn set_byte(value: &mut u32, byte: u16, to: u8) {
+    let shift = 8 * byte as u32;
+    *value = (*value & !(0xFF << shift)) | (to as u32) << shift;
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Sa1 {
     /// The SA-1's CPU. While it runs it is out on the bus and this is a
@@ -71,16 +117,21 @@ pub struct Sa1 {
     /// `CRV`, `CNV`, `CIV`: the SA-1 takes its vectors from registers.
     reset_vector: u16,
     irq_vector: u16,
-    /// `SIV`, which replaces the S-CPU's IRQ vector when `SCNT` bit 6 is
-    /// set.
+    /// `SIV` and `SNV`, which replace the S-CPU's IRQ and NMI vectors
+    /// when `SCNT` bits 6 and 4 are set.
     main_irq_vector: u16,
     main_irq_vector_selected: bool,
+    main_nmi_vector: u16,
+    main_nmi_vector_selected: bool,
     /// `BMAPS` and `BMAP`: the BW-RAM block at `$6000`-`$7FFF` for the
     /// S-CPU and for the SA-1. Bit 7 of the SA-1's selects the bitmap
     /// view instead.
     pub bwram_window: [u8; 2],
     pub bitmap: Bitmap,
     arithmetic: Arithmetic,
+    dma: Dma,
+    /// A transfer the registers have started, for the bus to carry out.
+    dma_started: Option<DmaTransfer>,
 }
 
 impl Default for Sa1 {
@@ -95,9 +146,13 @@ impl Default for Sa1 {
             irq_vector: 0,
             main_irq_vector: 0,
             main_irq_vector_selected: false,
+            main_nmi_vector: 0,
+            main_nmi_vector_selected: false,
             bwram_window: [0; 2],
             bitmap: Bitmap::default(),
             arithmetic: Arithmetic::default(),
+            dma: Dma::default(),
+            dma_started: None,
         }
     }
 }
@@ -163,8 +218,16 @@ impl Sa1 {
     pub fn irq(&self, processor: Processor) -> bool {
         match processor {
             Processor::Main => self.to_main.line(),
-            Processor::Sa1 => self.to_sa1.line(),
+            Processor::Sa1 => self.to_sa1.line() || (self.dma.irq && self.dma.irq_enabled),
         }
+    }
+
+    /// The transfer a register write has just started. Once the bus has
+    /// made the copy, the SA-1 gets its end-of-DMA IRQ.
+    pub fn take_dma(&mut self) -> Option<DmaTransfer> {
+        let transfer = self.dma_started.take()?;
+        self.dma.irq = true;
+        Some(transfer)
     }
 
     pub fn irq_vector(&self) -> u16 {
@@ -177,14 +240,22 @@ impl Sa1 {
             .then_some(self.main_irq_vector)
     }
 
+    /// The S-CPU's NMI vector, likewise.
+    pub fn main_nmi_vector(&self) -> Option<u16> {
+        self.main_nmi_vector_selected
+            .then_some(self.main_nmi_vector)
+    }
+
     /// Reads a register, or `None` if `processor` has nothing there.
     pub fn read(&self, processor: Processor, reg: u16) -> Option<u8> {
         let flags = |link: Link| (link.irq as u8) << 7 | link.message;
         Some(match (processor, reg) {
             (Processor::Main, 0x2300) => {
-                flags(self.to_main) | (self.main_irq_vector_selected as u8) << 6
+                flags(self.to_main)
+                    | (self.main_irq_vector_selected as u8) << 6
+                    | (self.main_nmi_vector_selected as u8) << 4
             }
-            (Processor::Sa1, 0x2301) => flags(self.to_sa1),
+            (Processor::Sa1, 0x2301) => flags(self.to_sa1) | (self.dma.irq as u8) << 5,
             (Processor::Sa1, 0x2306..=0x230A) => {
                 (self.arithmetic.result >> (8 * (reg - 0x2306))) as u8
             }
@@ -217,9 +288,18 @@ impl Sa1 {
             (Processor::Sa1, 0x2209) => {
                 self.to_main.send(value);
                 self.main_irq_vector_selected = value & 0x40 != 0;
+                self.main_nmi_vector_selected = value & 0x10 != 0;
             }
-            (Processor::Sa1, 0x220A) => self.to_sa1.irq_enabled = value & 0x80 != 0,
-            (Processor::Sa1, 0x220B) => self.to_sa1.irq &= value & 0x80 == 0,
+            (Processor::Sa1, 0x220A) => {
+                self.to_sa1.irq_enabled = value & 0x80 != 0;
+                self.dma.irq_enabled = value & 0x20 != 0;
+            }
+            (Processor::Sa1, 0x220B) => {
+                self.to_sa1.irq &= value & 0x80 == 0;
+                self.dma.irq &= value & 0x20 == 0;
+            }
+            (Processor::Sa1, 0x220C) => set_low(&mut self.main_nmi_vector, value),
+            (Processor::Sa1, 0x220D) => set_high(&mut self.main_nmi_vector, value),
             (Processor::Sa1, 0x220E) => set_low(&mut self.main_irq_vector, value),
             (Processor::Sa1, 0x220F) => set_high(&mut self.main_irq_vector, value),
             (Processor::Main, 0x2224) => self.bwram_window[0] = value & 0x1F,
@@ -231,6 +311,24 @@ impl Sa1 {
                     Bitmap::FourBits
                 };
             }
+            (Processor::Sa1, 0x2230) => self.dma.control = value,
+            (Processor::Sa1, 0x2232..=0x2234) => {
+                set_byte(&mut self.dma.source, reg - 0x2232, value)
+            }
+            (Processor::Sa1, 0x2235..=0x2237) => {
+                set_byte(&mut self.dma.dest, reg - 0x2235, value);
+                // I-RAM addresses end at the middle byte.
+                let last = if self.dma.control & 4 != 0 {
+                    0x2237
+                } else {
+                    0x2236
+                };
+                if reg == last {
+                    self.dma_started = self.dma.transfer();
+                }
+            }
+            (Processor::Sa1, 0x2238) => set_low(&mut self.dma.len, value),
+            (Processor::Sa1, 0x2239) => set_high(&mut self.dma.len, value),
             (Processor::Sa1, 0x2250) => self.arithmetic.control(value),
             (Processor::Sa1, 0x2251) => set_low(&mut self.arithmetic.a, value),
             (Processor::Sa1, 0x2252) => set_high(&mut self.arithmetic.a, value),
@@ -283,6 +381,50 @@ mod tests {
     }
 
     #[test]
+    fn dma_starts_on_the_destination_and_ends_with_an_irq() {
+        let mut sa1 = Sa1::default();
+        let write = |sa1: &mut Sa1, regs: &[(u16, u8)]| {
+            for &(reg, value) in regs {
+                assert!(sa1.write(Processor::Sa1, reg, value));
+            }
+        };
+        // `$0400` bytes of ROM at `$128000` to BW-RAM `$402400`.
+        write(
+            &mut sa1,
+            &[
+                (0x220A, 0x20),
+                (0x2230, 0xC4),
+                (0x2232, 0x00),
+                (0x2233, 0x80),
+                (0x2234, 0x12),
+                (0x2238, 0x00),
+                (0x2239, 0x04),
+                (0x2235, 0x00),
+                (0x2236, 0x24),
+            ],
+        );
+        assert_eq!(sa1.take_dma(), None); // BW-RAM addresses have a bank
+        write(&mut sa1, &[(0x2237, 0x40)]);
+        let transfer = DmaTransfer {
+            source: 0x12_8000,
+            dest: 0x40_2400,
+            len: 0x400,
+        };
+        assert_eq!(sa1.take_dma(), Some(transfer));
+        assert_eq!(sa1.take_dma(), None);
+        assert!(sa1.irq(Processor::Sa1));
+        assert_eq!(sa1.read(Processor::Sa1, 0x2301), Some(0x20));
+        write(&mut sa1, &[(0x220B, 0x20)]);
+        assert!(!sa1.irq(Processor::Sa1));
+        // BW-RAM to I-RAM starts a byte sooner; character conversion is
+        // not modelled and starts nothing.
+        write(&mut sa1, &[(0x2230, 0x81), (0x2235, 0x10), (0x2236, 0x31)]);
+        assert_eq!(sa1.take_dma().map(|t| t.dest), Some(0x00_3110));
+        write(&mut sa1, &[(0x2230, 0xA1), (0x2235, 0x10), (0x2236, 0x31)]);
+        assert_eq!(sa1.take_dma(), None);
+    }
+
+    #[test]
     fn each_processor_raises_and_the_other_acknowledges() {
         let mut sa1 = Sa1::default();
         assert!(!sa1.runnable());
@@ -310,5 +452,11 @@ mod tests {
         assert!(sa1.irq(Processor::Main));
         assert_eq!(sa1.read(Processor::Main, 0x2300), Some(0xC5));
         assert_eq!(sa1.main_irq_vector(), Some(0x1D00));
+        assert_eq!(sa1.main_nmi_vector(), None);
+        sa1.write(Processor::Sa1, 0x220C, 0x6A);
+        sa1.write(Processor::Sa1, 0x220D, 0x81);
+        sa1.write(Processor::Sa1, 0x2209, 0x50);
+        assert_eq!(sa1.main_nmi_vector(), Some(0x816A));
+        assert_eq!(sa1.read(Processor::Main, 0x2300), Some(0xD0));
     }
 }

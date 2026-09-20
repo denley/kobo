@@ -1,6 +1,6 @@
 //! Whole-picture comparison against emulator frames: `KOBO_VIDEO_ORACLE_DIRS`
 //! lists (`:`-separated) directories of `KOBO_ORACLE_VIDEO=1` dumps of the
-//! vanilla ROM. Each level is rendered with sprites, cropped to the
+//! vanilla ROM, or of the ROM `KOBO_ORACLE_ROM` names. Each level is rendered with sprites, cropped to the
 //! emulator's camera, and compared pixel by pixel below the status bar.
 //! Sprites animate and move and tides and animated tiles cycle, so
 //! agreement is high rather than total; the threshold catches layers,
@@ -66,7 +66,9 @@ fn levels_in(dir: &Path) -> Vec<u16> {
 
 #[test]
 fn rendered_levels_match_emulator_frames() {
-    let Some(rom) = common::vanilla() else { return };
+    let Some(rom) = common::oracle_rom() else {
+        return;
+    };
     let Some(list) = std::env::var_os("KOBO_VIDEO_ORACLE_DIRS") else {
         eprintln!("skipping: KOBO_VIDEO_ORACLE_DIRS is not set");
         return;

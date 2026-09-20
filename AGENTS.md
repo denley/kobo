@@ -58,28 +58,14 @@ Early stage: roadmap step 1 is in progress.
 4. Overworld, Layer 3, graphics and palette editing, emulator integration
    (play-from-level, Mesen-S / bsnes-plus debugging).
 
-### Structural work owed
-
-From a review of the renderer's code once it worked. Each item names the roadmap point it
-should land before; later steps would otherwise build on the shape it fixes.
-
-Before finishing step 1 (SA-1):
-
-- **An emulator oracle for SA-1 ROMs.** The SA-1 itself is in (`docs/sa1.md`), checked only
-  against the vanilla ROM. `tools/oracle/dump_levels.lua` reads `$7E` addresses directly and
-  needs `RamMap::Sa1Pack`'s map before Mesen can say whether the differences listed in
-  `docs/known-gaps.md` are SA-1 Pack's or the model's.
-- **OAM as the PPU gets it.** `expand::oam` reads the game's OAM mirror and starts from `$3F`.
-  SA-1 Pack no longer applies `$3F` at upload. Running the ROM's own OAM upload and capturing
-  `$2102`-`$2104` on the bus would settle the order for every ROM instead of assuming it.
-
 ## Stack and layout
 
 - **Rust** (pinned in `rust-toolchain.toml` and `mise.toml`), edition 2024, cargo workspace.
   - `crates/kobo-core`: the library. All logic lives here.
   - `crates/kobo-cli`: the `kobo` binary. Thin shell over the core; no logic of its own.
 - `kobo_core::addr` is the only place that knows how SNES addresses map to file offsets.
-  Every ROM read takes a `SnesAddr` and goes through the ROM's `Mapping` (LoROM or SA-1).
+  Every ROM read takes a `SnesAddr` and goes through the ROM's `Mapping` (LoROM, SA-1, or
+  SA-1 over 4 MiB).
   Conversions mirror Asar's conventions so addresses agree with the rest of the toolchain.
 - `kobo_core::ram` is the only place that knows where the game keeps its variables. A
   `RamAddr` names a variable by its vanilla `$7E`/`$7F` address, a `RamMap` resolves it to a
@@ -95,9 +81,13 @@ Before finishing step 1 (SA-1):
   the SA-1 sees it. A wait nothing answers is `CpuError::Waiting`, not 200 million steps.
 - `kobo_core::expand` runs ROM code. `machine` owns the CPU, the bus, and `Call` (the register
   state a routine is entered with; every call starts from reset registers, and
-  `try_call_to` stops one at an address with the call still open), `load` runs the
-  loader phases, and `sprite_capture`, `player`, `boss`, `layer3`, and `map16` are the passes
-  over the loaded level. `routines` holds the ROM addresses. `expand_level` returns a
+  `try_call_to` stops one at an address with the call still open); `Machine::interrupt`
+  runs the ROM's NMI or IRQ handler whole, from its vector to its `RTI`, since patches
+  replace both ends of them. `load` runs the loader phases in game mode `$11`'s own order,
+  and `sprite_capture`, `player`, `boss`, `layer3`, and `map16` are the passes over the
+  loaded level. `oam` reads a frame's objects as the PPU gets them: the ROM's OAM upload
+  runs after every frame and the bus keeps what arrives at `$2102`-`$2104`, so the ROM
+  decides which object is in front; do not read `$0200` and `$3F` instead. `routines` holds the ROM addresses. `expand_level` returns a
   `LoadedLevel` of four parts: `tiles` (`LevelTiles`: the grid, Map16 definitions, and layer
   layouts, which is what the level *is*), `video` (`VideoMemory`: VRAM, CGRAM, `BGnSC`,
   `OBSEL`), `scene` (`LevelScene`: screen setup, camera, layer 3, player, boss arena), and
@@ -163,7 +153,8 @@ Windows, and macOS. Keep all three green.
 - The vanilla reference is No-Intro "Super Mario World (USA)", headerless SHA-1
   `6b47bb75d16514b6a476aa0c73a683a2a4c18765`, checksum `$A0DA`.
 - **Oracle tiers** are opt-in by environment variable and compare against data that is never
-  committed: `KOBO_ORACLE_DIR` (Mesen 2 dumps of every vanilla level, `tools/oracle/`),
+  committed: `KOBO_ORACLE_DIR` (Mesen 2 dumps of every vanilla level, `tools/oracle/`; of
+  another ROM, the SA-1 reference ROM say, with `KOBO_ORACLE_ROM`),
   `KOBO_BOSS_ORACLE_DIR`, `KOBO_VIDEO_ORACLE_DIRS` (whole pictures), `KOBO_65816_TESTS`
   (SingleStepTests), and `KOBO_LM_ROMS` (`:`-separated Lunar Magic hacks). Lunar Magic
   exports (hashes in `tests/fixtures/`) are the oracle for GFX, palette, and Map16.
@@ -202,8 +193,8 @@ describes that module's code rather than the game). Do not grow this file with t
   routine, BG Map16 tables, per-level flags, expanded level heights, custom palettes, sprite
   data formats and PIXI extension bytes, the 255-sprite load flags.
 - `docs/sa1.md`: SA-1 Pack. How its two processors hand work over and how the bus schedules
-  them, the RAM it moves, MaxTile and the OAM, the work RAM port, the reference ROM, what is
-  not modelled.
+  them, the RAM it moves, MaxTile and the OAM, the work RAM port, SA-1 DMA, images over
+  4 MiB, the reference ROM, what it changes in the vanilla levels, what is not modelled.
 - `docs/testing.md`: the emulator oracle and its capture modes, the video oracle, the CPU
   suite, the Lunar Magic hack corpus checks and their known exceptions.
 - `docs/known-gaps.md`: what a rendered level does not reproduce.

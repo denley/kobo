@@ -15,6 +15,16 @@ pub fn vanilla() -> Option<Rom> {
     }
 }
 
+/// The ROM the emulator dumps being compared against were made from:
+/// `KOBO_ORACLE_ROM`, or else the vanilla ROM.
+#[allow(dead_code)]
+pub fn oracle_rom() -> Option<Rom> {
+    match std::env::var_os("KOBO_ORACLE_ROM") {
+        Some(path) => Some(Rom::load(path).expect("KOBO_ORACLE_ROM must load")),
+        None => vanilla(),
+    }
+}
+
 /// Lunar Magic hack ROMs to exercise, from the `:`-separated paths in
 /// `KOBO_LM_ROMS`. Empty (after printing why) when the variable is unset.
 #[allow(dead_code)]

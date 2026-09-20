@@ -3,6 +3,7 @@
 use super::machine::{Call, Machine};
 use super::routines;
 use crate::cpu::CpuError;
+use crate::cpu::smw_bus::{self, SmwBus};
 use crate::ram::{self, Ram};
 use crate::video::SpriteObject;
 
@@ -14,7 +15,7 @@ pub(super) const HIDDEN_Y: u8 = 0xF0;
 /// Objects in OAM, and the bytes of the image: four per object, then the
 /// size and X-high bits packed four objects to a byte.
 pub(super) const OAM_OBJECTS: usize = 128;
-pub(super) const OAM_LEN: usize = OAM_OBJECTS * 4 + OAM_OBJECTS / 4;
+pub(super) const OAM_LEN: usize = smw_bus::OAM_LEN;
 
 /// Small and large object dimensions for an `OBSEL` value.
 pub fn object_sizes(object_select: u8) -> [(i32, i32); 2] {
@@ -30,39 +31,76 @@ pub fn object_sizes(object_select: u8) -> [(i32, i32); 2] {
     ][(object_select >> 5) as usize]
 }
 
-/// The game's OAM image and the object it started writing at.
-pub(super) fn read_oam(ram: &Ram) -> OamImage {
-    (
-        ram.bytes(ram::OAM, OAM_LEN),
-        ram.u8(ram::OAM_ADDRESS) as usize / 2,
-    )
-}
-
-/// An OAM image and the object it starts at.
+/// An OAM image and the object the PPU draws in front of the others.
 pub(super) type OamImage = (Vec<u8>, usize);
 
-/// Runs one frame of the level loop. What the console shows afterwards is
-/// [`read_oam`]; what comes back is the image as the game drew it, taken
-/// when the frame got to the end-of-frame OAM routine. That is where to
-/// look for whatever draws to fixed objects (the player, the candle
-/// flames): SA-1 Pack's MaxTile rebuilds the whole image there, in
-/// priority order. A frame that never gets there (a message box is up,
-/// or a patch has rerouted the end of the frame) gives the image it
-/// left.
-pub(super) fn draw_frame(machine: &mut Machine) -> Result<OamImage, CpuError> {
-    let frame = Call::jsr(routines::DRAW_LEVEL_FRAME);
-    if machine.try_call_to(frame, Some(routines::CONSOLIDATE_OAM))? {
-        return Ok(read_oam(&machine.bus.ram));
+/// The game's OAM upload, which the NMI handler runs each frame.
+pub(super) const UPLOAD: Call = Call::jsr(routines::UPLOAD_OAM);
+
+/// Object memory as [`UPLOAD`] left it. The ROM's own upload decides
+/// which object comes first: vanilla turns priority rotation on and
+/// starts from `$3F`, SA-1 Pack leaves it off.
+pub(super) fn uploaded(bus: &SmwBus) -> OamImage {
+    (bus.oam.clone(), bus.first_object())
+}
+
+/// A frame of the level loop, as the game drew it and as the PPU got it.
+pub(super) struct Frame {
+    /// The game's OAM image when the frame got to the end-of-frame OAM
+    /// routine. That is where to look for whatever draws to fixed objects
+    /// (the player, the candle flames): SA-1 Pack's MaxTile rebuilds the
+    /// whole image there, in priority order. A frame that never gets
+    /// there (a message box is up, or a patch has rerouted the end of the
+    /// frame) gives the image it left.
+    pub drawn: Vec<u8>,
+    pub uploaded: OamImage,
+}
+
+impl Frame {
+    /// The uploaded image with every object hidden but those the game
+    /// drew at `slots`, which are found again by what they are: the PPU's
+    /// order of them is the uploaded image's, wherever the end of the
+    /// frame moved them to.
+    pub fn uploaded_from(&self, slots: std::ops::Range<usize>) -> OamImage {
+        let wanted: Vec<_> = slots.map(|slot| object_bytes(&self.drawn, slot)).collect();
+        let (mut image, first) = self.uploaded.clone();
+        for slot in 0..OAM_OBJECTS {
+            if !wanted.contains(&object_bytes(&image, slot)) {
+                image[slot * 4 + 1] = HIDDEN_Y;
+            }
+        }
+        (image, first)
     }
-    let drawn = read_unpacked_oam(&machine.bus.ram);
-    machine.finish_call(frame)?;
-    Ok(drawn)
+}
+
+/// An object's position, tile, and attributes, and its size and X-high
+/// bits.
+fn object_bytes(image: &[u8], slot: usize) -> (&[u8], u8) {
+    let high = image[OAM_OBJECTS * 4 + slot / 4] >> (2 * (slot % 4));
+    (&image[slot * 4..slot * 4 + 4], high & 3)
+}
+
+/// Runs one frame of the level loop and then the OAM upload.
+pub(super) fn draw_frame(machine: &mut Machine) -> Result<Frame, CpuError> {
+    let frame = Call::jsr(routines::DRAW_LEVEL_FRAME);
+    let drawn = if machine.try_call_to(frame, Some(routines::CONSOLIDATE_OAM))? {
+        machine.bus.ram.bytes(ram::OAM, OAM_LEN)
+    } else {
+        let drawn = read_unpacked_oam(&machine.bus.ram);
+        machine.finish_call(frame)?;
+        drawn
+    };
+    machine.try_call(UPLOAD)?;
+    Ok(Frame {
+        drawn,
+        uploaded: uploaded(&machine.bus),
+    })
 }
 
 /// The OAM image of a frame that has drawn but not yet reached
 /// [`routines::CONSOLIDATE_OAM`]: the size bits are packed here from the
 /// table the drawing routines wrote them to.
-fn read_unpacked_oam(ram: &Ram) -> OamImage {
+fn read_unpacked_oam(ram: &Ram) -> Vec<u8> {
     let mut image = ram.bytes(ram::OAM, OAM_OBJECTS * 4);
     let sizes = ram.bytes(ram::OAM_SIZES, OAM_OBJECTS);
     image.extend(sizes.chunks(4).map(|four| {
@@ -70,7 +108,7 @@ fn read_unpacked_oam(ram: &Ram) -> OamImage {
             .enumerate()
             .fold(0, |packed, (i, size)| packed | (size & 3) << (2 * i))
     }));
-    (image, ram.u8(ram::OAM_ADDRESS) as usize / 2)
+    image
 }
 
 /// Visible objects in an OAM image, front to back from object `first`,
@@ -85,8 +123,7 @@ pub(super) fn screen_objects(
     let mut out = Vec::new();
     for offset in 0..OAM_OBJECTS {
         let object = (first + offset) % OAM_OBJECTS;
-        let bytes = &oam[object * 4..object * 4 + 4];
-        let high = oam[OAM_OBJECTS * 4 + object / 4] >> (2 * (object % 4));
+        let (bytes, high) = object_bytes(oam, object);
         let large = high & 2 != 0;
         let (width, height) = sizes[large as usize];
         let x = bytes[0] as i32 - if high & 1 != 0 { 256 } else { 0 };
@@ -162,12 +199,10 @@ mod tests {
             ram.set_u8_at(ram::OAM, 65 * 4 + 2, 0x42);
             ram.set_u8_at(ram::OAM_SIZES, 65, 2);
             ram.set_u8_at(ram::OAM_SIZES, 67, 0xFF); // only two bits count
-            ram.set_u8(ram::OAM_ADDRESS, 10);
-            let (image, first) = read_unpacked_oam(&ram);
+            let image = read_unpacked_oam(&ram);
             assert_eq!(image.len(), OAM_LEN);
             assert_eq!(image[65 * 4 + 2], 0x42);
             assert_eq!(image[OAM_OBJECTS * 4 + 16], 0b1100_1000);
-            assert_eq!(first, 5);
         }
     }
 

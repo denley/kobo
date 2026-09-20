@@ -7,6 +7,8 @@ use crate::rom::Rom;
 
 /// Instruction limit for the game's own loading and per-frame routines.
 const STEP_LIMIT: u64 = 200_000_000;
+/// Instruction limit for an interrupt handler.
+const HANDLER_STEP_LIMIT: u64 = 1_000_000;
 /// Instruction limit for the short lookups a tool hooks into the game.
 pub(super) const LOOKUP_STEP_LIMIT: u64 = 100_000;
 
@@ -82,6 +84,15 @@ impl Call {
         self.limit = limit;
         self
     }
+}
+
+/// The interrupts the console raises each frame.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Interrupt {
+    /// Vertical blank.
+    Nmi,
+    /// The scanline the game asked for in `VTIME`.
+    TimerIrq,
 }
 
 /// A CPU on a bus, loading or running one level.
@@ -161,6 +172,25 @@ impl<'r> Machine<'r> {
         self.try_call(call).map_err(|source| self.error(source))
     }
 
+    /// Runs the ROM's handler for `interrupt` from its vector to its
+    /// `RTI`, as the console would between two passes of the game loop.
+    /// There is no entering one further in or stopping it short: SA-1
+    /// Pack and other patches replace both ends of the handlers.
+    pub fn interrupt(&mut self, interrupt: Interrupt) -> Result<(), ExpandError> {
+        self.reset_registers();
+        let handler = match interrupt {
+            Interrupt::Nmi => self.bus.nmi_vector(),
+            Interrupt::TimerIrq => {
+                self.bus.raise_timer_irq();
+                self.bus.irq_vector(false)
+            }
+        };
+        self.cpu.enter_handler(&mut self.bus, handler);
+        self.finish(HANDLER_STEP_LIMIT, None)
+            .map(|_| ())
+            .map_err(|source| self.error(source))
+    }
+
     /// Runs from power-on, through the cartridge's reset vector, until the
     /// program counter reaches `stop`.
     pub fn run_from_reset(&mut self, stop: u32, limit: u64) -> Result<(), ExpandError> {
@@ -168,20 +198,8 @@ impl<'r> Machine<'r> {
         self.cpu.emulation = true;
         let vector = routines::RESET_VECTOR;
         let start = u16::from_le_bytes([self.bus.read(vector), self.bus.read(vector + 1)]);
-        self.resume_until(start as u32, stop, limit)
-    }
-
-    /// Resets the registers and runs from `start` until the program
-    /// counter reaches `stop`.
-    pub fn run_until(&mut self, start: u32, stop: u32, limit: u64) -> Result<(), ExpandError> {
-        self.reset_registers();
-        self.resume_until(start, stop, limit)
-    }
-
-    /// Runs from `start` to `stop` with the registers as they are.
-    pub fn resume_until(&mut self, start: u32, stop: u32, limit: u64) -> Result<(), ExpandError> {
         self.cpu
-            .run_until(&mut self.bus, start, stop, limit)
+            .run_until(&mut self.bus, start as u32, stop, limit)
             .map_err(|source| self.error(self.cause(source)))
     }
 

@@ -96,6 +96,10 @@ pub enum Mapping {
     /// SA-1 cartridge mapping with the default Super MMC bank assignment
     /// (banks 0 to 3 mapped in order). Up to 4 MiB.
     Sa1Rom,
+    /// An SA-1 cartridge of more than 4 MiB, as SA-1 Pack sets the Super
+    /// MMC up for one (Asar's `bigsa1rom`): the first 4 MiB in the LoROM
+    /// view alone, the rest in the HiROM view alone. Up to 8 MiB.
+    BigSa1Rom,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Error)]
@@ -120,14 +124,23 @@ const SA1_SLOTS: [Option<u32>; 8] = [
 ];
 
 impl Mapping {
-    /// Picks a mapping from the map-mode byte of the internal ROM header.
-    /// Returns `None` for unsupported modes (HiROM, ExHiROM, and so on).
-    pub const fn from_map_mode(map_mode: u8) -> Option<Self> {
+    /// Picks a mapping from the map-mode byte of the internal ROM header
+    /// and the image's length: the header does not say how an SA-1
+    /// cartridge's Super MMC is set up, but only an image over 4 MiB
+    /// needs anything other than the default. Returns `None` for
+    /// unsupported modes (HiROM, ExHiROM, and so on).
+    pub const fn from_map_mode(map_mode: u8, rom_len: usize) -> Option<Self> {
         match map_mode & 0x0F {
             0x0 => Some(Self::LoRom),
+            0x3 if rom_len > 0x40_0000 => Some(Self::BigSa1Rom),
             0x3 => Some(Self::Sa1Rom),
             _ => None,
         }
+    }
+
+    /// Whether the cartridge has an SA-1.
+    pub const fn is_sa1(self) -> bool {
+        matches!(self, Self::Sa1Rom | Self::BigSa1Rom)
     }
 
     /// Converts a SNES address to a ROM file offset.
@@ -158,6 +171,17 @@ impl Mapping {
                     Err(err)
                 }
             }
+            Self::BigSa1Rom => {
+                if (a & 0x40_8000) == 0x00_8000 {
+                    Ok(PcAddr(
+                        ((a & 0x80_0000) >> 2) | ((a & 0x3F_0000) >> 1) | (a & 0x7FFF),
+                    ))
+                } else if (a & 0xC0_0000) == 0xC0_0000 {
+                    Ok(PcAddr(0x40_0000 | (a & 0x3F_FFFF)))
+                } else {
+                    Err(err)
+                }
+            }
         }
     }
 
@@ -165,8 +189,10 @@ impl Mapping {
     pub fn pc_to_snes(self, pc: PcAddr) -> Result<SnesAddr, MapError> {
         let p = pc.raw();
         let err = MapError::OutOfRange(pc, self);
-        if p >= 0x40_0000 {
-            return Err(err);
+        match (self, p) {
+            (Self::BigSa1Rom, 0x40_0000..0x80_0000) => return Ok(SnesAddr::new(0xC0_0000 | p)),
+            (_, 0x40_0000..) => return Err(err),
+            _ => {}
         }
         match self {
             Self::LoRom => {
@@ -178,7 +204,7 @@ impl Mapping {
                 }
                 Ok(SnesAddr::new((bank << 16) | 0x8000 | (p & 0x7FFF)))
             }
-            Self::Sa1Rom => {
+            Self::Sa1Rom | Self::BigSa1Rom => {
                 let mb = p & 0x70_0000;
                 let slot = SA1_SLOTS.iter().position(|s| *s == Some(mb)).ok_or(err)? as u32;
                 Ok(SnesAddr::new(
@@ -326,10 +352,36 @@ mod tests {
 
     #[test]
     fn map_mode_detection() {
-        assert_eq!(Mapping::from_map_mode(0x20), Some(Mapping::LoRom));
-        assert_eq!(Mapping::from_map_mode(0x30), Some(Mapping::LoRom));
-        assert_eq!(Mapping::from_map_mode(0x23), Some(Mapping::Sa1Rom));
-        assert_eq!(Mapping::from_map_mode(0x21), None);
-        assert_eq!(Mapping::from_map_mode(0x25), None);
+        const MIB: usize = 0x10_0000;
+        assert_eq!(Mapping::from_map_mode(0x20, MIB), Some(Mapping::LoRom));
+        assert_eq!(Mapping::from_map_mode(0x30, MIB), Some(Mapping::LoRom));
+        assert_eq!(Mapping::from_map_mode(0x23, 4 * MIB), Some(Mapping::Sa1Rom));
+        assert_eq!(
+            Mapping::from_map_mode(0x23, 6 * MIB),
+            Some(Mapping::BigSa1Rom)
+        );
+        assert_eq!(Mapping::from_map_mode(0x21, MIB), None);
+        assert_eq!(Mapping::from_map_mode(0x25, MIB), None);
+    }
+
+    #[test]
+    fn big_sa1_splits_the_image_between_the_views() {
+        let m = Mapping::BigSa1Rom;
+        assert!(m.is_sa1());
+        // The first 4 MiB as the default assignment has them, LoROM only.
+        for a in [0x008000, 0x05E000, 0x3FFFFF, 0x808000, 0xBFFFFF] {
+            assert_eq!(m.snes_to_pc(s(a)), Mapping::Sa1Rom.snes_to_pc(s(a)));
+        }
+        // The rest in whole banks.
+        assert_eq!(m.snes_to_pc(s(0xC00000)), Ok(pc(0x400000)));
+        assert_eq!(m.snes_to_pc(s(0xFFFFFF)), Ok(pc(0x7FFFFF)));
+        assert!(m.snes_to_pc(s(0x400000)).is_err());
+        assert!(m.snes_to_pc(s(0x001234)).is_err());
+        assert_eq!(m.pc_to_snes(pc(0x02E000)), Ok(s(0x05E000)));
+        assert_eq!(m.pc_to_snes(pc(0x3FFFFF)), Ok(s(0xBFFFFF)));
+        assert_eq!(m.pc_to_snes(pc(0x400000)), Ok(s(0xC00000)));
+        assert_eq!(m.pc_to_snes(pc(0x7FFFFF)), Ok(s(0xFFFFFF)));
+        assert!(m.pc_to_snes(pc(0x800000)).is_err());
+        assert!(Mapping::Sa1Rom.pc_to_snes(pc(0x400000)).is_err());
     }
 }
