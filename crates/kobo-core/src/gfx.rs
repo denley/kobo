@@ -38,6 +38,15 @@ const GFX33_PTR: SnesAddr = SnesAddr::new(0x00B88B);
 const GFX32_33_BANK: SnesAddr = SnesAddr::new(0x00B890);
 const GFX32_PTR: SnesAddr = SnesAddr::new(0x00B8D8);
 
+/// `CODE_00B8DE`: the decompression routine, which every GFX file goes
+/// through with its pointer in `$8A`-`$8C`.
+const DECOMPRESS: SnesAddr = SnesAddr::new(0x00B8DE);
+
+/// How the routine a locked ROM puts in front of [`DECOMPRESS`] starts:
+/// `PHP`, `REP #$30`, `LDA $8A`, `EOR #`. What it does to the pointer is
+/// the lock's and is not read here.
+const LOCK_PREFIX: [u8; 6] = [0x08, 0xC2, 0x30, 0xA5, 0x8A, 0x49];
+
 /// GFX file lists per tileset, 4 files each: FG1, FG2, BG1, FG3 for
 /// objects and SP1 to SP4 for sprites.
 pub const OBJECT_GFX_LIST: SnesAddr = SnesAddr::new(0x00A92B);
@@ -206,6 +215,10 @@ pub enum GfxError {
         "GFX{index:02X} decompressed to {len} bytes, which is not 2, 3, or 4bpp for {tiles} tiles"
     )]
     BadSize { index: u8, len: usize, tiles: usize },
+    #[error(
+        "the ROM is locked: its GFX pointers are not the files' addresses until the ROM's own code has changed them"
+    )]
+    Locked,
     #[error(transparent)]
     Rom(#[from] RomError),
     #[error("GFX{index:02X} at {addr}: {source}")]
@@ -259,10 +272,28 @@ pub fn infer_format(index: u8, len: usize) -> Result<GfxFormat, GfxError> {
     }
 }
 
+/// Whether the ROM's author has locked it with Lunar Magic. A locked ROM
+/// calls a routine at the start of [`DECOMPRESS`] that changes the pointer
+/// it was given, so what the pointer tables hold are not addresses. The
+/// ROM's own code still loads its levels, which is all rendering needs;
+/// the files cannot be read out by number, which is what the lock is for.
+pub fn is_locked(rom: &Rom) -> bool {
+    let entry = rom.read(DECOMPRESS, 4).unwrap_or_default();
+    let [0x22, lo, hi, bank] = *entry else {
+        return false;
+    };
+    let routine = SnesAddr::new(u32::from_le_bytes([lo, hi, bank, 0]));
+    rom.read(routine, LOCK_PREFIX.len())
+        .is_ok_and(|code| code == LOCK_PREFIX)
+}
+
 /// Address of the compressed data for a GFX file.
 pub fn gfx_file_ptr(rom: &Rom, index: u8) -> Result<SnesAddr, GfxError> {
     if index >= GFX_FILE_COUNT {
         return Err(GfxError::BadIndex(index));
+    }
+    if is_locked(rom) {
+        return Err(GfxError::Locked);
     }
     if index >= GFX_TABLE_FILES {
         let ptr = if index == 0x32 { GFX32_PTR } else { GFX33_PTR };
@@ -474,6 +505,21 @@ mod tests {
         let four = convert_3bpp_to_4bpp(&three);
         assert_eq!(four, t.encode(Bpp::Four));
         assert_eq!(convert_4bpp_to_3bpp(&four), three);
+    }
+
+    #[test]
+    fn a_locked_rom_has_no_gfx_pointers() {
+        let mut data = vec![0u8; 0x10000];
+        data[0x7FC0 + 0x15] = 0x20;
+        let plain = Rom::from_bytes(data.clone()).unwrap();
+        assert!(!is_locked(&plain));
+        assert!(!matches!(gfx_file_ptr(&plain, 0), Err(GfxError::Locked)));
+        // `JSL $019000` at `$00B8DE`, and the routine it calls.
+        data[0x38DE..0x38E2].copy_from_slice(&[0x22, 0x00, 0x90, 0x01]);
+        data[0x9000..0x9006].copy_from_slice(&LOCK_PREFIX);
+        let locked = Rom::from_bytes(data).unwrap();
+        assert!(is_locked(&locked));
+        assert!(matches!(gfx_file_ptr(&locked, 0), Err(GfxError::Locked)));
     }
 
     #[test]

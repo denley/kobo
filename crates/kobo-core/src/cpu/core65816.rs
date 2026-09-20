@@ -1995,7 +1995,7 @@ impl Cpu {
     }
 
     /// Runs the routine entered until it returns, or until the program
-    /// counter gets to `stop` (without executing it) if that comes
+    /// counter gets to one of `stop` (without executing it) if that comes
     /// first. True if it has returned; otherwise the call is still open,
     /// and calling this again carries on with it: a `stop` it is already
     /// standing on is one to come round to again, not one reached.
@@ -2003,11 +2003,11 @@ impl Cpu {
         &mut self,
         bus: &mut impl Bus,
         limit: u64,
-        stop: Option<u32>,
+        stop: &[u32],
     ) -> Result<bool, CpuError> {
         let start = self.steps;
         self.run_to(bus, limit, |cpu| {
-            cpu.returned() || (Some(cpu.pc_addr()) == stop && cpu.steps != start)
+            cpu.returned() || (stop.contains(&cpu.pc_addr()) && cpu.steps != start)
         })?;
         if !self.returned() {
             return Ok(false);
@@ -2023,14 +2023,14 @@ impl Cpu {
     /// `RTL`, or until `limit` instructions have executed.
     pub fn call(&mut self, bus: &mut impl Bus, addr: u32, limit: u64) -> Result<(), CpuError> {
         self.enter(bus, addr);
-        self.finish(bus, limit, None).map(|_| ())
+        self.finish(bus, limit, &[]).map(|_| ())
     }
 
     /// Calls a subroutine as if by `JSR` from its own bank and runs until
     /// it returns with `RTS`.
     pub fn call_jsr(&mut self, bus: &mut impl Bus, addr: u32, limit: u64) -> Result<(), CpuError> {
         self.enter_jsr(bus, addr);
-        self.finish(bus, limit, None).map(|_| ())
+        self.finish(bus, limit, &[]).map(|_| ())
     }
 
     /// Starts executing at `start` and stops when the program counter
@@ -2039,12 +2039,12 @@ impl Cpu {
         &mut self,
         bus: &mut impl Bus,
         start: u32,
-        stop: u32,
+        stop: &[u32],
         limit: u64,
     ) -> Result<(), CpuError> {
         self.pb = (start >> 16) as u8;
         self.pc = start as u16;
-        self.run_to(bus, limit, |cpu| cpu.pc_addr() == stop)
+        self.run_to(bus, limit, |cpu| stop.contains(&cpu.pc_addr()))
     }
 }
 
@@ -2201,13 +2201,13 @@ mod tests {
         let mut cpu = Cpu::new();
         let sp = cpu.sp;
         cpu.enter_jsr(&mut ram, 0x8000);
-        assert!(!cpu.finish(&mut ram, 100, Some(0x8010)).unwrap());
+        assert!(!cpu.finish(&mut ram, 100, &[0x8010]).unwrap());
         assert_eq!((ram.0[0x10], cpu.pc), (0, 0x8010));
-        assert!(cpu.finish(&mut ram, 100, Some(0x8010)).unwrap());
+        assert!(cpu.finish(&mut ram, 100, &[0x8010]).unwrap());
         assert_eq!((ram.0[0x10], cpu.sp), (1, sp));
         // A stop it never reaches is no different from none.
         cpu.enter_jsr(&mut ram, 0x8000);
-        assert!(cpu.finish(&mut ram, 100, Some(0x9999)).unwrap());
+        assert!(cpu.finish(&mut ram, 100, &[0x9999]).unwrap());
         assert_eq!((ram.0[0x10], cpu.sp), (2, sp));
     }
 

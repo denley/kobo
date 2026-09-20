@@ -141,15 +141,16 @@ impl<'r> Machine<'r> {
             Return::Rtl => self.cpu.enter(&mut self.bus, call.addr),
             Return::Rts => self.cpu.enter_jsr(&mut self.bus, call.addr),
         }
-        self.finish(call.limit, stop)
+        let stop = stop.map_or(Vec::new(), |stop| self.bus.code_mirrors(stop));
+        self.finish(call.limit, &stop)
     }
 
     /// Runs the call [`Machine::try_call_to`] left open to its return.
     pub fn finish_call(&mut self, call: Call) -> Result<(), CpuError> {
-        self.finish(call.limit, None).map(|_| ())
+        self.finish(call.limit, &[]).map(|_| ())
     }
 
-    fn finish(&mut self, limit: u64, stop: Option<u32>) -> Result<bool, CpuError> {
+    fn finish(&mut self, limit: u64, stop: &[u32]) -> Result<bool, CpuError> {
         let returned = self
             .cpu
             .finish(&mut self.bus, limit, stop)
@@ -192,7 +193,7 @@ impl<'r> Machine<'r> {
             }
         };
         self.cpu.enter_handler(&mut self.bus, handler);
-        self.finish(HANDLER_STEP_LIMIT, None).map(|_| ())
+        self.finish(HANDLER_STEP_LIMIT, &[]).map(|_| ())
     }
 
     /// Runs from power-on, through the cartridge's reset vector, until the
@@ -202,8 +203,9 @@ impl<'r> Machine<'r> {
         self.cpu.emulation = true;
         let vector = routines::RESET_VECTOR;
         let start = u16::from_le_bytes([self.bus.read(vector), self.bus.read(vector + 1)]);
+        let stop = self.bus.code_mirrors(stop);
         self.cpu
-            .run_until(&mut self.bus, start as u32, stop, limit)
+            .run_until(&mut self.bus, start as u32, &stop, limit)
             .map_err(|source| self.error(self.cause(source)))
     }
 

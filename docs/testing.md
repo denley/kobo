@@ -6,7 +6,11 @@ how each oracle is produced, where its data lives, and what is known not to matc
 
 - **Emulator oracle** (`tools/oracle/`): `dump.sh <rom> <outdir> 105,106,...` runs Mesen 2
   headlessly, navigates to each level through the file select, and dumps the tile grid,
-  CGRAM, VRAM, header RAM, and the sprite slot tables on the first level frame.
+  CGRAM, VRAM, header RAM, and the sprite slot tables on the first level frame. The script
+  zeroes work RAM, save RAM, video memory, and an SA-1's I-RAM before the game starts, as
+  `expand`'s machine starts, whatever power-on state Mesen is set to (random by default):
+  dumps repeat byte for byte, VRAM included, and hacks that read memory they never wrote
+  behave the same each run.
   `tests/oracle_levels.rs` compares `expand::expand_level` against a dump directory when
   `KOBO_ORACLE_DIR` is set; the dumps are of the vanilla ROM unless `KOBO_ORACLE_ROM` names
   another. All 512 vanilla levels match byte for byte in the tile grid, and in which sprite
@@ -43,6 +47,35 @@ how each oracle is produced, where its data lives, and what is known not to matc
   those two frames' object layer as unreliable. A vanilla boss arena's frame sometimes comes
   without its background or objects (`098` or `0D9`, one or the other from run to run) and
   then falls just under the threshold; the SA-1 ROM's do not.
+- **Emulator oracle on hacks**: `dump_hack.sh <vanilla> <hack> <outdir> [count]` picks the
+  levels whose layer 1 pointer is not vanilla's and dumps `count` (12) of them, spread over
+  the hack; `KOBO_ORACLE_ROM=<hack> KOBO_ORACLE_DIR=<outdir>` then runs
+  `tests/oracle_levels.rs` on it. The script gets into a level in every hack of the corpus:
+  besides the vanilla title screen and file select it handles a hack that boots straight
+  into a level (`RHRS1C`), one that skips the intro level and starts on the overworld (it
+  presses A on the level the player stands on: Super Diagonal Mario 2, Super Sheffy World
+  2), and a "No Yoshi" intro that the ROM's tables would not predict (Grand Poo World 2
+  plays it before levels of any tileset), which is why it watches the game choose the intro
+  instead of predicting it. When it gives up it writes `stuck.ppm`, the screen it was on.
+  On 12 levels of each of the 42 `.smc` hacks the tile grids and layer 3 tilemaps all match,
+  and the sprite slots in 38; the rest are sprites already moving at the dump (`apes1.13`
+  `02E`, Luminescent `103`, `SMW_2021-4-24` `0C5`/`1C5`: 8 to 10 pixels on, where the test
+  allows 4) and one the emulator has not spawned yet (Super Hark Bros 2 `138` slot 5).
+  The 38 SA-1 entries of QLDC 2021 and 2022 (BPS patches, applied first) were dumped the
+  same way, six levels each: 37 get into a level (`28_Kitikuchan`'s title screen is a room
+  to play through), and 35 of those match throughout. `61_Wakana_Sariel` level `13B`
+  differs in the layer 3 tilemap, which its per-frame status bar code has drawn into by
+  the time of the dump, and `43_gui` level `105` has its custom sprites `99` and `91` one
+  slot further on than the emulator.
+  Dumps live in `~/.local/share/kobo/oracle/hacks/`. With `KOBO_ORACLE_VIDEO=1` the same
+  dumps give whole frames; of 27 levels of four hacks whose pictures changed when the
+  faults below were fixed, the entry screen of 23 went from 10-56% of pixels matching to
+  91-99.7% (Luminescent `148` only to 50%: an HDMA sky, see [known-gaps.md](known-gaps.md);
+  the other three barely moved).
+  What the hack dumps found, all in code no vanilla level runs: Lunar Magic's graphics
+  upload reading work RAM back out of VRAM, `TM` written past its mirror, a game loop in a
+  FastROM bank ([lunar-magic.md](lunar-magic.md)), and layer 2 left wherever level-init
+  code put it ([smw.md](smw.md)).
 - Lunar Magic exports (hashes in `tests/fixtures/`) are the oracle for GFX, palette, and Map16.
 - **CPU suite**: `tests/cpu_single_step.rs` runs the 65816 core against SingleStepTests
   (10,000 native-mode tests per opcode, about a second in release) when `KOBO_65816_TESTS`
@@ -58,9 +91,14 @@ how each oracle is produced, where its data lives, and what is known not to matc
   clobbered buffer or a table read from the wrong place without external data. Hacks whose
   headerless SHA-1 is in `fixtures/lunar_magic_map16_bg_export.txt` also have their BG table
   hashed against Lunar Magic's `-ExportAllMap16` output (file tile index `8000`-`81FF`).
-  Known exceptions in the corpus: `Smb2dx` (LM 1.63; 173 levels fail, its mode `$00`
-  levels carry object layer 2 pointers) and `Super Hark Bros 2` level `00A` (mode `$0C`,
-  896 of 2048 words), both failing before the vertical-level checks were added.
+  The rows checked are the 16 the game uploads from the layer 2 position, or from a
+  position one row either side: the upload comes before the level loop's first camera
+  update, which settles layer 2 by a few pixels in some levels.
+  Known exception in the corpus: `Smb2dx` (LM 1.63; 173 levels fail, its mode `$00`
+  levels carry object layer 2 pointers), failing before the vertical-level checks were
+  added. `Super Hark Bros 2` level `00A` used to fail with 896 of 2048 words: its
+  level-init code leaves layer 2 at `$5D` and the game had uploaded for `$C0`, which the
+  camera update `expand` now runs after preparation restores.
 - **SA-1**: the oracle script reads SA-1 Pack's RAM map (`ram()` in `dump_levels.lua` is
   `RamMap::Sa1Pack` for what it touches, and the full-WRAM dump is laid out as vanilla's)
   and hooks the pointer lookup on the SA-1 too, where the level loader runs. With

@@ -24,24 +24,25 @@ fn vram_offset(bg_sc: u8, col8: usize, row8: usize) -> usize {
 
 /// The background rows the game uploads. A 64-tall tilemap takes the whole
 /// two-screen background. Lunar Magic's 32-tall tilemap takes the 16 rows
-/// from one above the initial layer 2 position. The loader masks source
-/// rows to five bits, even for 27-row backgrounds; rows 27-31 in that
-/// format address data outside the background and are not checked.
-fn uploaded_rows(loaded: &LoadedLevel) -> std::ops::Range<isize> {
+/// from one above the layer 2 position, `shift` rows further down. The
+/// loader masks source rows to five bits, even for 27-row backgrounds;
+/// rows 27-31 in that format address data outside the background and are
+/// not checked.
+fn uploaded_rows(loaded: &LoadedLevel, shift: isize) -> std::ops::Range<isize> {
     let rows = loaded.tiles.layer2_bg_rows() as isize;
     if loaded.video.bg_sc[1] & 0x02 != 0 {
         return 0..rows;
     }
     let y = loaded.ram.u16(ram::LAYER2_Y) as isize;
-    let first = y / 16 - 1;
+    let first = y / 16 - 1 + shift;
     first..first + 16
 }
 
 /// For each VRAM word of the layer 2 tilemap the game uploaded, the word
 /// the captured background and BG Map16 table say it should hold.
-fn candidates(loaded: &LoadedLevel) -> HashMap<usize, Vec<[u8; 2]>> {
+fn candidates(loaded: &LoadedLevel, shift: isize) -> HashMap<usize, Vec<[u8; 2]>> {
     let mut out: HashMap<usize, Vec<[u8; 2]>> = HashMap::new();
-    for world_y in uploaded_rows(loaded) {
+    for world_y in uploaded_rows(loaded, shift) {
         let y = world_y.rem_euclid(32) as usize;
         if y >= loaded.tiles.layer2_bg_rows() {
             continue;
@@ -65,18 +66,29 @@ fn candidates(loaded: &LoadedLevel) -> HashMap<usize, Vec<[u8; 2]>> {
     out
 }
 
-/// (words checked, words that were never uploaded or differ).
+/// (words checked, words that were never uploaded or differ). The upload
+/// comes before the level loop's first camera update, which settles layer
+/// 2 by a few pixels in some levels (Super Hark Bros 2 level `135` goes
+/// from `$C0` to `$BD`), so the rows may be those of a position one row
+/// either side of where the layer ends up.
 fn check_level(loaded: &LoadedLevel) -> (usize, usize) {
-    let mut checked = 0;
-    let mut bad = 0;
-    for (at, want) in candidates(loaded) {
-        checked += 1;
-        let written = loaded.video.vram_written[at] && loaded.video.vram_written[at + 1];
-        if !written || !want.iter().any(|w| loaded.video.vram[at..at + 2] == w[..]) {
-            bad += 1;
+    let check = |shift| {
+        let mut checked = 0;
+        let mut bad = 0;
+        for (at, want) in candidates(loaded, shift) {
+            checked += 1;
+            let written = loaded.video.vram_written[at] && loaded.video.vram_written[at + 1];
+            if !written || !want.iter().any(|w| loaded.video.vram[at..at + 2] == w[..]) {
+                bad += 1;
+            }
         }
-    }
-    (checked, bad)
+        (checked, bad)
+    };
+    [0, -1, 1]
+        .into_iter()
+        .map(check)
+        .min_by_key(|&(_, bad)| bad)
+        .unwrap()
 }
 
 /// Checks every level whose layer 2 is a background tilemap. Vertical

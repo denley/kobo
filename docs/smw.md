@@ -68,8 +68,9 @@ are SMWDisX's.
   one-screen intro rooms (`PtrsLong05D766`, data at `$078000`, modes `$0E`/`$0F`) instead of
   the level. `$141F` comes from bit 7 of the entrance table at `$05F600` (Lunar Magic's
   "disable No-Yoshi intro" flag); the intro ends by setting `$141D` (`ShowMarioStart`) and
-  reloading. The screen-exit entry skips it; the oracle script predicts it from the ROM
-  tables and dumps the second level frame.
+  reloading. The screen-exit entry skips it; the oracle script sees the game choose it (an
+  exec callback at `$05DA65`, past every check that skips it) and dumps the second level
+  frame.
 - `expand::expand_level` seeds the RAM-resident OAM routine by running the reset code, then
   runs game mode `$11` in the game's order: `CODE_05D796` (header pointers and entrance),
   `$1A`-`$21` copied to `$1462`-`$1469`, `CODE_00A635`, `$5E = $20`, `CODE_00A796`, one
@@ -175,7 +176,10 @@ are SMWDisX's.
   computes at load). Game mode `$11` copies `$1A`-`$21` to `$1462`-`$1469` right after
   `CODE_05D796` and runs that update once before loading; `expand` does the same (without
   enabling vertical scroll-at-will, which would start the camera drifting towards the
-  player). Ghost houses (`02`/`03`) end up with layer 2 18 pixels up and at half speed.
+  player), and once more after game mode `$12`, as the level loop does before the first
+  frame is shown: what game mode `$12` leaves in `$1E`/`$20` is not always what that
+  update derives (vanilla `0D0`, `0D1`, `0F5`, `0F6`, and `122` move by a few pixels, and a
+  hack's level-init code can leave anything there). Ghost houses (`02`/`03`) end up with layer 2 18 pixels up and at half speed.
   The renderer draws layer 2 and the scrolling axes of layer 3 where the entry camera sees
   them and continues them unstretched across the level, so parallax layers keep the entry
   screen's phase; an axis layer 3 does not scroll on repeats per screen horizontally and

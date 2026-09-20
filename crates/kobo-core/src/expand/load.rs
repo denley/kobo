@@ -38,14 +38,17 @@ pub fn expand_level_traced(
     let expanded = load_level(&mut machine)?;
     prepare_level(&mut machine)?;
     let trace = machine.cpu.trace_data_reads.take();
+    // Before any drawing pass: a Mode 7 arena's IRQ handler changes the
+    // layers between the status bar and the playfield.
+    let [main, sub] = machine.bus.screen_layers;
 
     let boss = boss::capture_boss_scene(&mut machine)?;
     let ram = &machine.bus.ram;
     let camera = [ram.u16(ram::LAYER1_X), ram.u16(ram::LAYER1_Y)];
     let layer2_position = [ram.u16(ram::LAYER2_X), ram.u16(ram::LAYER2_Y)];
     let screen = Screen {
-        main: ram.u8(ram::MAIN_SCREEN),
-        sub: ram.u8(ram::SUB_SCREEN),
+        main,
+        sub,
         color_math: ram.u8(ram::COLOR_MATH),
         math_select: ram.u8(ram::COLOR_MATH_SELECT),
         fixed_color: Color15(ram.u16(ram::BACKGROUND_COLOR)),
@@ -189,13 +192,20 @@ fn load_level(machine: &mut Machine) -> Result<Expanded, ExpandError> {
 }
 
 /// All of game mode `$12`: this is what draws boss arenas, sets up layer
-/// 3, and uploads GFX and palettes.
+/// 3, and uploads GFX and palettes. Then the camera update the level loop
+/// starts with.
 fn prepare_level(machine: &mut Machine) -> Result<(), ExpandError> {
     let ram = &mut machine.bus.ram;
     ram.fill(ram::LOADED_GFX_FILES, ram::LOADED_GFX_FILES_LEN, 0xFF);
     machine.call(Call::jsr(routines::DECOMPRESS_PLAYER_GFX))?;
     machine.bus.ram.set_u8(ram::GAME_MODE, 0x12);
-    machine.call(Call::jsr(routines::PREPARE_LEVEL))
+    machine.call(Call::jsr(routines::PREPARE_LEVEL))?;
+    // The level loop updates the camera before anything is shown, which
+    // is what settles the layer 2 position: code a hack runs during
+    // preparation may have moved it (Super Hark Bros 2 level `00A` leaves
+    // it at `$5D`; the update derives `$C0` from the camera again, which
+    // is where the game had uploaded the background for).
+    machine.call(Call::jsl(routines::UPDATE_CAMERA))
 }
 
 /// Rows per screen of the loaded level. Lunar Magic 3's expanded level

@@ -51,6 +51,29 @@ executable. Vanilla behaviour is in [smw.md](smw.md).
   colour, then 256 colours); `$000000`/`$FFFFFF` = none. Game mode `$12` loads them itself.
 - ExGFX and Lunar Magic's 4bpp re-inserted GFX are handled by the game's own upload code, so
   capturing VRAM during game mode `$12` covers them without knowing the tables.
+- That upload code (`$0FF8xx`-`$0FFExx`) decompresses files larger than the game's buffer at
+  `$7EAD00` can take: up to `$2000` bytes, which run over the background (`$7EB900`) and the
+  first three screens of the tile grid (`$7EC800`-`$7ECCFF`). It parks `$7EBD00`-`$7ECCFF`
+  in VRAM first (a DMA to `$2118`), and reads it back afterwards: `VMADD`, a 16-bit read of
+  `$2139` to get past the port's read-ahead, and a DMA from `$2139`-`$213A` (control `$81`).
+  The bus has to model the VRAM read port, its latch, and DMA towards the A bus for that;
+  without them the grid's first three screens stay graphics data (Akogare2 level `008`).
+- A hack's own code may write `TM`/`TS` (`$212C`-`$212D`) directly. The game copies them from
+  their mirrors (`$0D9D`-`$0D9E`) once per level load and never again, so such a write stays
+  in force: Akogare2 level `008` loads with `$15`/`$02` in the mirrors and then puts layer 2
+  on the main screen (`$17`) from `$91CBF2`, in front of an opaque layer 3.
+  `video::Screen` takes the two from the registers for that reason, and colour math from
+  the mirrors, which go out every frame.
+- A ROM locked by its author has `JSL` to a short routine at the start of the decompression
+  routine (`$00B8DE`), which changes the pointer in `$8A` before the file is read, so the GFX
+  pointer tables do not hold addresses. The files themselves are ordinary LC_LZ2. Six ROMs
+  of the corpus are locked (Invictus, both Super Dram Worlds, Smb2dx, two of the `SMW_2021`
+  set). `gfx::is_locked` recognises the routine and the GFX tooling refuses with
+  `GfxError::Locked`; levels load regardless, since the ROM's code runs. No ROM in the
+  corpus stores graphics as LC_LZ3, and nothing reads it.
+- FastROM patches run the whole game from banks `$80` and up (Super Riff World 1.4 reaches
+  its game loop at `$80806B`). `SmwBus::code_mirrors` gives both addresses of a routine for
+  anything that waits for the program counter to get somewhere.
 - Sprite data: header `SBNMMMMM`, entries `yyyyEESY XXXXssss NNNNNNNN`. In vertical levels
   the game reads `Y` as the X position and `screen*16 + X` as the Y position. The header's
   `N` bit (`$20`, "new sprite system") selects the format per level, whatever the Lunar

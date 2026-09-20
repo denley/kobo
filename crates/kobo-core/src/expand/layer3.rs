@@ -18,7 +18,7 @@ use crate::video::Layer3;
 pub(super) fn capture_layer3(machine: &mut Machine) -> Result<Option<Layer3>, ExpandError> {
     let ram = &machine.bus.ram;
     let bg_mode = ram.u8(ram::BG_MODE);
-    let shown = ram.u8(ram::MAIN_SCREEN) | ram.u8(ram::SUB_SCREEN);
+    let shown = machine.bus.screen_layers[0] | machine.bus.screen_layers[1];
     if bg_mode & 0x07 != 1 || shown & 0x04 == 0 {
         return Ok(None);
     }

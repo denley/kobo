@@ -155,10 +155,13 @@ impl Layer3 {
 /// as the spotlight change them afterwards.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Screen {
-    /// `TM` mirror (`$0D9D`): layers on the main screen (bit 0 layer 1,
-    /// bit 1 layer 2, bit 2 layer 3, bit 4 objects).
+    /// `TM` as last written: layers on the main screen (bit 0 layer 1,
+    /// bit 1 layer 2, bit 2 layer 3, bit 4 objects). The game writes it
+    /// from its mirror (`$0D9D`) once per level load, so a patch that
+    /// writes the register afterwards is what the PPU shows; the colour
+    /// math registers below go out from their mirrors every frame.
     pub main: u8,
-    /// `TS` mirror (`$0D9E`): layers on the subscreen.
+    /// `TS` as last written (mirror `$0D9E`): layers on the subscreen.
     pub sub: u8,
     /// `CGADSUB` mirror (`$40`): which main-screen layers take part in
     /// colour math (bits as above, bit 5 the backdrop), bit 6 halves the

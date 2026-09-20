@@ -19,17 +19,23 @@
 --
 -- How it works: the script presses Start on the title screen and A twice
 -- on the file/player select, which makes the game load the intro level
--- through $0109 (the "overworld override"). An exec callback at the level
--- loader entry keeps that override set, and a second one at the header
--- pointer lookup (CODE_05D8B7) replaces the resolved level number with the
--- requested one, since $0109 cannot encode levels 000, 100, or low bytes
--- $DC and above. Everything is dumped on the first frame of game mode $14
--- (level running), before the player has moved.
+-- through $0109 (the "overworld override"). A hack may have neither screen
+-- and boot into a level, or skip the intro level and start on the
+-- overworld, where the script presses A to enter the level the player
+-- stands on. An exec callback at the level loader entry keeps that
+-- override set, and a second one at the header pointer lookup
+-- (CODE_05D8B7) replaces the resolved level number with the requested
+-- one, since $0109 cannot encode levels 000, 100, or low bytes $DC and
+-- above. Everything is dumped on the first frame of game mode $14 (level
+-- running), before the player has moved.
 --
 -- Castle and ghost house tilesets first play the "No Yoshi" entrance intro
--- (a separate one-screen room) and then reload the level. The script
--- predicts that from the ROM's header and entrance tables, the same way
--- CODE_05DA24 decides, and dumps the second level frame in that case.
+-- (a separate one-screen room) and then reload the level. The script sees
+-- the game decide on it (an exec callback where CODE_05DA38 starts putting
+-- the intro room's pointers in place of the level's) and dumps the second
+-- level frame in that case. What the game decides cannot be told from the
+-- ROM's tables in a hack: Grand Poo World 2 plays the intro before levels
+-- of any tileset.
 --
 -- An SA-1 ROM is SA-1 Pack, which keeps the game's variables in I-RAM and
 -- BW-RAM: ram() is kobo_core::ram::RamMap::Sa1Pack for the addresses used
@@ -47,6 +53,7 @@ end
 
 local LOADER_ENTRY = 0x0096D5 -- GM11LoadLevel, right after $0109/$1F11 are written
 local POINTER_LOOKUP = 0x05D8B7 -- CODE_05D8B7: level number in $0E-$0F becomes pointers
+local INTRO_CHOSEN = 0x05DA65 -- in CODE_05DA38, past every check that skips the intro
 local rom = emu.memType.snesPrgRom
 local MAX_FRAMES_PER_STATE = 1800
 local VISIBLE_FRAMES = 4
@@ -87,36 +94,14 @@ local current = levels[idx]
 local stage = "title" -- title -> file -> player -> level -> next
 local stage_frames = 0
 local visible_frames = 0
+local intro_chosen = false
+local booted = false
 local buttons = {}
 local log = assert(io.open(outdir .. "/oracle.log", "a"))
 
 local function logf(fmt, ...)
   log:write(string.format(fmt, ...), "\n")
   log:flush()
-end
-
-local function fail(msg)
-  logf("FAIL: %s", msg)
-  log:close()
-  emu.stop(2)
-end
-
--- File offset of a bank $00-$3F address, for reading ROM tables. The SA-1's
--- default bank assignment puts those banks where LoROM does.
-local function pc(addr)
-  return ((addr >> 16) & 0x7F) * 0x8000 + (addr & 0x7FFF)
-end
-
--- Whether the game shows the "No Yoshi" entrance intro before this level
--- when entering from the overworld: castle, rope, ghost house, and
--- similar tilesets, unless the level's entrance settings disable it.
-local function has_intro(level)
-  local ptr = pc(0x05E000 + 3 * level)
-  local data = emu.read(ptr, rom) | (emu.read(ptr + 1, rom) << 8) | (emu.read(ptr + 2, rom) << 16)
-  local tileset = emu.read(pc(data) + 4, rom) & 0x0F
-  local intro_tilesets = { [1] = true, [2] = true, [5] = true, [6] = true, [8] = true }
-  local disabled = emu.read(pc(0x05F600 + level), rom) & 0x80 ~= 0
-  return intro_tilesets[tileset] == true and not disabled
 end
 
 local function on_loader_entry()
@@ -140,6 +125,12 @@ local function on_pointer_lookup()
   poke(0x7E17BB, current & 0xFF)
 end
 
+local function on_intro_chosen()
+  if current ~= nil and peek(0x7E0100) == 0x11 then
+    intro_chosen = true
+  end
+end
+
 local function read_range(base, len, memtype)
   local parts = {}
   for i = 0, len - 1 do
@@ -152,6 +143,28 @@ local function write_file(name, data)
   local f = assert(io.open(outdir .. "/" .. name, "wb"))
   f:write(data)
   f:close()
+end
+
+-- The current PPU frame as a PPM, rendered synchronously.
+-- takeScreenshot() can lag behind in the test runner's asynchronous video
+-- decoder.
+local function write_frame(name)
+  local pixels = {}
+  for _, rgb in ipairs(emu.getScreenBuffer()) do
+    pixels[#pixels + 1] = string.char((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255)
+  end
+  local size = emu.getScreenSize()
+  assert(#pixels == size.width * size.height, "unexpected screen buffer size")
+  write_file(name, string.format("P6\n%d %d\n255\n", size.width, size.height) .. table.concat(pixels))
+end
+
+-- Gives up, leaving a picture of where the game was: a hack's title
+-- screen or file select may want other buttons than the vanilla ones.
+local function fail(msg)
+  logf("FAIL: %s (game mode $%02X)", msg, peek(0x7E0100))
+  write_frame("stuck.ppm")
+  log:close()
+  emu.stop(2)
 end
 
 local function dump_ram(level)
@@ -192,15 +205,7 @@ local function dump_video(level)
   write_file(tag .. ".cgram.bin", read_range(0, 512, emu.memType.snesCgRam))
   write_file(tag .. ".vram.bin", read_range(0, 0x10000, emu.memType.snesVideoRam))
   if os.getenv("KOBO_ORACLE_VIDEO") then
-    -- Render the current PPU frame synchronously. takeScreenshot() can
-    -- lag behind in the test runner's asynchronous video decoder.
-    local pixels = {}
-    for _, rgb in ipairs(emu.getScreenBuffer()) do
-      pixels[#pixels + 1] = string.char((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255)
-    end
-    local size = emu.getScreenSize()
-    assert(#pixels == size.width * size.height, "unexpected screen buffer size")
-    write_file(tag .. ".ppm", string.format("P6\n%d %d\n255\n", size.width, size.height) .. table.concat(pixels))
+    write_frame(tag .. ".ppm")
     local wram = {}
     for addr = 0x7E0000, 0x7FFFFF do
       wram[#wram + 1] = string.char(peek(addr))
@@ -236,7 +241,7 @@ local function next_level()
     emu.stop(0)
     return
   end
-  stage, stage_frames = "title", 0
+  stage, stage_frames, booted = "title", 0, false
   emu.reset()
 end
 
@@ -248,6 +253,16 @@ local function on_frame()
   end
   local mode = peek(0x7E0100)
   buttons = {}
+  if stage == "title" and mode == 0x00 then
+    -- The reset code has cleared RAM; until then the mode is whatever
+    -- power-on or the previous level left there.
+    booted = true
+  end
+  if booted and (stage == "title" or stage == "file") and mode > 0x0A then
+    -- A hack without a title screen or file select is already on its way
+    -- into a level, which the callbacks have made the requested one.
+    stage, stage_frames, intro_chosen = "level", 0, false
+  end
   if stage == "title" then
     if mode == 0x07 then
       tap("start")
@@ -264,12 +279,7 @@ local function on_frame()
     if mode == 0x0A then
       tap("a")
     elseif mode > 0x0A then
-      stage, stage_frames = has_intro(current) and "intro" or "level", 0
-    end
-  elseif stage == "intro" then
-    -- The intro room runs in mode $14 and reloads through mode $0F.
-    if mode == 0x14 then
-      stage, stage_frames = "intro_running", 0
+      stage, stage_frames, intro_chosen = "level", 0, false
     end
   elseif stage == "intro_running" then
     if mode ~= 0x14 then
@@ -277,7 +287,14 @@ local function on_frame()
       stage, stage_frames = "level", 0
     end
   elseif stage == "level" then
-    if mode == 0x14 then
+    if mode == 0x14 and intro_chosen then
+      -- The intro room runs in mode $14 and reloads through mode $0F.
+      stage, stage_frames, intro_chosen = "intro_running", 0, false
+    elseif mode == 0x0E then
+      -- A hack that skips the intro level starts on the overworld. Enter
+      -- whatever level the player stands on; it loads the requested one.
+      tap("a")
+    elseif mode == 0x14 then
       if os.getenv("KOBO_ORACLE_VIDEO") then
         stage, stage_frames, visible_frames = "video", 0, 0
       else
@@ -319,8 +336,29 @@ local function on_exec(callback, addr)
   end
 end
 
+-- Start from zeroed memory, as kobo's machine does, whatever power-on
+-- state the emulator is set to: the vanilla game clears what it uses, but
+-- a hack may not (Super Diagonal Mario 2 boots one time in three from
+-- random RAM, and a hack with a 64x64 layer 3 that fills half of it
+-- leaves the rest of the tilemap as it found it).
+local function clear(memtype)
+  for addr = 0, emu.getMemorySize(memtype) - 1 do
+    emu.write(addr, 0, memtype)
+  end
+end
+
+clear(emu.memType.snesWorkRam)
+clear(emu.memType.snesSaveRam)
+clear(emu.memType.snesVideoRam)
+clear(emu.memType.snesCgRam)
+clear(emu.memType.snesSpriteRam)
+if sa1 then
+  clear(emu.memType.sa1InternalRam)
+end
+
 on_exec(on_loader_entry, LOADER_ENTRY)
 on_exec(on_pointer_lookup, POINTER_LOOKUP)
+on_exec(on_intro_chosen, INTRO_CHOSEN)
 emu.addEventCallback(on_frame, emu.eventType.endFrame)
 emu.addEventCallback(on_input, emu.eventType.inputPolled)
 logf("oracle started: %d levels, out=%s%s", #levels, outdir, sa1 and ", SA-1" or "")

@@ -61,6 +61,13 @@ pub struct SmwBus<'a> {
     vmain: u8,
     /// VRAM word address.
     vmadd: u16,
+    /// The word a read of `VMDATAL`/`VMDATAH` (`$2139`-`$213A`) returns:
+    /// the port reads ahead, so it holds the word at the address as it
+    /// was set, and is refilled before the address steps. Lunar Magic's
+    /// graphics upload parks the end of the decompression buffer's
+    /// overrun (`$7EBD00`-`$7ECCFF`: background and tile grid) in VRAM
+    /// and reads it back through here.
+    vram_latch: u16,
     /// CGRAM byte address (colour index * 2 + half).
     cgadd: u16,
     /// Work RAM address of the data port `WMDATA` (`$2180`), 17 bits.
@@ -75,6 +82,12 @@ pub struct SmwBus<'a> {
     pub bg_scroll: [[u16; 2]; 4],
     pub bg_mode: u8,
     pub object_select: u8,
+    /// Last values written to `TM` and `TS` (`$212C`-`$212D`): the layers
+    /// on the main screen and the subscreen. The game writes them once
+    /// per level load from its mirrors (`$0D9D`-`$0D9E`) and never again,
+    /// so code that writes the registers afterwards has the last word
+    /// (Akogare2 puts layer 2 on the main screen that way).
+    pub screen_layers: [u8; 2],
     /// Last values written to the window registers the game keeps no RAM
     /// mirror of: `WH2`/`WH3` (`$2128`-`$2129`), `WBGLOG`/`WOBJLOG`
     /// (`$212A`-`$212B`), and `TMW`/`TSW` (`$212E`-`$212F`).
@@ -134,6 +147,7 @@ impl<'a> SmwBus<'a> {
             oam_latch: 0,
             vmain: 0,
             vmadd: 0,
+            vram_latch: 0,
             cgadd: 0,
             wmadd: 0,
             bg_sc: [0; 4],
@@ -141,6 +155,7 @@ impl<'a> SmwBus<'a> {
             bg_scroll: [[0; 2]; 4],
             bg_mode: 0,
             object_select: 0,
+            screen_layers: [0; 2],
             window2: [0; 2],
             window_logic: [0; 2],
             window_masks: [0; 2],
@@ -264,6 +279,22 @@ impl<'a> SmwBus<'a> {
                     [0xAA, 0xBB][i]
                 }
             }
+            0x2139 => {
+                let value = self.vram_latch as u8;
+                if self.vmain & 0x80 == 0 {
+                    self.vram_read_ahead();
+                    self.vmadd = self.vmadd.wrapping_add(self.vram_step());
+                }
+                value
+            }
+            0x213A => {
+                let value = (self.vram_latch >> 8) as u8;
+                if self.vmain & 0x80 != 0 {
+                    self.vram_read_ahead();
+                    self.vmadd = self.vmadd.wrapping_add(self.vram_step());
+                }
+                value
+            }
             0x2180 => {
                 let value = self.ram.peek(0x7E_0000 + self.wmadd);
                 self.wmadd = (self.wmadd + 1) & 0x1_FFFF;
@@ -288,16 +319,32 @@ impl<'a> SmwBus<'a> {
         }
     }
 
+    /// Where in the ROM image a bus address reads from. An SA-1 game can
+    /// move the ROM about under both processors.
+    fn rom_offset(&self, addr: u32) -> Option<crate::addr::PcAddr> {
+        let addr = crate::addr::SnesAddr::new(addr);
+        match self.ram.sa1.as_ref().and_then(|sa1| sa1.super_mmc) {
+            Some(mmc) => mmc.snes_to_pc(addr),
+            None => self.rom.mapping().snes_to_pc(addr).ok(),
+        }
+    }
+
+    /// The addresses a ROM routine may be running at: its own, and the
+    /// same bank from `$80` up where the cartridge has the same ROM
+    /// there. A FastROM patch runs the whole game from those banks, so
+    /// the game loop it reaches is `$80806B`.
+    pub fn code_mirrors(&self, addr: u32) -> Vec<u32> {
+        let mirror = addr ^ 0x80_0000;
+        let same =
+            self.rom_offset(addr).is_some() && self.rom_offset(addr) == self.rom_offset(mirror);
+        if same { vec![addr, mirror] } else { vec![addr] }
+    }
+
     fn rom_read(&mut self, addr: u32) -> u8 {
         if let Some(trace) = &mut self.trace_rom_reads {
             trace.push(addr);
         }
-        // An SA-1 game can move the ROM about under both processors.
-        let addr = crate::addr::SnesAddr::new(addr);
-        let pc = match self.ram.sa1.as_ref().and_then(|sa1| sa1.super_mmc) {
-            Some(mmc) => mmc.snes_to_pc(addr),
-            None => self.rom.mapping().snes_to_pc(addr).ok(),
-        };
+        let pc = self.rom_offset(addr);
         let byte = pc.and_then(|pc| self.rom.data().get(pc.as_usize()).copied());
         byte.unwrap_or_else(|| {
             self.unmapped_reads += 1;
@@ -311,6 +358,12 @@ impl<'a> SmwBus<'a> {
             1 => 32,
             _ => 128,
         }
+    }
+
+    /// Fills the read latch from the word at the VRAM address.
+    fn vram_read_ahead(&mut self) {
+        let a = (self.vram_remap(self.vmadd) as usize * 2) % VRAM_LEN;
+        self.vram_latch = u16::from_le_bytes([self.vram[a], self.vram[(a + 1) % VRAM_LEN]]);
     }
 
     /// Applies the VRAM address remapping selected by VMAIN bits 2-3.
@@ -381,8 +434,14 @@ impl<'a> SmwBus<'a> {
                 self.mode7_latch = value;
             }
             0x2115 => self.vmain = value,
-            0x2116 => self.vmadd = (self.vmadd & 0xFF00) | value as u16,
-            0x2117 => self.vmadd = (self.vmadd & 0x00FF) | ((value as u16) << 8),
+            0x2116 => {
+                self.vmadd = (self.vmadd & 0xFF00) | value as u16;
+                self.vram_read_ahead();
+            }
+            0x2117 => {
+                self.vmadd = (self.vmadd & 0x00FF) | ((value as u16) << 8);
+                self.vram_read_ahead();
+            }
             0x2118 => {
                 let a = (self.vram_remap(self.vmadd) as usize * 2) % VRAM_LEN;
                 self.vram[a] = value;
@@ -401,6 +460,7 @@ impl<'a> SmwBus<'a> {
             }
             0x2128..=0x2129 => self.window2[(reg - 0x2128) as usize] = value,
             0x212A..=0x212B => self.window_logic[(reg - 0x212A) as usize] = value,
+            0x212C..=0x212D => self.screen_layers[(reg - 0x212C) as usize] = value,
             0x212E..=0x212F => self.window_masks[(reg - 0x212E) as usize] = value,
             0x2180 => {
                 self.ram.poke(0x7E_0000 + self.wmadd, value);
@@ -474,18 +534,14 @@ impl<'a> SmwBus<'a> {
     }
 
     /// Executes the general-purpose DMA channels enabled in `mask`,
-    /// transferring from the A bus to the B bus registers.
+    /// between an A bus address and the B bus registers, in the
+    /// direction the channel's control byte gives.
     fn run_dma(&mut self, mask: u8) {
         for ch in 0..8 {
             if mask & (1 << ch) == 0 {
                 continue;
             }
             let c = self.dma[ch];
-            if c.control & 0x80 != 0 {
-                // B to A transfers (VRAM reads) are not needed by the loaders.
-                self.unmapped_writes += 1;
-                continue;
-            }
             let regs: [u16; 4] = {
                 let base = 0x2100 | c.dest as u16;
                 match c.control & 0x07 {
@@ -502,9 +558,15 @@ impl<'a> SmwBus<'a> {
             let mut src = c.src;
             let mut count = if c.size == 0 { 0x1_0000 } else { c.size as u32 };
             let mut i = 0;
+            let to_a_bus = c.control & 0x80 != 0;
             while count > 0 {
-                let value = self.read(src);
-                self.write_register(regs[i & 3], value);
+                if to_a_bus {
+                    let value = self.read_register(regs[i & 3]);
+                    self.write(src, value);
+                } else {
+                    let value = self.read(src);
+                    self.write_register(regs[i & 3], value);
+                }
                 if !fixed {
                     let off = ((src as u16) as i32 + step) as u16;
                     src = (src & 0xFF_0000) | off as u32;
@@ -863,6 +925,63 @@ mod tests {
         bus.write(0x002118, 0xCC);
         bus.write(0x002119, 0xDD);
         assert_eq!(&bus.vram[0x2000..0x2004], &[0xAA, 0xBB, 0xCC, 0xDD]);
+    }
+
+    #[test]
+    fn a_routine_is_also_at_its_fastrom_mirror() {
+        let rom = rom();
+        let bus = SmwBus::new(&rom);
+        assert_eq!(bus.code_mirrors(0x00_806B), [0x00_806B, 0x80_806B]);
+        assert_eq!(bus.code_mirrors(0x80_806B), [0x80_806B, 0x00_806B]);
+        // Work RAM is nowhere else.
+        assert_eq!(bus.code_mirrors(0x7E_2000), [0x7E_2000]);
+    }
+
+    #[test]
+    fn screen_layers_are_what_was_last_written() {
+        let rom = rom();
+        let mut bus = SmwBus::new(&rom);
+        bus.write(0x00212C, 0x15);
+        bus.write(0x00212D, 0x02);
+        bus.write(0x91212C, 0x17);
+        assert_eq!(bus.screen_layers, [0x17, 0x02]);
+    }
+
+    /// Lunar Magic's graphics upload parks work RAM in VRAM and reads it
+    /// back: address, one word read to move past the read-ahead, and a
+    /// DMA from `$2139`-`$213A`.
+    #[test]
+    fn vram_reads_back_through_the_read_ahead_latch() {
+        let rom = rom();
+        let mut bus = SmwBus::new(&rom);
+        bus.vram[0x2000..0x2006].copy_from_slice(&[1, 2, 3, 4, 5, 6]);
+        bus.write(0x002115, 0x80); // step after the high byte
+        bus.write(0x002116, 0x00);
+        bus.write(0x002117, 0x10); // word address $1000
+        // The latch was filled when the address was set, and again, from
+        // the same word, before the address stepped.
+        assert_eq!([bus.read(0x002139), bus.read(0x00213A)], [1, 2]);
+        assert_eq!([bus.read(0x002139), bus.read(0x00213A)], [1, 2]);
+        assert_eq!([bus.read(0x002139), bus.read(0x00213A)], [3, 4]);
+
+        bus.write(0x002116, 0x00);
+        bus.write(0x002117, 0x10);
+        bus.read(0x002139);
+        bus.read(0x00213A);
+        for (reg, value) in [
+            (0x4320, 0x81), // B to A, two registers alternating
+            (0x4321, 0x39),
+            (0x4322, 0x00),
+            (0x4323, 0xBD),
+            (0x4324, 0x7E),
+            (0x4325, 0x06),
+            (0x4326, 0x00),
+            (0x420B, 0x04),
+        ] {
+            bus.write(reg, value);
+        }
+        let back: Vec<u8> = (0..6).map(|i| bus.ram.peek(0x7E_BD00 + i)).collect();
+        assert_eq!(back, [1, 2, 3, 4, 5, 6]);
     }
 
     #[test]

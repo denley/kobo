@@ -19,8 +19,10 @@ What a rendered level does not reproduce, and what the tooling does not handle.
   where it first appears (a Podoboo at the lava's surface). Cluster sprites are captured
   from their spawner's camera only, except the candle flames. Custom sprite loaders run as
   ROM code; an undrawn-sprite census over every level of the corpus runs without errors
-  apart from levels whose loader already fails, but nothing compares custom sprites to an
-  emulator. Boss arenas show the OAM of the first drawing pass instead.
+  apart from levels whose loader already fails. The emulator oracle compares which sprite
+  is in which slot on a sample of every hack's levels ([testing.md](testing.md)), and whole
+  frames on a few; nothing compares each custom sprite's own picture. Boss arenas show the
+  OAM of the first drawing pass instead.
 - A sprite is captured alone, and some sprites look at their slot: the Yoshi's House birds
   take their colour from it, several animations their phase, and the line-guided rope its
   length. It gets the slot the ROM's loader gives it with the columns before it loaded in
@@ -33,7 +35,15 @@ What a rendered level does not reproduce, and what the tooling does not handle.
   being refused. Of the 39 SA-1 hacks in the corpus, 38 render all 512 levels; QLDC 2021 `76_Bench-kun` fails in
   the 18 Mode 7 boss rooms with a `COP` at `$00E296`, which is the hack's own doing (the
   patch at `$10E288` calls `$00987D` with `JSL` and the routine returns with `RTS`, into
-  data). Nothing compares the hacks' pictures to an emulator.
-- The GFX tooling reads LC_LZ2 only. Invictus's files hold commands 5 and 6, which LC_LZ2
-  does not have (Lunar Magic can store graphics as LC_LZ3 instead), so `gfx list` shows
-  errors for them. Levels are unaffected, since the ROM's own decompression runs for them.
+  data). The emulator oracle compares tile grids, layer 3 tilemaps, and sprite slots on a
+  sample of each hack's levels ([testing.md](testing.md)), not their pictures.
+- Code a hack runs every frame of the level loop (a custom status bar, a power-up handed
+  to the player, UberASM `main` code) has not run: a level is loaded and prepared, and its
+  sprites and player are drawn, but no frame of game mode `$14` is played.
+- HDMA is not run, so whatever a hack changes by scanline is missing: a gradient sky
+  (Luminescent level `148` writes the fixed colour per line) comes out as the one colour the
+  level's back area has.
+- The GFX tooling reads LC_LZ2 only, and nothing in the corpus stores LC_LZ3 (which Lunar
+  Magic offers). It refuses ROMs their authors locked (`GfxError::Locked`, see
+  [lunar-magic.md](lunar-magic.md)): their pointer tables are not addresses. Levels are
+  unaffected, since the ROM's own decompression runs for them.
