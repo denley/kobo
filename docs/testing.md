@@ -125,3 +125,43 @@ how each oracle is produced, where its data lives, and what is known not to matc
   of every level's picture, with sprites drawn and again as markers without the player. A
   change to `expand` or `render` that should leave every picture alone is checked by diffing
   its output before and after, on the vanilla ROM and a handful of hacks from the corpus.
+  It does not report nonfatal `LevelRender` diagnostics: a hash can describe a picture
+  whose player or sprite passes failed. Use the CLI's warnings or inspect the returned
+  diagnostics when checking execution coverage.
+
+## Full hack render sweep
+
+The 2026-09-22 sweep at revision `25cca50e847ee679c500e2a287ef3e71faf3322f` ran
+`kobo level png` in release mode on every slot `000`–`1FF`, with default sprite and
+player rendering. It recursively included the local hack collection's ROMs and all
+129 BPS patches, including QLDC entries and development projects. All patches applied
+successfully to the headerless vanilla ROM. Grouping identical headerless ROM SHA-1s
+and excluding five unmodified vanilla copies left 173 distinct hacks.
+
+All 88,576 slots were attempted: 88,522 PNGs, 54 fatal failures, and 209 PNGs with
+warnings; no attempt reached the export script's 120-second timeout. The failures and
+warnings affect ten hacks. Their status and investigation priorities are recorded in
+[known-gaps.md](known-gaps.md#full-hack-render-sweep-2026-09-22). This was not an emulator
+comparison or a visual review of every PNG, and includes slots that may not be playable.
+
+The local, uncommitted output is `~/Pictures/Kobo-level-renders/2026-09-22/`:
+
+- `manifest.json`: source paths, headerless ROM hashes, duplicate aliases, exclusions,
+  and the renderer revision. Temporary patched-ROM paths no longer exist; reapply the
+  source BPS patch when reproducing one of those entries.
+- `results.jsonl`: every attempted slot's status and complete CLI diagnostics.
+- `run-report.md`, `diagnostics.tsv`: per-hack totals and the failures and warnings.
+- `index.html`: the PNG gallery, with diagnostic filters and optional filters for
+  pictures identical to vanilla or to another slot in the same hack.
+- `scripts/`: the one-off export, gallery, reporting and verification scripts. The
+  export script starts a fresh run; use a separate output directory to keep this snapshot.
+
+To reproduce an individual slot with its diagnostics, apply its patch if needed, then run:
+
+```sh
+cargo run --release -- level png 105 /tmp/kobo-level-105.png -r /path/to/hack.sfc
+```
+
+The export verification checked PNG headers and dimensions, preview presence, all
+512 results per hack, and gallery links. These checks establish output completeness,
+not correctness of the rendered game state.
