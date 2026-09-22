@@ -88,8 +88,16 @@ are SMWDisX's.
   under a stale value.
   The bus captures VRAM/CGRAM port and DMA writes, so rendering uses what the game uploaded:
   ExGFX, custom palettes, and animated tiles come for free. VRAM matches the emulator except
-  animated slots (frame-dependent) and tilemap areas filled on later frames; CGRAM matches
-  except one per-frame colour.
+  animated slots (frame-dependent) and tilemap areas filled on later frames; animated
+  colours likewise depend on the captured frame. CGRAM `$64` (row 6, column 4), used
+  by the dragon coin's Map16 tiles `$002D`/`$002E`, loads as `$7C3F` (RGB `#FF08FF`)
+  in vanilla level `105`. The regular level NMI calls `CODE_00A390`, whose tail at
+  `$00A418` replaces it with a flashing yellow from `FlashingColors` (`$00B60C`), at
+  byte offset `($14 & $1C) >> 1`. The player pass runs the whole NMI after each frame
+  and retains its video uploads, so the level's palette includes this update even
+  when rendering with the player and sprites hidden. Calling only OAM and player
+  graphics uploads left the dragon coin magenta; sprite-pass NMIs alone cannot fix
+  it because those passes use separate video memory.
 - Capture the screen count (`$005D`) immediately after `LoadLevel`: boss preparation
   overwrites it (level `$1C7` ends with `$FF`). `LevelTiles::size()` also bounds dimensions
   to complete screens in the captured grid planes.
@@ -211,8 +219,9 @@ are SMWDisX's.
   every sprite slot cleared, every load flag set (whichever table the loader reads, as in
   the sprite passes), and the generator `$18B9` zeroed,
   `GM14Level` frames run until the entrance action `$71` is zero (a cannon pipe takes a few
-  dozen; pipes and doors in vanilla start at zero), then `MarioGFXDMA` (`$00A300`) uploads
-  his tiles (VRAM words `$6000`, `$6100`, `$67F0`) and palette (CGRAM `$86`-`$8F`), which
+  dozen; pipes and doors in vanilla start at zero), with the whole NMI after every frame.
+  Its `MarioGFXDMA` (`$00A300`) uploads his tiles (VRAM words `$6000`, `$6100`, `$67F0`)
+  and palette (CGRAM `$86`-`$8F`), which
   stay in `vram`/`cgram`. Only OAM slots 64-71 (`$0300`-`$031F`, what `DrawMarioAndYoshi`
   writes) are kept: they are picked out as the frame reaches `ConsolidateOAM` and found
   again in the uploaded image (see [sa1.md](sa1.md)), in level coordinates from the camera
@@ -292,8 +301,8 @@ are SMWDisX's.
   runs on video memory of its own, reset to the level's before every spot, and keeps the
   characters of a pass's objects that differ from the level's (`SpriteScene::dynamic`,
   `video::DynamicObjects`): two sprites can put different pictures in the same tile, so the
-  scene cannot share one VRAM. The player pass still runs the OAM upload and `MarioGFXDMA`
-  alone, because its video memory is the level's.
+  scene cannot share one VRAM. The player pass also runs the whole NMI, retaining
+  its uploads in the level's video memory, including animated background palettes.
 
 - OAM is read as the PPU gets it. After every frame the ROM's own upload runs
   (`DoSomeSpriteDMA`, `$008449`: a DMA of `$0200`-`$041F` to `$2104`), and the bus keeps

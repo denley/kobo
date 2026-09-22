@@ -53,21 +53,11 @@ pub const DRAW_LEVEL_FRAME: u32 = 0x00_A1DA;
 /// whole image from its priority buffers, so an object is only where the
 /// game drew it until the frame gets here.
 pub const CONSOLIDATE_OAM: u32 = 0x00_8494;
-/// `DoSomeSpriteDMA`: the NMI handler's OAM upload, a DMA of the whole
-/// image to `$2104` that ends by pointing `OAMADD` at `$3F` with priority
-/// rotation on, which makes the object there the frontmost. SA-1 Pack
-/// returns before that, MaxTile having put the objects in order.
-pub const UPLOAD_OAM: u32 = 0x00_8449;
 /// `CODE_02A802`: the body of `LoadSprFromLevel`, after its
 /// every-other-frame check. Spawns the level sprites at the column the
 /// camera position and scroll direction select. Lunar Magic reroutes
 /// its inner loop but keeps this entry.
 pub const SPAWN_SPRITES: u32 = 0x02_A802;
-/// `MarioGFXDMA` (`$00A300`): the NMI's per-frame upload of the
-/// player's tiles (VRAM words `$6000`-`$60FF`, `$6100`-`$61FF`, and
-/// `$67F0`) and palette (CGRAM `$86`-`$8F`), from the pointers the
-/// drawing routine left.
-pub const UPLOAD_PLAYER_TILES: u32 = 0x00_A300;
 /// `MAP16AppTable`: four pointers into bank `$0D`, one per 8-column
 /// stretch of the level, to alternative definitions of the vertical
 /// pipe tiles `133`-`13A`. The initial tilemap upload (`CODE_0580BD`)

@@ -2,9 +2,8 @@
 
 use super::diagnostics::{Diagnostic, Pass};
 use super::load_flags::LoadFlags;
-use super::machine::{Call, Machine};
-use super::oam::{self, Blank};
-use super::routines;
+use super::machine::Machine;
+use super::oam;
 use crate::cpu::CpuError;
 use crate::ram;
 use crate::video::SpriteObject;
@@ -20,9 +19,10 @@ const PLAYER_OAM_SLOTS: std::ops::Range<usize> = 64..72;
 /// The player at the entrance: one level frame after another from the
 /// prepared state, with every sprite slot cleared and every level sprite
 /// marked as already loaded so nothing else spawns, until his entrance
-/// action (`$71`) has finished. The NMI's player tile and palette upload
-/// then runs so the objects' graphics are in VRAM and CGRAM (the bus keeps
-/// those; RAM is restored). Only his own OAM slots are read: the cluster
+/// action (`$71`) has finished. Each frame runs the ROM's whole NMI,
+/// uploading player graphics and animated tiles and palettes, including
+/// the dragon coin's flashing colour. The bus keeps VRAM and CGRAM; RAM
+/// is restored. Only his own OAM slots are read: the cluster
 /// sprites the loader spawned are still drawn in this pass, and the
 /// sprite passes already capture them. They are found in the image as
 /// drawn ([`oam::Frame`]), since SA-1 Pack moves every object at the end
@@ -59,14 +59,13 @@ fn enter(machine: &mut Machine) -> Result<Vec<SpriteObject>, CpuError> {
     load_flags.fill(ram, 1);
     ram.set_u8(ram::SPRITE_GENERATOR, 0);
     ram.set_u8(ram::GAME_MODE, 0x14);
-    let mut frame = oam::draw_frame(machine, Blank::OamUpload)?;
+    let mut frame = oam::draw_frame(machine)?;
     for _ in 1..PLAYER_FRAMES {
         if machine.bus.ram.u8(ram::PLAYER_ANIMATION) == 0 {
             break;
         }
-        frame = oam::draw_frame(machine, Blank::OamUpload)?;
+        frame = oam::draw_frame(machine)?;
     }
-    machine.try_call(Call::jsr(routines::UPLOAD_PLAYER_TILES))?;
     let (image, first) = frame.uploaded_from(PLAYER_OAM_SLOTS);
     let ram = &machine.bus.ram;
     let camera = (

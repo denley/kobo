@@ -1,5 +1,5 @@
-//! Pixel-level regressions using synthetic tiles, plus an optional vanilla
-//! ROM check for dimensions overwritten during boss preparation.
+//! Pixel-level regressions using synthetic tiles, plus optional vanilla
+//! ROM checks for level capture and rendering.
 
 mod common;
 
@@ -619,4 +619,55 @@ fn render_level_honours_its_options() {
     // A boss arena is one fixed screen whatever the options.
     let arena = render_level(&rom, 0x1C7, RenderOptions::default()).unwrap();
     assert_eq!((arena.image.width, arena.image.height), (256, 224));
+}
+
+/// The dragon coin's highlight is animated by the NMI, even when the
+/// caller hides Mario and every sprite. Its loaded palette value is magenta.
+#[test]
+fn dragon_coins_use_the_roms_animated_palette() {
+    use kobo_core::addr::SnesAddr;
+    let Some(rom) = common::vanilla() else { return };
+    let options = render::RenderOptions {
+        sprites: render::Sprites::Hidden,
+        player: false,
+    };
+    let rendered = render::render_level(&rom, 0x105, options).unwrap();
+    assert!(rendered.diagnostics.is_empty());
+    let yellow = rendered.level.video.palette().get(6, 4);
+    let animation: Vec<_> = rom
+        .read(SnesAddr::new(0x00B60C), 16)
+        .unwrap()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&b| Color15(u16::from_le_bytes(b)))
+        .collect();
+    assert!(
+        animation.contains(&yellow),
+        "highlight {yellow:?} is not a flashing yellow"
+    );
+    // First dragon coin in Yoshi's Island 1: both halves must contain
+    // the animated highlight, and neither may retain the loaded magenta.
+    let width = rendered.image.width;
+    for top in [256, 272] {
+        let pixels: Vec<_> = (top..top + 16)
+            .flat_map(|y| (272..288).map(move |x| (y * width + x) as usize))
+            .map(|i| rendered.image.pixels[i])
+            .collect();
+        assert!(pixels.contains(&yellow.to_rgb8()));
+        assert!(!pixels.contains(&Color15(0x7C3F).to_rgb8()));
+    }
+
+    // A patch may replace the animation colours. Follow its ROM code,
+    // rather than substituting a hard-coded yellow in the renderer.
+    let mut data = rom.data().to_vec();
+    let start = rom.pc(SnesAddr::new(0x00B60C)).unwrap().as_usize();
+    let custom = Color15::from_rgb5(3, 17, 9);
+    for bytes in data[start..start + 16].as_chunks_mut::<2>().0 {
+        bytes.copy_from_slice(&custom.0.to_le_bytes());
+    }
+    let patched = kobo_core::Rom::from_bytes(data).unwrap();
+    let rendered = render::render_level(&patched, 0x105, options).unwrap();
+    assert!(rendered.diagnostics.is_empty());
+    assert_eq!(rendered.level.video.palette().get(6, 4), custom);
 }

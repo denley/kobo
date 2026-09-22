@@ -77,6 +77,10 @@ how each oracle is produced, where its data lives, and what is known not to matc
   FastROM bank ([lunar-magic.md](lunar-magic.md)), and layer 2 left wherever level-init
   code put it ([smw.md](smw.md)).
 - Lunar Magic exports (hashes in `tests/fixtures/`) are the oracle for GFX, palette, and Map16.
+- `tests/render_levels.rs` checks that vanilla level `105`'s dragon coins use the
+  ROM's flashing yellow palette after the NMI, even with sprites and Mario hidden.
+  It also changes the animation colours in an in-memory ROM copy to check that the
+  capture follows those colours instead of substituting yellow in the renderer.
 - **Decompression**: `tests/gfx_decompression.rs` decodes every GFX file of the pointer
   tables natively and has the ROM decompress the same file on the headless CPU
   (`expand::decompress_gfx_file`, the game's `PrepareGraphicsFile` with whatever routine a

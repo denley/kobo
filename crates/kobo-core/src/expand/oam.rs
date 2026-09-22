@@ -34,10 +34,7 @@ pub fn object_sizes(object_select: u8) -> [(i32, i32); 2] {
 /// An OAM image and the object the PPU draws in front of the others.
 pub(super) type OamImage = (Vec<u8>, usize);
 
-/// The game's OAM upload, which the NMI handler runs each frame.
-pub(super) const UPLOAD: Call = Call::jsr(routines::UPLOAD_OAM);
-
-/// Object memory as [`UPLOAD`] left it. The ROM's own upload decides
+/// Object memory as the ROM's NMI upload left it. The ROM's own upload decides
 /// which object comes first: vanilla turns priority rotation on and
 /// starts from `$3F`, SA-1 Pack leaves it off.
 pub(super) fn uploaded(bus: &SmwBus) -> OamImage {
@@ -80,20 +77,9 @@ fn object_bytes(image: &[u8], slot: usize) -> (&[u8], u8) {
     (&image[slot * 4..slot * 4 + 4], high & 3)
 }
 
-/// What follows a frame of the level loop in the vertical blank.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum Blank {
-    /// The OAM upload alone, which leaves video memory as it is.
-    OamUpload,
-    /// The ROM's whole NMI handler, with the lag flag clear: the OAM
-    /// upload, and with it the tiles the frame asked to have uploaded
-    /// (the player's and the Podoboo's by `MarioGFXDMA`, a custom dynamic
-    /// sprite's by whatever its patch hooked into the handler).
-    Nmi,
-}
-
-/// Runs one frame of the level loop and then its vertical blank.
-pub(super) fn draw_frame(machine: &mut Machine, blank: Blank) -> Result<Frame, CpuError> {
+/// Runs one frame of the level loop and then the ROM's whole NMI handler:
+/// OAM, player and dynamic sprite graphics, and animated tiles and palettes.
+pub(super) fn draw_frame(machine: &mut Machine) -> Result<Frame, CpuError> {
     let frame = Call::jsr(routines::DRAW_LEVEL_FRAME);
     let drawn = if machine.try_call_to(frame, Some(routines::CONSOLIDATE_OAM))? {
         machine.bus.ram.bytes(ram::OAM, OAM_LEN)
@@ -102,13 +88,8 @@ pub(super) fn draw_frame(machine: &mut Machine, blank: Blank) -> Result<Frame, C
         machine.finish_call(frame)?;
         drawn
     };
-    match blank {
-        Blank::OamUpload => machine.try_call(UPLOAD)?,
-        Blank::Nmi => {
-            machine.bus.ram.set_u8(ram::LAG_FLAG, 0);
-            machine.try_interrupt(Interrupt::Nmi)?;
-        }
-    }
+    machine.bus.ram.set_u8(ram::LAG_FLAG, 0);
+    machine.try_interrupt(Interrupt::Nmi)?;
     Ok(Frame {
         drawn,
         uploaded: uploaded(&machine.bus),

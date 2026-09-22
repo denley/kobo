@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use super::diagnostics::{Diagnostic, Pass};
 use super::load_flags::LoadFlags;
 use super::machine::{Call, Machine};
-use super::oam::{self, Blank, SCREEN_H, SCREEN_W};
+use super::oam::{self, SCREEN_H, SCREEN_W};
 use super::{ExpandError, LoadedLevel, routines};
 use crate::cpu::CpuError;
 use crate::ram::{self, Ram};
@@ -198,7 +198,7 @@ impl LevelLoop<'_> {
     /// screen coordinates.
     fn frame(&mut self) -> Result<Vec<SpriteObject>, CpuError> {
         self.park_player();
-        let frame = oam::draw_frame(&mut self.machine, Blank::Nmi)?;
+        let frame = oam::draw_frame(&mut self.machine)?;
         self.frames += 1;
         self.drawn = frame.drawn;
         let (image, first) = frame.uploaded;
