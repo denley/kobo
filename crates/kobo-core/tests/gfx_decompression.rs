@@ -18,10 +18,11 @@ const TABLE_FILES: u8 = 0x32;
 
 /// Checks every file, returning the ROM's format and what differed.
 fn check_rom(rom: &Rom) -> Result<(Compression, Vec<String>), GfxError> {
-    let compression = Compression::detect(rom)?;
+    let reader = gfx::GfxReader::new(rom)?;
+    let compression = reader.compression();
     let mut failures = Vec::new();
     for index in 0..TABLE_FILES {
-        let file = match gfx::read_gfx_file(rom, index) {
+        let file = match reader.read(index) {
             Ok(file) => file,
             Err(e) => {
                 failures.push(e.to_string());
@@ -91,8 +92,9 @@ fn lunar_magic_files_match_lunar_magic_export() {
             continue;
         };
         let mut hash = Sha1::new();
+        let reader = gfx::GfxReader::new(&rom).unwrap();
         for index in 0..GFX_FILE_COUNT {
-            hash.update(gfx::read_gfx_file(&rom, index).unwrap().to_lm_export());
+            hash.update(reader.read(index).unwrap().to_lm_export());
         }
         let got: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(&got, want, "{}", path.display());

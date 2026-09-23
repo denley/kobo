@@ -26,6 +26,8 @@ use crate::rom::{Rom, RomError};
 pub const PIXI_SIZE_TABLE_MARKER: SnesAddr = SnesAddr::new(0x0EF30F);
 pub const PIXI_SIZE_TABLE_PTR: SnesAddr = SnesAddr::new(0x0EF30C);
 const PIXI_MARKER_VALUE: u8 = 0x42;
+/// The ROM's sprite-list cursor is 16-bit. Never scan past its addressable stream.
+const MAX_LIST_BYTES: usize = 0x1_0000;
 
 /// Header bit 5: the list uses Lunar Magic's command format.
 const HEADER_NEW_SPRITE_SYSTEM: u8 = 0x20;
@@ -40,6 +42,8 @@ pub enum SpriteError {
     Rom(#[from] RomError),
     #[error("sprite data at {0} runs past the end of the ROM")]
     Truncated(SnesAddr),
+    #[error("sprite data at {0} has no terminator within 64 KiB")]
+    TooLarge(SnesAddr),
     #[error("sprite data at {0} uses the unknown command $FF ${1:02X} at offset {2}")]
     UnknownCommand(SnesAddr, u8, usize),
 }
@@ -109,12 +113,14 @@ pub struct SpriteList {
 
 /// PIXI's data-size table, if installed: one byte per (extra bits, sprite
 /// number), giving the total entry size.
-fn pixi_size_table(rom: &Rom) -> Option<Vec<u8>> {
-    if rom.read_u8(PIXI_SIZE_TABLE_MARKER).ok()? != PIXI_MARKER_VALUE {
-        return None;
+fn pixi_size_table(rom: &Rom) -> Result<Option<&[u8]>, RomError> {
+    // The marker need not exist in a small vanilla image. Once present,
+    // a broken pointer is corrupt input, not a ROM without PIXI.
+    if rom.read_u8(PIXI_SIZE_TABLE_MARKER).ok() != Some(PIXI_MARKER_VALUE) {
+        return Ok(None);
     }
-    let ptr = rom.read_ptr(PIXI_SIZE_TABLE_PTR).ok()?;
-    rom.read(ptr, 0x400).ok().map(|t| t.to_vec())
+    let ptr = rom.read_ptr(PIXI_SIZE_TABLE_PTR)?;
+    rom.read(ptr, 0x400).map(Some)
 }
 
 /// Parses a level's sprite list from the vanilla pointer table. Lunar
@@ -126,49 +132,47 @@ pub fn read_sprites(rom: &Rom, level: u16) -> Result<SpriteList, SpriteError> {
 
 /// Parses a sprite list starting at `start` (the header byte).
 pub fn read_sprites_at(rom: &Rom, start: SnesAddr) -> Result<SpriteList, SpriteError> {
-    let sizes = pixi_size_table(rom);
-    let byte = |i: usize| {
-        rom.read_u8(start.add(i as u32))
-            .map_err(|_| SpriteError::Truncated(start))
-    };
-    let mut data = Vec::new();
-    let fill_to = |data: &mut Vec<u8>, n: usize| -> Result<(), SpriteError> {
-        while data.len() < n {
-            data.push(byte(data.len())?);
-        }
-        Ok(())
-    };
-    let mut list = None;
-    let mut want = 1;
-    while list.is_none() {
-        fill_to(&mut data, want)?;
-        match parse_sprites(&data, sizes.as_deref()) {
-            Ok(l) => list = Some(l),
-            Err(ParseError::Need(n)) => want = n,
-            Err(ParseError::UnknownCommand(b, at)) => {
-                return Err(SpriteError::UnknownCommand(start, b, at));
+    let sizes = pixi_size_table(rom)?;
+    parse_with(
+        |i| {
+            if i >= MAX_LIST_BYTES {
+                return Err(ParseError::TooLarge);
             }
+            rom.read_u8(start.add(i as u32))
+                .map_err(|_| ParseError::Need(i + 1))
+        },
+        sizes,
+    )
+    .map_err(|error| match error {
+        ParseError::Need(n) => {
+            debug_assert!(n <= MAX_LIST_BYTES);
+            SpriteError::Truncated(start)
         }
-    }
-    Ok(list.unwrap())
+        ParseError::TooLarge => SpriteError::TooLarge(start),
+        ParseError::UnknownCommand(b, at) => SpriteError::UnknownCommand(start, b, at),
+    })
 }
 
 enum ParseError {
     /// The data must be at least this long to continue.
     Need(usize),
+    TooLarge,
     UnknownCommand(u8, usize),
 }
 
-/// Parses the sprite list at the start of `data`, asking for more bytes
-/// as it goes so a caller reading from a ROM never has to guess the
-/// length up front.
-fn parse_sprites(data: &[u8], sizes: Option<&[u8]>) -> Result<SpriteList, ParseError> {
-    let get = |i: usize| data.get(i).copied().ok_or(ParseError::Need(i + 1));
+/// A single forward pass; the ROM reader and slice tests share the parser.
+fn parse_with(
+    mut get: impl FnMut(usize) -> Result<u8, ParseError>,
+    sizes: Option<&[u8]>,
+) -> Result<SpriteList, ParseError> {
     let header = SpriteHeader::from_byte(get(0)?);
     let mut sprites = Vec::new();
     let mut i = 1;
     let mut y_high = 0u16;
     loop {
+        if i >= MAX_LIST_BYTES {
+            return Err(ParseError::TooLarge);
+        }
         let mut b0 = get(i)?;
         if b0 == 0xFF {
             if !header.new_sprite_system {
@@ -221,10 +225,54 @@ fn parse_sprites(data: &[u8], sizes: Option<&[u8]>) -> Result<SpriteList, ParseE
 mod tests {
     use super::*;
 
+    #[test]
+    fn unterminated_stream_is_bounded_and_read_once() {
+        let mut reads = 0;
+        let result = parse_with(
+            |i| {
+                reads += 1;
+                if i >= MAX_LIST_BYTES {
+                    return Err(ParseError::TooLarge);
+                }
+                Ok(0)
+            },
+            None,
+        );
+        assert!(matches!(result, Err(ParseError::TooLarge)));
+        assert!(reads <= MAX_LIST_BYTES + 1);
+    }
+
+    #[test]
+    fn installed_pixi_table_must_be_readable() {
+        let mut bytes = vec![0; 0x80000];
+        bytes[0x7FD5] = 0x20;
+        let mapping = crate::Mapping::LoRom;
+        let at = mapping
+            .snes_to_pc(PIXI_SIZE_TABLE_MARKER)
+            .unwrap()
+            .as_usize();
+        bytes[at] = PIXI_MARKER_VALUE;
+        let at = mapping.snes_to_pc(PIXI_SIZE_TABLE_PTR).unwrap().as_usize();
+        bytes[at..at + 3].copy_from_slice(&[0, 0x80, 0x20]);
+        let rom = Rom::from_bytes(bytes).unwrap();
+        assert!(matches!(
+            read_sprites_at(&rom, SnesAddr::new(0x008000)),
+            Err(SpriteError::Rom(RomError::OutOfBounds { .. }))
+        ));
+    }
+
+    fn parse_sprites(data: &[u8], sizes: Option<&[u8]>) -> Result<SpriteList, ParseError> {
+        parse_with(
+            |i| data.get(i).copied().ok_or(ParseError::Need(i + 1)),
+            sizes,
+        )
+    }
+
     fn parse(data: &[u8]) -> SpriteList {
         match parse_sprites(data, None) {
             Ok(l) => l,
             Err(ParseError::Need(n)) => panic!("parser wanted {n} bytes of {}", data.len()),
+            Err(ParseError::TooLarge) => panic!("sprite stream too large"),
             Err(ParseError::UnknownCommand(b, at)) => panic!("unknown command {b:02X} at {at}"),
         }
     }

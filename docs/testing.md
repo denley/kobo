@@ -109,6 +109,10 @@ how each oracle is produced, where its data lives, and what is known not to matc
   The rows checked are the 16 the game uploads from the layer 2 position, or from a
   position one row either side: the upload comes before the level loop's first camera
   update, which settles layer 2 by a few pixels in some levels.
+  A 2026-09-22 rerun also found Akogare2 levels `0F8` (1792/1920 words) and
+  `111` (21/2048 words) failing this tilemap check. Both reproduce at `9b69ab8`, before
+  the input hardening and operation control; the cause is not established. These are
+  failing checks, not exclusions added to the test.
   Known exception in the corpus: `Smb2dx` (LM 1.63; 173 levels fail, its mode `$00`
   levels carry object layer 2 pointers), failing before the vertical-level checks were
   added. `Super Hark Bros 2` level `00A` used to fail with 896 of 2048 words: its
@@ -169,3 +173,27 @@ cargo run --release -- level png 105 /tmp/kobo-level-105.png -r /path/to/hack.sf
 The export verification checked PNG headers and dimensions, preview presence, all
 512 results per hack, and gallery links. These checks establish output completeness,
 not correctness of the rendered game state.
+
+## Strict runs
+
+`cargo test --workspace` skips the ROM-backed tests when no vanilla ROM is configured, so
+a green default run says nothing about ROM compatibility. `KOBO_REQUIRE_ROM=1` turns that
+skip into a failure. A configured vanilla ROM must have the reference headerless SHA-1, a
+malformed configuration is an error rather than a skip, and an opt-in tier whose variable
+is set but names no ROMs, dumps, or frames fails instead of passing without checking
+anything.
+
+## Parser mutation checks
+
+`tests/input_robustness.rs` runs 512 repeatable synthetic mutation cases in CI, covering
+header size codes, mapped pointers, overflowing reads, truncated LC_LZ2 and LC_LZ3
+streams, and sprite lists. The same generator runs for longer as an example:
+
+```sh
+cargo run --release --example fuzz_inputs -- 10000
+cargo run --release --example fuzz_inputs -- 1 123   # reproduce a failing seed
+```
+
+This is deterministic mutation smoke fuzzing, not coverage-guided fuzzing, and it needs
+no ROM. Targeted regressions separately cover out-of-file GFX pointers, invalid header
+size codes, broken PIXI pointers, and unterminated sprite lists.

@@ -1,17 +1,31 @@
 //! Shared helpers for ROM-backed integration tests.
 
-use kobo_core::{Rom, config};
+use kobo_core::{Rom, RomIdentity, config};
 
 /// The configured vanilla ROM, or `None` (after printing why) so the
 /// calling test can return early and pass.
 #[allow(dead_code)]
 pub fn vanilla() -> Option<Rom> {
     match config::vanilla_rom_path() {
-        Ok(path) => Some(Rom::load(&path).expect("configured vanilla ROM must load")),
-        Err(e) => {
-            eprintln!("skipping: {e}");
+        Ok(path) => {
+            let rom = Rom::load(&path).expect("configured vanilla ROM must load");
+            assert_eq!(
+                rom.identify(),
+                RomIdentity::VanillaUsa,
+                "configured vanilla ROM has the wrong headerless SHA-1: {}",
+                path.display()
+            );
+            Some(rom)
+        }
+        Err(config::ConfigError::NoVanillaRom) => {
+            assert!(
+                std::env::var_os("KOBO_REQUIRE_ROM").is_none(),
+                "strict validation requires a vanilla ROM"
+            );
+            eprintln!("skipping: no vanilla ROM configured");
             None
         }
+        Err(e) => panic!("invalid ROM configuration: {e}"),
     }
 }
 
@@ -33,6 +47,7 @@ pub fn lunar_magic_roms() -> Vec<(std::path::PathBuf, Rom)> {
         eprintln!("skipping Lunar Magic ROMs: KOBO_LM_ROMS is not set");
         return Vec::new();
     };
+    assert!(!list.is_empty(), "KOBO_LM_ROMS is set but empty");
     std::env::split_paths(&list)
         .map(|p| {
             let rom = Rom::load(&p).expect("listed Lunar Magic ROM must load");

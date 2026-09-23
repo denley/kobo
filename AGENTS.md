@@ -137,6 +137,7 @@ cargo run -- level sprites|map16|wram|reads  # sprite list, resolved Map16, RAM 
 cargo run -- addr '$05E000' [--sa1]          # SNES <-> file offset
 cargo run --release --example sprite_census -- rom.smc  # sprite numbers that draw nothing, by level
 cargo run --release --example render_hashes -- rom.smc  # a hash per level picture, to diff across a change
+cargo run --release --example fuzz_inputs -- 10000      # seeded parser mutation cases, no ROM needed
 ```
 
 Lunar Magic runs headlessly under Wine for reference exports, e.g.
@@ -153,7 +154,8 @@ Windows, and macOS. Keep all three green.
 - **ROM-backed tests** (`crates/kobo-core/tests/`) load the vanilla ROM through
   `kobo_core::config::vanilla_rom_path()`: the `KOBO_SMW_ROM` env var, else `roms.smw` in
   `$XDG_CONFIG_HOME/kobo/config.toml`. They print `skipping: ...` and pass when no ROM is
-  configured, so CI never needs ROM data. Run them locally before pushing.
+  configured, so CI never needs ROM data; `KOBO_REQUIRE_ROM=1` makes that a failure. A
+  configured ROM must be the vanilla reference. Run them locally before pushing.
 - The vanilla reference is No-Intro "Super Mario World (USA)", headerless SHA-1
   `6b47bb75d16514b6a476aa0c73a683a2a4c18765`, checksum `$A0DA`.
 - **Oracle tiers** are opt-in by environment variable and compare against data that is never

@@ -30,7 +30,7 @@ fn tile_grids_match_emulator_dumps() {
     let mut failures = Vec::new();
     let mut entries: Vec<_> = fs::read_dir(&dir)
         .unwrap()
-        .filter_map(|e| e.ok())
+        .map(|e| e.expect("oracle directory must be readable"))
         .map(|e| e.path())
         .filter(|p| p.to_string_lossy().ends_with(".l1lo.bin"))
         .collect();
@@ -56,6 +56,7 @@ fn tile_grids_match_emulator_dumps() {
         }
         checked += 1;
     }
+    assert!(checked > 0, "configured oracle checked no levels");
     eprintln!("checked {checked} levels");
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
@@ -87,8 +88,11 @@ fn sprite_slots_match_emulator_dumps() {
     let mut failures = Vec::new();
     let mut checked = 0;
     for level in 0..0x200u16 {
-        let Ok(want) = fs::read(dir.join(format!("level_{level:03X}.sprites.bin"))) else {
-            continue;
+        let path = dir.join(format!("level_{level:03X}.sprites.bin"));
+        let want = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => panic!("{}: {e}", path.display()),
         };
         if KNOWN_EXCEPTIONS.contains(&level) {
             continue;
@@ -120,6 +124,7 @@ fn sprite_slots_match_emulator_dumps() {
             }
         }
     }
+    assert!(checked > 0, "configured oracle checked no levels");
     eprintln!("checked {checked} levels");
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
@@ -167,8 +172,11 @@ fn layer3_tilemaps_match_emulator_dumps() {
     let mut failures = Vec::new();
     let mut checked = 0;
     for level in 0..0x200u16 {
-        let Ok(want) = fs::read(dir.join(format!("level_{level:03X}.vram.bin"))) else {
-            continue;
+        let path = dir.join(format!("level_{level:03X}.vram.bin"));
+        let want = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => panic!("{}: {e}", path.display()),
         };
         let loaded = expand::expand_level(&rom, level).unwrap();
         if loaded.scene.boss.is_some() {
@@ -191,6 +199,7 @@ fn layer3_tilemaps_match_emulator_dumps() {
             ));
         }
     }
+    assert!(checked > 0, "configured oracle checked no levels");
     eprintln!("checked {checked} levels");
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

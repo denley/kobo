@@ -618,8 +618,8 @@ fn rom_info(rom: &Rom) -> Result<()> {
     println!("title:           {:?}", h.title);
     println!("map mode:        ${:02X}", h.map_mode);
     println!("cartridge type:  ${:02X}", h.cartridge_type);
-    println!("declared size:   {} KiB", h.rom_size() / 1024);
-    println!("sram:            {} KiB", h.sram_size() / 1024);
+    println!("declared size:   {} KiB", h.rom_size()? / 1024);
+    println!("sram:            {} KiB", h.sram_size()? / 1024);
     println!("region:          ${:02X}", h.region);
     println!("version:         1.{}", h.version);
     println!(
@@ -642,10 +642,12 @@ fn rom_info(rom: &Rom) -> Result<()> {
 }
 
 fn gfx_list(rom: &Rom) -> Result<()> {
-    println!("compression: {}", gfx::Compression::detect(rom)?);
+    let reader = gfx::GfxReader::new(rom)?;
+    println!("compression: {}", reader.compression());
     println!("file   addr     format  tiles  stored  compressed");
+    let mut failed = 0;
     for index in 0..GFX_FILE_COUNT {
-        match gfx::read_gfx_file(rom, index) {
+        match reader.read(index) {
             Ok(f) => println!(
                 "GFX{:02X}  {}  {:<6}  {:>5}  {:>6}  {:>10}",
                 index,
@@ -656,16 +658,23 @@ fn gfx_list(rom: &Rom) -> Result<()> {
                 f.data.len(),
                 f.compressed_len
             ),
-            Err(e) => println!("GFX{index:02X}  error: {e}"),
+            Err(e) => {
+                failed += 1;
+                println!("GFX{index:02X}  error: {e}");
+            }
         }
+    }
+    if failed > 0 {
+        bail!("{failed} GFX files could not be read");
     }
     Ok(())
 }
 
 fn gfx_export(rom: &Rom, dir: &PathBuf) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let reader = gfx::GfxReader::new(rom)?;
     for index in 0..GFX_FILE_COUNT {
-        let f = gfx::read_gfx_file(rom, index)?;
+        let f = reader.read(index)?;
         let path = dir.join(format!("GFX{index:02X}.bin"));
         fs::write(&path, f.to_lm_export())
             .with_context(|| format!("writing {}", path.display()))?;

@@ -40,8 +40,9 @@ impl LayerTiles {
     pub fn for_object_tileset(rom: &Rom, tileset: u8) -> Result<Self, GfxError> {
         let files = gfx::object_tileset_files(rom, tileset)?;
         let mut out = Self::blank();
+        let reader = gfx::GfxReader::new(rom)?;
         for (slot, &file) in files.iter().enumerate() {
-            let gfx = gfx::read_gfx_file(rom, file)?;
+            let gfx = reader.read(file)?;
             let mut tiles = gfx.tiles();
             if gfx.bpp() == Some(Bpp::Three) {
                 for t in gfx::vram_upper_palette_tiles(file, tileset, tiles.len()) {

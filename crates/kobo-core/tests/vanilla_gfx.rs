@@ -33,8 +33,9 @@ fn load_fixture() -> Vec<Option<Expected>> {
 fn gfx_files_match_lunar_magic_export() {
     let Some(rom) = common::vanilla() else { return };
     let expected = load_fixture();
+    let reader = gfx::GfxReader::new(&rom).unwrap();
     for index in 0..GFX_FILE_COUNT {
-        let file = gfx::read_gfx_file(&rom, index).unwrap();
+        let file = reader.read(index).unwrap();
         let export = file.to_lm_export();
         let want = expected[index as usize].as_ref().unwrap();
         let got: String = Sha1::digest(&export)

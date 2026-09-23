@@ -22,8 +22,8 @@ fn vanilla_internal_header() {
     assert_eq!(h.title, "SUPER MARIOWORLD");
     assert_eq!(h.map_mode, 0x20);
     assert_eq!(h.cartridge_type, 0x02);
-    assert_eq!(h.rom_size(), 0x80000);
-    assert_eq!(h.sram_size(), 0x800);
+    assert_eq!(h.rom_size().unwrap(), 0x80000);
+    assert_eq!(h.sram_size().unwrap(), 0x800);
     assert_eq!(h.region, 0x01);
     assert!(h.checksum_pair_valid());
     assert_eq!(h.checksum, 0xA0DA);

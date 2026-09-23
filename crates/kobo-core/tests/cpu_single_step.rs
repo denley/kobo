@@ -117,6 +117,11 @@ fn run_file(path: &Path, opcode: u8) -> (usize, Option<String>) {
     let data = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let tests: Vec<Test> =
         serde_json::from_slice(&data).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    assert!(
+        !tests.is_empty(),
+        "{}: CPU fixture contains no cases",
+        path.display()
+    );
     let mut failures = 0;
     let mut first = None;
     for test in &tests {

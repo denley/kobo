@@ -55,7 +55,11 @@ fn levels_in(dir: &Path) -> Vec<u16> {
     let mut levels: Vec<u16> = std::fs::read_dir(dir)
         .unwrap()
         .filter_map(|e| {
-            let name = e.ok()?.file_name().into_string().ok()?;
+            let name = e
+                .expect("oracle directory must be readable")
+                .file_name()
+                .into_string()
+                .ok()?;
             let hex = name.strip_prefix("level_")?.strip_suffix(".ppm")?;
             u16::from_str_radix(hex, 16).ok()
         })
@@ -74,9 +78,19 @@ fn rendered_levels_match_emulator_frames() {
         return;
     };
     let dirs: Vec<PathBuf> = std::env::split_paths(&list).collect();
+    assert!(
+        !dirs.is_empty(),
+        "configured video oracle has no directories"
+    );
     let mut failures = Vec::new();
     for dir in &dirs {
-        for level in levels_in(dir) {
+        let levels = levels_in(dir);
+        assert!(
+            !levels.is_empty(),
+            "{}: configured video oracle has no frames",
+            dir.display()
+        );
+        for level in levels {
             let frame = read_frame(dir, level).unwrap();
             let rendered = render::render_level(&rom, level, Default::default()).unwrap();
             let (img, loaded) = (rendered.image, rendered.level);

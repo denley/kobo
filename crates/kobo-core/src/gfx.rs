@@ -463,13 +463,36 @@ pub fn vram_upper_palette_tiles(index: u8, tileset: u8, tile_count: usize) -> Ve
 /// Reads and decompresses GFX file `index` (`00` to `33`), in whichever
 /// format the ROM's files are in.
 pub fn read_gfx_file(rom: &Rom, index: u8) -> Result<GfxFile, GfxError> {
-    decompress_file(rom, index, Compression::detect(rom)?)
+    GfxReader::new(rom)?.read(index)
+}
+
+/// Reads multiple files from one immutable ROM, detecting its compression
+/// once. Reuse this for exports, tile sets, and file browsers.
+pub struct GfxReader<'r> {
+    rom: &'r Rom,
+    compression: Compression,
+}
+
+impl<'r> GfxReader<'r> {
+    pub fn new(rom: &'r Rom) -> Result<Self, GfxError> {
+        Ok(Self {
+            rom,
+            compression: Compression::detect(rom)?,
+        })
+    }
+
+    pub fn compression(&self) -> Compression {
+        self.compression
+    }
+
+    pub fn read(&self, index: u8) -> Result<GfxFile, GfxError> {
+        decompress_file(self.rom, index, self.compression)
+    }
 }
 
 fn decompress_file(rom: &Rom, index: u8, compression: Compression) -> Result<GfxFile, GfxError> {
     let addr = gfx_file_ptr(rom, index)?;
-    let pc = rom.pc(addr).map_err(RomError::from)?;
-    let input = &rom.data()[pc.as_usize()..];
+    let input = rom.read_tail(addr)?;
     let d = compression
         .decompress(input)
         .map_err(|source| GfxError::Decompress {
@@ -491,6 +514,21 @@ fn decompress_file(rom: &Rom, index: u8, compression: Compression) -> Result<Gfx
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pointers_outside_the_file_return_errors() {
+        let mut bytes = vec![0; 0x8000];
+        bytes[0x7FD5] = 0x20;
+        bytes[0x39C4] = 0x80;
+        bytes[0x39F6] = 2;
+        let rom = Rom::from_bytes(bytes).unwrap();
+        // Detection probes every pointer and must tolerate corrupt ones too.
+        let reader = GfxReader::new(&rom).unwrap();
+        assert!(matches!(
+            reader.read(0),
+            Err(GfxError::Rom(RomError::OutOfBounds { .. }))
+        ));
+    }
 
     // A tile whose pixel value equals (x + y) & mask, for testing planes.
     fn gradient(mask: u8) -> Tile8 {

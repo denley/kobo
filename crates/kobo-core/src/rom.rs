@@ -44,6 +44,8 @@ pub enum RomError {
     TooSmall,
     #[error("unsupported cartridge mapping (map mode ${0:02X})")]
     UnsupportedMapping(u8),
+    #[error("invalid {kind} size code ${code:02X}")]
+    InvalidSizeCode { kind: &'static str, code: u8 },
     #[error(transparent)]
     Map(#[from] MapError),
     #[error("read of {len} bytes at {addr} ({pc}) runs past the end of the ROM")]
@@ -99,17 +101,23 @@ impl InternalHeader {
     }
 
     /// Declared ROM size in bytes.
-    pub fn rom_size(&self) -> usize {
-        1usize << (self.rom_size_code as u32 + 10)
+    pub fn rom_size(&self) -> Result<usize, RomError> {
+        Self::declared_size("ROM", self.rom_size_code)
     }
 
     /// Declared SRAM size in bytes.
-    pub fn sram_size(&self) -> usize {
+    pub fn sram_size(&self) -> Result<usize, RomError> {
         if self.sram_size_code == 0 {
-            0
+            Ok(0)
         } else {
-            1usize << (self.sram_size_code as u32 + 10)
+            Self::declared_size("SRAM", self.sram_size_code)
         }
+    }
+
+    fn declared_size(kind: &'static str, code: u8) -> Result<usize, RomError> {
+        1usize
+            .checked_shl(code as u32 + 10)
+            .ok_or(RomError::InvalidSizeCode { kind, code })
     }
 
     /// Whether the checksum and its complement agree with each other.
@@ -211,7 +219,11 @@ impl Rom {
     /// power of two is counted repeatedly, as if mirrored up to that size.
     pub fn compute_checksum(&self) -> u16 {
         let len = self.data.len();
-        let sum = |slice: &[u8]| slice.iter().map(|&b| b as u32).sum::<u32>();
+        let sum = |slice: &[u8]| {
+            slice
+                .iter()
+                .fold(0u16, |sum, &b| sum.wrapping_add(b as u16))
+        };
         let head_len = if len.is_power_of_two() {
             len
         } else {
@@ -220,10 +232,10 @@ impl Rom {
         let (head, tail) = self.data.split_at(head_len);
         let mut total = sum(head);
         if !tail.is_empty() {
-            let repeats = (head_len / tail.len()) as u32;
+            let repeats = (head_len / tail.len()) as u16;
             total = total.wrapping_add(sum(tail).wrapping_mul(repeats));
         }
-        total as u16
+        total
     }
 
     pub fn sha1(&self) -> [u8; 20] {
@@ -264,9 +276,19 @@ impl Rom {
     pub fn read(&self, addr: SnesAddr, len: usize) -> Result<&[u8], RomError> {
         let pc = self.pc(addr)?;
         let start = pc.as_usize();
-        self.data
-            .get(start..start + len)
+        start
+            .checked_add(len)
+            .and_then(|end| self.data.get(start..end))
             .ok_or(RomError::OutOfBounds { addr, pc, len })
+    }
+
+    /// The remaining file bytes from a mapped address, checked against
+    /// the actual image length. Useful for terminated compressed streams.
+    pub fn read_tail(&self, addr: SnesAddr) -> Result<&[u8], RomError> {
+        let pc = self.pc(addr)?;
+        self.data
+            .get(pc.as_usize()..)
+            .ok_or(RomError::OutOfBounds { addr, pc, len: 0 })
     }
 
     pub fn read_u8(&self, addr: SnesAddr) -> Result<u8, RomError> {
@@ -340,6 +362,30 @@ mod tests {
         assert!(matches!(
             Rom::from_bytes(fake_rom(0x21)),
             Err(RomError::UnsupportedMapping(0x21))
+        ));
+    }
+
+    #[test]
+    fn malformed_sizes_and_overflowing_reads_are_errors() {
+        let mut data = fake_rom(0x20);
+        data[0x7FD7] = 0xFF;
+        data[0x7FD8] = 0xFF;
+        let rom = Rom::from_bytes(data).unwrap();
+        assert!(matches!(
+            rom.internal_header().rom_size(),
+            Err(RomError::InvalidSizeCode { .. })
+        ));
+        assert!(matches!(
+            rom.internal_header().sram_size(),
+            Err(RomError::InvalidSizeCode { .. })
+        ));
+        assert!(matches!(
+            rom.read(SnesAddr::new(0x008001), usize::MAX),
+            Err(RomError::OutOfBounds { .. })
+        ));
+        assert!(matches!(
+            rom.read_tail(SnesAddr::new(0x028000)),
+            Err(RomError::OutOfBounds { .. })
         ));
     }
 
