@@ -15,6 +15,7 @@
 //! reset, counting on the SA-1 to take longer than that. The SA-1 sees
 //! the bus through [`Sa1View`].
 
+use crate::cpu::access::{AccessKind, UnsupportedAccesses};
 use crate::cpu::sa1::Processor;
 use crate::cpu::{Bus, Cpu, CpuError};
 use crate::ram::{Ram, RamMap};
@@ -41,6 +42,7 @@ struct DmaChannel {
 /// uploads. The game can write video memory but never reads it back here,
 /// so a routine's outcome depends on `ram` alone.
 pub struct SmwBus<'a> {
+    pub(crate) operation: Option<crate::operation::Operation>,
     pub rom: &'a Rom,
     pub ram: Ram,
     pub vram: Vec<u8>,
@@ -125,7 +127,15 @@ pub struct SmwBus<'a> {
     /// A block header was just written to port 0; a zero written to
     /// port 1 right after it ends the transfer (AddmusicK's ordering).
     apu_header_pending: bool,
-    /// Number of reads that hit unmapped or unmodelled register space.
+    /// Bounded detail of the accesses to hardware this bus does not
+    /// model, which a picture may be missing something for.
+    pub unsupported: UnsupportedAccesses,
+    /// Accesses that need no model: open bus, read-only registers, idle
+    /// controllers, and registers whose effect the capture passes read
+    /// from RAM instead (`write_register` lists them).
+    pub stubbed_writes: u64,
+    pub stubbed_reads: u64,
+    /// Every unmodelled access, including those beyond the report's cap.
     pub unmapped_reads: u64,
     pub unmapped_writes: u64,
     /// When set, every ROM read address is appended here.
@@ -136,6 +146,7 @@ impl<'a> SmwBus<'a> {
     pub fn new(rom: &'a Rom) -> Self {
         Self {
             rom,
+            operation: None,
             ram: Ram::new(RamMap::of(rom)),
             vram: vec![0; VRAM_LEN],
             vram_written: vec![false; VRAM_LEN],
@@ -176,9 +187,31 @@ impl<'a> SmwBus<'a> {
             apu_expected: 0,
             apu_jump_echo: None,
             apu_header_pending: false,
+            unsupported: UnsupportedAccesses::default(),
+            stubbed_writes: 0,
+            stubbed_reads: 0,
             unmapped_reads: 0,
             unmapped_writes: 0,
             trace_rom_reads: None,
+        }
+    }
+
+    fn unsupported_access(&mut self, processor: Processor, address: u32, kind: AccessKind) {
+        match kind {
+            AccessKind::Read => self.unmapped_reads += 1,
+            AccessKind::Write => self.unmapped_writes += 1,
+        }
+        self.unsupported.record(processor, address, kind);
+    }
+
+    /// Whether an S-CPU address in `$2000`-`$7FFF` of a system bank has
+    /// nothing behind it on this cartridge: a read sees open bus and a
+    /// write goes nowhere. Hacks probe these for expansion hardware.
+    fn open_bus(&self, reg: u16) -> bool {
+        match reg {
+            0x2100..=0x2183 | 0x4016..=0x4017 | 0x4200..=0x421F | 0x4300..=0x437F => false,
+            0x2200..=0x23FF => self.ram.sa1.is_none(),
+            _ => true,
         }
     }
 
@@ -240,24 +273,32 @@ impl<'a> SmwBus<'a> {
     }
 
     fn sa1_register(&mut self, processor: Processor, reg: u16) -> u8 {
-        let sa1 = self.ram.sa1.as_ref();
-        sa1.and_then(|sa1| sa1.read(processor, reg))
-            .unwrap_or_else(|| {
-                self.unmapped_reads += 1;
+        let Some(sa1) = self.ram.sa1.as_ref() else {
+            // Without an SA-1 the address is open bus.
+            self.stubbed_reads += 1;
+            return 0;
+        };
+        match sa1.read(processor, reg) {
+            Some(value) => value,
+            None => {
+                self.unsupported_access(processor, reg as u32, AccessKind::Read);
                 0
-            })
+            }
+        }
     }
 
     fn set_sa1_register(&mut self, processor: Processor, reg: u16, value: u8) {
         let Some(sa1) = self.ram.sa1.as_deref_mut() else {
-            self.unmapped_writes += 1;
+            self.stubbed_writes += 1;
             return;
         };
-        if !sa1.write(processor, reg, value) {
-            self.unmapped_writes += 1;
+        let supported = sa1.write(processor, reg, value);
+        let transfer = sa1.take_dma();
+        if !supported {
+            self.unsupported_access(processor, reg as u32, AccessKind::Write);
         }
         // The SA-1's DMA, which takes no time here.
-        if let Some(transfer) = sa1.take_dma() {
+        if let Some(transfer) = transfer {
             let mut sa1 = Sa1View(self);
             for i in 0..transfer.len as u32 {
                 let value = sa1.read(transfer.source + i);
@@ -300,6 +341,11 @@ impl<'a> SmwBus<'a> {
                 self.wmadd = (self.wmadd + 1) & 0x1_FFFF;
                 value
             }
+            // Captures enter NMI explicitly and provide no controller input.
+            0x4016..=0x4017 | 0x4210 | 0x4218..=0x421F => {
+                self.stubbed_reads += 1;
+                0
+            }
             0x4211 => (std::mem::take(&mut self.timer_irq) as u8) << 7,
             0x4214 => self.quotient as u8,
             0x4215 => (self.quotient >> 8) as u8,
@@ -312,8 +358,12 @@ impl<'a> SmwBus<'a> {
                 self.hblank = !self.hblank;
                 value
             }
+            _ if self.open_bus(reg) => {
+                self.stubbed_reads += 1;
+                0
+            }
             _ => {
-                self.unmapped_reads += 1;
+                self.unsupported_access(Processor::Main, reg as u32, AccessKind::Read);
                 0
             }
         }
@@ -340,14 +390,14 @@ impl<'a> SmwBus<'a> {
         if same { vec![addr, mirror] } else { vec![addr] }
     }
 
-    fn rom_read(&mut self, addr: u32) -> u8 {
+    fn rom_read(&mut self, processor: Processor, addr: u32) -> u8 {
         if let Some(trace) = &mut self.trace_rom_reads {
             trace.push(addr);
         }
         let pc = self.rom_offset(addr);
         let byte = pc.and_then(|pc| self.rom.data().get(pc.as_usize()).copied());
         byte.unwrap_or_else(|| {
-            self.unmapped_reads += 1;
+            self.unsupported_access(processor, addr, AccessKind::Read);
             0
         })
     }
@@ -529,7 +579,17 @@ impl<'a> SmwBus<'a> {
                     _ => {}
                 }
             }
-            _ => self.unmapped_writes += 1,
+            // Brightness, mirrors consumed by the capture passes, CPU I/O,
+            // and disabled HDMA have no further effect in this model.
+            0x2100 | 0x2123..=0x2127 | 0x2130..=0x2132 | 0x4201 | 0x4207..=0x4208 | 0x420D => {
+                self.stubbed_writes += 1
+            }
+            0x2106 | 0x2133 | 0x420C if value == 0 => self.stubbed_writes += 1,
+            // Writes to read-only registers, the controller strobe, and
+            // open bus go nowhere.
+            0x2134..=0x213F | 0x4016 | 0x4210..=0x421F => self.stubbed_writes += 1,
+            _ if self.open_bus(reg) => self.stubbed_writes += 1,
+            _ => self.unsupported_access(Processor::Main, reg as u32, AccessKind::Write),
         }
     }
 
@@ -581,12 +641,19 @@ impl<'a> SmwBus<'a> {
 }
 
 impl Bus for SmwBus<'_> {
+    fn before_instruction(&mut self) -> Result<(), CpuError> {
+        if let Some(operation) = &self.operation {
+            operation.instruction()?;
+        }
+        Ok(())
+    }
+
     fn read(&mut self, addr: u32) -> u8 {
         // Most reads are instruction fetches from the upper half of a
         // bank, which is ROM in every bank that is not RAM on some
         // cartridge.
         if addr & 0x8000 != 0 && !(0x40..=0x7F).contains(&(addr >> 16)) {
-            return self.rom_read(addr);
+            return self.rom_read(Processor::Main, addr);
         }
         if (0x40..=0x4F).contains(&(addr >> 16))
             && let Some(conversion) = self.ram.sa1.as_ref().and_then(|sa1| sa1.conversion())
@@ -599,7 +666,7 @@ impl Bus for SmwBus<'_> {
         }
         match ((addr >> 16) as u8, addr as u16) {
             (0x00..=0x3F | 0x80..=0xBF, reg @ 0x2000..=0x7FFF) => self.read_register(reg),
-            _ => self.rom_read(addr),
+            _ => self.rom_read(Processor::Main, addr),
         }
     }
 
@@ -609,7 +676,7 @@ impl Bus for SmwBus<'_> {
         }
         match ((addr >> 16) as u8, addr as u16) {
             (0x00..=0x3F | 0x80..=0xBF, reg @ 0x2000..=0x7FFF) => self.write_register(reg, value),
-            _ => self.unmapped_writes += 1,
+            _ => self.unsupported_access(Processor::Main, addr, AccessKind::Write),
         }
     }
 
@@ -637,10 +704,14 @@ impl Bus for SmwBus<'_> {
 pub struct Sa1View<'a, 'r>(pub &'a mut SmwBus<'r>);
 
 impl Bus for Sa1View<'_, '_> {
+    fn before_instruction(&mut self) -> Result<(), CpuError> {
+        self.0.before_instruction()
+    }
+
     fn read(&mut self, addr: u32) -> u8 {
         let bus = &mut *self.0;
         if addr & 0x8000 != 0 && !(0x40..=0x7F).contains(&(addr >> 16)) {
-            return bus.rom_read(addr);
+            return bus.rom_read(Processor::Sa1, addr);
         }
         if let Some(value) = bus.ram.read_sa1(addr) {
             return value;
@@ -649,9 +720,9 @@ impl Bus for Sa1View<'_, '_> {
             (0x00..=0x3F | 0x80..=0xBF, reg @ 0x2200..=0x23FF) => {
                 bus.sa1_register(Processor::Sa1, reg)
             }
-            (0xC0..=0xFF, _) => bus.rom_read(addr),
+            (0xC0..=0xFF, _) => bus.rom_read(Processor::Sa1, addr),
             _ => {
-                bus.unmapped_reads += 1;
+                bus.unsupported_access(Processor::Sa1, addr, AccessKind::Read);
                 0
             }
         }
@@ -666,7 +737,7 @@ impl Bus for Sa1View<'_, '_> {
             (0x00..=0x3F | 0x80..=0xBF, reg @ 0x2200..=0x23FF) => {
                 bus.set_sa1_register(Processor::Sa1, reg, value)
             }
-            _ => bus.unmapped_writes += 1,
+            _ => bus.unsupported_access(Processor::Sa1, addr, AccessKind::Write),
         }
     }
 
@@ -687,6 +758,76 @@ impl Bus for Sa1View<'_, '_> {
 mod tests {
     use super::*;
     use crate::rom::Rom;
+
+    #[test]
+    fn stubs_and_unsupported_accesses_are_distinct() {
+        let rom = rom();
+        let mut bus = SmwBus::new(&rom);
+        bus.read(0x4218);
+        bus.write(0x420C, 0);
+        // Open bus on a LoROM cartridge, a write to a read-only register.
+        bus.read(0x3800);
+        bus.read(0x2300);
+        bus.write(0x7808, 1);
+        bus.write(0x4216, 1);
+        assert!(bus.unsupported.is_empty());
+        assert_eq!((bus.stubbed_reads, bus.stubbed_writes), (3, 3));
+        bus.write(0x420C, 1); // enabled HDMA is not simulated
+        bus.read(0x2137); // unsupported latch read
+        Sa1View(&mut bus).read(0x2137); // different processor, same address
+        assert_eq!(bus.unsupported.accesses.len(), 3);
+        assert_eq!(bus.unsupported.accesses[2].processor, Processor::Sa1);
+    }
+
+    #[test]
+    fn both_cpus_and_restored_snapshots_share_the_operation_budget() {
+        use crate::operation::{Operation, OperationError};
+        let mut bytes = vec![0xEA; 0x8000]; // NOP
+        bytes[0x7FD5] = 0x23;
+        let rom = Rom::from_bytes(bytes).unwrap();
+        let mut bus = SmwBus::new(&rom);
+        let operation = Operation::new(Some(2));
+        bus.operation = Some(operation.clone());
+        let snapshot = bus.ram.clone();
+        let mut main = Cpu::new();
+        main.pc = 0x8000;
+        main.step(&mut bus).unwrap();
+        let mut second = Cpu::new();
+        second.pc = 0x8000;
+        second.step(&mut Sa1View(&mut bus)).unwrap();
+        bus.ram = snapshot;
+        assert_eq!(
+            main.step(&mut bus),
+            Err(CpuError::Operation(OperationError::Budget { limit: 2 }))
+        );
+        assert_eq!(operation.progress().instructions, 2);
+    }
+
+    #[test]
+    fn cancellation_interrupts_a_running_cpu() {
+        use crate::operation::{Operation, OperationError};
+        let operation = Operation::default();
+        let worker_operation = operation.clone();
+        let worker = std::thread::spawn(move || {
+            let mut bytes = vec![0; 0x8000];
+            bytes[0x7FD5] = 0x20;
+            bytes[..3].copy_from_slice(&[0x1A, 0x80, 0xFD]); // INC A; BRA back
+            let rom = Rom::from_bytes(bytes).unwrap();
+            let mut bus = SmwBus::new(&rom);
+            bus.operation = Some(worker_operation);
+            let mut cpu = Cpu::new();
+            cpu.pc = 0x8000;
+            cpu.run(&mut bus, u64::MAX, |_| false)
+        });
+        while operation.progress().instructions < 1000 && !worker.is_finished() {
+            std::thread::yield_now();
+        }
+        operation.cancel();
+        assert_eq!(
+            worker.join().unwrap(),
+            Err(CpuError::Operation(OperationError::Cancelled))
+        );
+    }
 
     fn rom() -> Rom {
         let mut data = vec![0u8; 0x8000];

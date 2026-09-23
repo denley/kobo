@@ -439,6 +439,11 @@ impl Sa1 {
                 set_high(&mut self.arithmetic.b, value);
                 self.arithmetic.run();
             }
+            // The SA-1's NMI vector and the write protection registers,
+            // which SA-1 Pack sets once at start-up: without effect here,
+            // since the SA-1's NMI is never raised and protection is not
+            // enforced. A write to a read-only status register is nothing.
+            (Processor::Main, 0x2205..=0x2206) | (_, 0x2226..=0x222A) | (_, 0x2300..=0x230B) => {}
             _ => return false,
         }
         true

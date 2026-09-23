@@ -173,7 +173,11 @@ impl<'r> Machine<'r> {
 
     /// An SA-1 that has stopped is why the S-CPU gave up waiting for it.
     fn cause(&self, error: CpuError) -> CpuError {
-        self.bus.sa1_fault().unwrap_or(error)
+        if matches!(error, CpuError::Operation(_)) {
+            error
+        } else {
+            self.bus.sa1_fault().unwrap_or(error)
+        }
     }
 
     /// [`Machine::try_call`] for routines the level cannot load without.

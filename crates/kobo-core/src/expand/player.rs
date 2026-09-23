@@ -41,7 +41,7 @@ pub(super) fn capture_player(
     let objects = match enter(machine) {
         Ok(objects) => objects,
         Err(error) => {
-            diagnostics.push(Diagnostic {
+            diagnostics.push(Diagnostic::Cpu {
                 pass: Pass::Player,
                 error,
             });

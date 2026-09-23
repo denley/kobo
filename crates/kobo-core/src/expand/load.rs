@@ -6,6 +6,7 @@ use super::tiles::{
 };
 use super::{ExpandError, LoadedLevel, boss, layer3, map16, player, routines};
 use crate::level::{self, Layer2Kind, LevelMode};
+use crate::operation::{Operation, Stage};
 use crate::palette::Color15;
 use crate::ram::{self, Ram};
 use crate::rom::Rom;
@@ -29,13 +30,43 @@ pub fn expand_level_traced(
     level: u16,
     trace: bool,
 ) -> Result<(LoadedLevel, Option<ReadTrace>), ExpandError> {
+    expand_controlled(rom, level, trace, None)
+}
+
+/// Loads with cancellation, progress, and a budget shared by all passes.
+pub fn expand_level_with_control(
+    rom: &Rom,
+    level: u16,
+    operation: &Operation,
+) -> Result<LoadedLevel, ExpandError> {
+    let level = expand_controlled(rom, level, false, Some(operation))?.0;
+    operation.stage(Stage::Finished)?;
+    Ok(level)
+}
+
+pub(crate) fn expand_controlled(
+    rom: &Rom,
+    level: u16,
+    trace: bool,
+    operation: Option<&Operation>,
+) -> Result<(LoadedLevel, Option<ReadTrace>), ExpandError> {
+    if let Some(op) = operation {
+        op.stage(Stage::Boot)?;
+    }
     let header = level::read_primary_header(rom, level)?;
     let mut machine = Machine::new(rom, level);
+    machine.bus.operation = operation.cloned();
     boot(&mut machine)?;
     if trace {
         machine.cpu.trace_data_reads = Some(Vec::new());
     }
+    if let Some(op) = operation {
+        op.stage(Stage::Loading)?;
+    }
     let expanded = load_level(&mut machine)?;
+    if let Some(op) = operation {
+        op.stage(Stage::Preparing)?;
+    }
     prepare_level(&mut machine)?;
     let trace = machine.cpu.trace_data_reads.take();
     // Before any drawing pass: a Mode 7 arena's IRQ handler changes the
@@ -70,7 +101,13 @@ pub fn expand_level_traced(
     };
     let map16 = map16::lookup_map16(&mut machine, lunar_magic)?;
     let pipe_map16 = (!lunar_magic).then(|| map16::read_pipe_map16(&mut machine.bus));
+    if let Some(op) = operation {
+        op.check()?;
+    }
     let bus = machine.bus;
+    if !bus.unsupported.is_empty() {
+        diagnostics.push(super::Diagnostic::Unsupported(bus.unsupported.clone()));
+    }
     let tiles = LevelTiles {
         level,
         header,

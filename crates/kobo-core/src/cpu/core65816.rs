@@ -4,6 +4,12 @@ use thiserror::Error;
 
 /// Memory as seen by the CPU: a flat 24-bit address space.
 pub trait Bus {
+    /// Called before each instruction, including instructions on a second
+    /// processor. Implementations may enforce an operation-wide budget.
+    fn before_instruction(&mut self) -> Result<(), CpuError> {
+        Ok(())
+    }
+
     fn read(&mut self, addr: u32) -> u8;
     fn write(&mut self, addr: u32, value: u8);
 
@@ -46,6 +52,8 @@ impl Flags {
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum CpuError {
+    #[error(transparent)]
+    Operation(#[from] crate::operation::OperationError),
     #[error("unsupported opcode ${opcode:02X} at ${pb:02X}:{pc:04X}")]
     Unsupported { opcode: u8, pb: u8, pc: u16 },
     #[error("BRK at ${pb:02X}:{pc:04X}")]
@@ -697,6 +705,7 @@ impl Cpu {
 
     /// Executes one instruction.
     pub fn step(&mut self, bus: &mut impl Bus) -> Result<(), CpuError> {
+        bus.before_instruction()?;
         let op_pb = self.pb;
         let op_pc = self.pc;
         self.op_addr = self.pc_addr();

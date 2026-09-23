@@ -7,7 +7,10 @@
 
 mod level;
 
-pub use level::{LevelRender, RenderError, RenderOptions, Sprites, render_level, render_loaded};
+pub use level::{
+    LevelRender, RenderError, RenderOptions, Sprites, render_level, render_level_with_control,
+    render_loaded, render_loaded_with_control,
+};
 
 use crate::expand::{LevelTiles, LoadedLevel};
 use crate::gfx::{self, Bpp, GfxError, Tile8};

@@ -22,9 +22,9 @@ pub enum Pass {
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Diagnostic {
-    pub pass: Pass,
-    pub error: CpuError,
+pub enum Diagnostic {
+    Cpu { pass: Pass, error: CpuError },
+    Unsupported(crate::cpu::access::UnsupportedAccesses),
 }
 
 /// One line per distinct error, naming the first pass it stopped and how
@@ -33,13 +33,17 @@ pub fn summarize(diagnostics: &[Diagnostic]) -> Vec<String> {
     let mut reported: Vec<&CpuError> = Vec::new();
     let mut lines = Vec::new();
     for diagnostic in diagnostics {
-        if reported.contains(&&diagnostic.error) {
+        let Diagnostic::Cpu { error, .. } = diagnostic else {
+            lines.push(diagnostic.to_string());
+            continue;
+        };
+        if reported.contains(&error) {
             continue;
         }
-        reported.push(&diagnostic.error);
+        reported.push(error);
         let passes = diagnostics
             .iter()
-            .filter(|other| other.error == diagnostic.error)
+            .filter(|other| matches!(other, Diagnostic::Cpu { error: other, .. } if other == error))
             .count();
         lines.push(match passes {
             1 => diagnostic.to_string(),
@@ -52,7 +56,11 @@ pub fn summarize(diagnostics: &[Diagnostic]) -> Vec<String> {
 
 impl fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.pass {
+        let (pass, error) = match self {
+            Self::Cpu { pass, error } => (pass, error),
+            Self::Unsupported(report) => return report.fmt(f),
+        };
+        match pass {
             Pass::Player => write!(f, "player entrance")?,
             Pass::SpriteLoader { camera: (x, y) } => {
                 write!(f, "sprite loader with the camera at ({x}, {y})")?
@@ -62,7 +70,7 @@ impl fmt::Display for Diagnostic {
                 write!(f, "slotless sprites with the camera at ({x}, {y})")?
             }
         }
-        write!(f, ": {}", self.error)
+        write!(f, ": {error}")
     }
 }
 
@@ -80,7 +88,7 @@ mod tests {
             pb: 0x01,
             pc: 0x8000,
         };
-        let diagnostic = |pass, error: &CpuError| Diagnostic {
+        let diagnostic = |pass, error: &CpuError| Diagnostic::Cpu {
             pass,
             error: error.clone(),
         };

@@ -207,14 +207,21 @@ fn passes_the_cpu_gives_up_on_are_reported() {
         let loaded = expand::expand_level(&rom, 0x136).unwrap();
         let (_, scene) = capture(&rom, 0x136);
         assert!(loaded.scene.player.is_empty());
-        assert!(matches!(loaded.diagnostics[..], [ref d] if d.pass == Pass::Player));
+        assert!(loaded.diagnostics.iter().any(|d| matches!(
+            d,
+            expand::Diagnostic::Cpu {
+                pass: Pass::Player,
+                ..
+            }
+        )));
         assert!(!scene.undrawn.is_empty());
-        assert!(
-            scene
-                .diagnostics
-                .iter()
-                .any(|d| matches!(d.pass, Pass::Sprite { .. }))
-        );
+        assert!(scene.diagnostics.iter().any(|d| matches!(
+            d,
+            expand::Diagnostic::Cpu {
+                pass: Pass::Sprite { .. },
+                ..
+            }
+        )));
     }
     let Some(rom) = common::vanilla() else { return };
     let loaded = expand::expand_level(&rom, 0x105).unwrap();

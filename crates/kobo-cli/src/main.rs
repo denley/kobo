@@ -129,6 +129,9 @@ enum LevelCommand {
         /// Leave out the player at the level's entrance.
         #[arg(long)]
         no_player: bool,
+        /// Maximum total CPU instructions across loading and all sprite passes.
+        #[arg(long)]
+        max_instructions: Option<u64>,
         /// Draw every sprite as an ID marker instead of running the game's
         /// sprite engine for its graphics.
         #[arg(long)]
@@ -313,8 +316,17 @@ fn main() -> Result<()> {
                 out,
                 no_sprites,
                 no_player,
+                max_instructions,
                 markers,
-            } => level_png(&rom.load()?, &level, &out, !no_sprites, !no_player, markers),
+            } => level_png(
+                &rom.load()?,
+                &level,
+                &out,
+                !no_sprites,
+                !no_player,
+                markers,
+                max_instructions,
+            ),
             LevelCommand::Sprites { rom, level } => level_sprites(&rom.load()?, &level),
             LevelCommand::Tiles { rom, level } => level_tiles(&rom.load()?, &level),
             LevelCommand::Dump { rom, level, dir } => level_dump(&rom.load()?, &level, &dir),
@@ -393,6 +405,7 @@ fn level_png(
     with_sprites: bool,
     with_player: bool,
     markers: bool,
+    max_instructions: Option<u64>,
 ) -> Result<()> {
     let level = parse_level(level)?;
     let options = RenderOptions {
@@ -403,7 +416,15 @@ fn level_png(
         },
         player: with_player,
     };
-    let rendered = render::render_level(rom, level, options)?;
+    let rendered = match max_instructions {
+        Some(limit) => render::render_level_with_control(
+            rom,
+            level,
+            options,
+            &kobo_core::operation::Operation::new(Some(limit)),
+        )?,
+        None => render::render_level(rom, level, options)?,
+    };
     for line in expand::summarize(&rendered.diagnostics) {
         eprintln!("warning: level {level:03X}: {line}");
     }

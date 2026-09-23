@@ -136,3 +136,5 @@ registers), the variable-length bit reader, write protection, and the SA-1's NMI
 every level of the 39 SA-1 hacks in the corpus, the only registers written that are not
 modelled are the write protection ones (`$2226`-`$222A`) and the SA-1's NMI vector
 (`$2205`-`$2206`), both set once by SA-1 Pack's start-up, and `$2306`, which is read-only.
+The bus accepts those writes without effect, so they are not reported as unmodelled
+hardware (`cpu::access`); a write to any other SA-1 register outside the model is.

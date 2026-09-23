@@ -33,10 +33,14 @@ mod sprite_capture;
 mod tiles;
 
 pub use diagnostics::{Diagnostic, Pass, summarize};
-pub use load::{ReadTrace, decompress_gfx_file, expand_level, expand_level_traced};
+pub(crate) use load::expand_controlled;
+pub use load::{
+    ReadTrace, decompress_gfx_file, expand_level, expand_level_traced, expand_level_with_control,
+};
 pub use loaded::LoadedLevel;
 pub use oam::object_sizes;
-pub use sprite_capture::{LATE_SPRITE_FRAMES, capture_sprites};
+pub(crate) use sprite_capture::capture_controlled;
+pub use sprite_capture::{LATE_SPRITE_FRAMES, capture_sprites, capture_sprites_with_control};
 pub use tiles::{
     GRID_LEN, LAYER2_TILEMAP_LEN, LEVEL_SIZES, Layer2Objects, LevelTiles, PIPE_TILE_COUNT,
     PIPE_TILES, PIPE_VARIANTS, SCREEN_COLS, SCREEN_ROWS, max_screens,
@@ -44,6 +48,8 @@ pub use tiles::{
 
 #[derive(Debug, Error)]
 pub enum ExpandError {
+    #[error(transparent)]
+    Operation(#[from] crate::operation::OperationError),
     #[error(transparent)]
     Level(#[from] LevelError),
     #[error("level {level:03X}: {source}")]

@@ -26,6 +26,7 @@ use super::machine::{Call, Machine};
 use super::oam::{self, SCREEN_H, SCREEN_W};
 use super::{ExpandError, LoadedLevel, routines};
 use crate::cpu::CpuError;
+use crate::operation::{Operation, Stage};
 use crate::ram::{self, Ram};
 use crate::rom::Rom;
 use crate::sprites::{SpriteEntry, SpriteList};
@@ -256,6 +257,30 @@ pub fn capture_sprites(
     level: &LoadedLevel,
     list: &SpriteList,
 ) -> Result<SpriteScene, ExpandError> {
+    capture_controlled(rom, level, list, None)
+}
+
+/// Captures sprites with a shared operation budget and cancellation.
+pub fn capture_sprites_with_control(
+    rom: &Rom,
+    level: &LoadedLevel,
+    list: &SpriteList,
+    operation: &Operation,
+) -> Result<SpriteScene, ExpandError> {
+    let scene = capture_controlled(rom, level, list, Some(operation))?;
+    operation.stage(Stage::Finished)?;
+    Ok(scene)
+}
+
+pub(crate) fn capture_controlled(
+    rom: &Rom,
+    level: &LoadedLevel,
+    list: &SpriteList,
+    operation: Option<&Operation>,
+) -> Result<SpriteScene, ExpandError> {
+    if let Some(op) = operation {
+        op.check()?;
+    }
     if level.scene.boss.is_some() {
         return Ok(SpriteScene {
             object_select: level.video.object_select,
@@ -263,6 +288,7 @@ pub fn capture_sprites(
         });
     }
     let mut capture = SpriteCapture::new(rom, level, list);
+    capture.level_loop.machine.bus.operation = operation.cloned();
     // Columns go in camera order, so the scene does not depend on the
     // order of the level's sprite list.
     let mut columns: BTreeMap<(i32, i32), Vec<&SpriteEntry>> = BTreeMap::new();
@@ -273,9 +299,19 @@ pub fn capture_sprites(
             .push(entry);
     }
     let cameras: Vec<_> = columns.keys().copied().collect();
-    for (camera, entries) in columns {
+    let total = columns.len();
+    for (completed, (camera, entries)) in columns.into_iter().enumerate() {
+        if let Some(op) = operation {
+            op.stage(Stage::Sprites { completed, total })?;
+        }
         let earlier = capture.loaded_before(camera, &cameras);
         capture.capture_column(camera, &earlier, &entries);
+    }
+    if let Some(op) = operation {
+        op.stage(Stage::Sprites {
+            completed: total,
+            total,
+        })?;
     }
     Ok(capture.finish())
 }
@@ -354,6 +390,12 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
     }
 
     fn finish(mut self) -> SpriteScene {
+        let report = &self.level_loop.machine.bus.unsupported;
+        if !report.is_empty() {
+            self.scene
+                .diagnostics
+                .push(Diagnostic::Unsupported(report.clone()));
+        }
         let mut marked = HashSet::new();
         self.scene.undrawn.retain(|entry| marked.insert(*entry));
         self.scene
@@ -406,7 +448,7 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
     }
 
     fn diagnose(&mut self, pass: Pass, error: CpuError) {
-        self.scene.diagnostics.push(Diagnostic { pass, error });
+        self.scene.diagnostics.push(Diagnostic::Cpu { pass, error });
     }
 
     /// Adds what a pass drew from `camera` to the scene, in level

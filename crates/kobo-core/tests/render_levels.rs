@@ -599,6 +599,16 @@ fn render_level_honours_its_options() {
     use render::{RenderOptions, Sprites, render_level};
     let Some(rom) = common::vanilla() else { return };
     let full = render_level(&rom, 0x105, RenderOptions::default()).unwrap();
+    let operation = kobo_core::operation::Operation::default();
+    let controlled =
+        render::render_level_with_control(&rom, 0x105, RenderOptions::default(), &operation)
+            .unwrap();
+    assert_eq!(controlled.image, full.image);
+    assert_eq!(
+        operation.progress().stage,
+        kobo_core::operation::Stage::Finished
+    );
+    assert!(operation.progress().instructions > 0);
     assert!(full.diagnostics.is_empty());
     let (w, h) = full.level.tiles.size();
     assert_eq!(
@@ -670,4 +680,61 @@ fn dragon_coins_use_the_roms_animated_palette() {
     let rendered = render::render_level(&patched, 0x105, options).unwrap();
     assert!(rendered.diagnostics.is_empty());
     assert_eq!(rendered.level.video.palette().get(6, 4), custom);
+}
+
+#[test]
+fn cancellation_and_sprite_budget_exhaustion_are_fatal() {
+    use kobo_core::operation::{Operation, OperationError, Stage};
+    use render::{RenderError, RenderOptions, render_level_with_control};
+    // Cancellation is checked before even trying to parse level pointers.
+    let mut data = vec![0; 0x8000];
+    data[0x7FD5] = 0x20;
+    let fake = kobo_core::Rom::from_bytes(data).unwrap();
+    let cancelled = Operation::default();
+    cancelled.cancel();
+    assert!(render_level_with_control(&fake, 0x105, RenderOptions::default(), &cancelled).is_err());
+
+    let Some(rom) = common::vanilla() else { return };
+    let load = Operation::default();
+    kobo_core::expand::expand_level_with_control(&rom, 0x105, &load).unwrap();
+    // Enough to finish loading, but not one instruction of sprite capture.
+    let budget = load.progress().instructions;
+    let operation = Operation::new(Some(budget));
+    assert!(
+        matches!(render_level_with_control(&rom, 0x105, RenderOptions::default(), &operation),
+        Err(RenderError::Expand(kobo_core::expand::ExpandError::Operation(OperationError::Budget { limit }))) if limit == budget)
+    );
+    assert_ne!(operation.progress().stage, Stage::Finished);
+}
+
+#[test]
+fn unsupported_hardware_reaches_successful_render_diagnostics() {
+    use kobo_core::{Rom, SnesAddr, cpu::access::AccessKind, expand::Diagnostic};
+    let Some(rom) = common::vanilla() else { return };
+    // Replace the NMI with a synthetic unsupported read and a valid return.
+    // Work on an in-memory copy; no original ROM bytes are changed on disk.
+    let nmi = SnesAddr::new(rom.read_u16(SnesAddr::new(0x00FFEA)).unwrap() as u32);
+    let offset = rom.pc(nmi).unwrap().as_usize();
+    let mut data = rom.data().to_vec();
+    data[offset..offset + 4].copy_from_slice(&[0xAD, 0x37, 0x21, 0x40]);
+    let modified = Rom::from_bytes(data).unwrap();
+    let rendered = render::render_level(&modified, 0x105, Default::default()).unwrap();
+    let reports: Vec<_> = rendered
+        .diagnostics
+        .iter()
+        .filter_map(|d| match d {
+            Diagnostic::Unsupported(report) => Some(report),
+            _ => None,
+        })
+        .collect();
+    // Both loading (player frames) and sprite capture run the handler.
+    assert_eq!(reports.len(), 2);
+    for report in reports {
+        assert!(
+            report
+                .accesses
+                .iter()
+                .any(|a| a.address == 0x2137 && a.kind == AccessKind::Read && a.count > 0)
+        );
+    }
 }

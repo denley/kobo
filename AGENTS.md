@@ -111,6 +111,16 @@ Early stage: roadmap step 1 is in progress.
   (`LevelLayers::draw_map16` and `draw_tile_ref`, styled by a `LayerStyle`), and
   `LevelLayers::compose` applies screen designation, colour math, and a fixed screen's
   `video::Window`. A boss arena is drawn into `LevelLayers` like any level.
+- `kobo_core::operation::Operation` is the handle a long operation runs under: an
+  instruction budget shared by both CPUs and every pass, cancellation, and a stage for
+  progress. The `_with_control` variants of `expand_level`, `capture_sprites`,
+  `render_level`, and `render_loaded` take one; cancellation and an exhausted budget fail
+  the operation rather than returning a partial picture.
+- `cpu::access::UnsupportedAccesses` is the bus's bounded report of hardware it does not
+  model and a picture may be missing something for; it reaches the caller as
+  `Diagnostic::Unsupported`. Accesses with nothing to model (open bus, read-only
+  registers, controllers) are counted as stubs on the bus, never reported: classify a new
+  register in `SmwBus::read_register` or `write_register` instead of letting it be reported.
 - `kobo_core::level::LevelMode` is the only place that says what a level mode means to the
   library (`layer2()`: background, horizontal or vertical objects, or none). Do not match on
   mode numbers anywhere else; what the ROM's own per-mode tables decide is read from RAM.

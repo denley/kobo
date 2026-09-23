@@ -7,6 +7,7 @@ use super::level_layers;
 use super::{LayerTiles, compose_level, draw_objects, draw_sprite_marker, draw_sprite_scene};
 use crate::expand::{self, Diagnostic, ExpandError, LoadedLevel};
 use crate::image::RgbImage;
+use crate::operation::{Operation, Stage};
 use crate::rom::Rom;
 use crate::sprites::{self, SpriteError};
 use crate::video::UndrawnSprite;
@@ -42,6 +43,8 @@ impl Default for RenderOptions {
 #[derive(Debug, Error)]
 pub enum RenderError {
     #[error(transparent)]
+    Operation(#[from] crate::operation::OperationError),
+    #[error(transparent)]
     Expand(#[from] ExpandError),
     #[error(transparent)]
     Sprites(#[from] SpriteError),
@@ -63,8 +66,30 @@ pub fn render_level(
     level: u16,
     options: RenderOptions,
 ) -> Result<LevelRender, RenderError> {
-    let level = expand::expand_level(rom, level)?;
-    let (image, scene_diagnostics) = render_loaded(rom, &level, options)?;
+    render_controlled(rom, level, options, None)
+}
+
+/// Like [`render_level`], with one control shared by loading, sprite capture,
+/// and both CPUs. Cancellation and exhausted budgets fail the operation;
+/// they never return a successful but partial image. Poll the handle from
+/// another thread for progress. Pixel composition checks at phase boundaries.
+pub fn render_level_with_control(
+    rom: &Rom,
+    level: u16,
+    options: RenderOptions,
+    operation: &Operation,
+) -> Result<LevelRender, RenderError> {
+    render_controlled(rom, level, options, Some(operation))
+}
+
+fn render_controlled(
+    rom: &Rom,
+    level: u16,
+    options: RenderOptions,
+    operation: Option<&Operation>,
+) -> Result<LevelRender, RenderError> {
+    let level = expand::expand_controlled(rom, level, false, operation)?.0;
+    let (image, scene_diagnostics) = loaded_controlled(rom, &level, options, operation)?;
     let mut diagnostics = level.diagnostics.clone();
     diagnostics.extend(scene_diagnostics);
     Ok(LevelRender {
@@ -84,6 +109,28 @@ pub fn render_loaded(
     level: &LoadedLevel,
     options: RenderOptions,
 ) -> Result<(RgbImage, Vec<Diagnostic>), RenderError> {
+    loaded_controlled(rom, level, options, None)
+}
+
+/// Renders a loaded level with cancellation, progress, and an instruction budget.
+pub fn render_loaded_with_control(
+    rom: &Rom,
+    level: &LoadedLevel,
+    options: RenderOptions,
+    operation: &Operation,
+) -> Result<(RgbImage, Vec<Diagnostic>), RenderError> {
+    loaded_controlled(rom, level, options, Some(operation))
+}
+
+fn loaded_controlled(
+    rom: &Rom,
+    level: &LoadedLevel,
+    options: RenderOptions,
+    operation: Option<&Operation>,
+) -> Result<(RgbImage, Vec<Diagnostic>), RenderError> {
+    if let Some(op) = operation {
+        op.check()?;
+    }
     let video = &level.video;
     let mut layers = level_layers(level, &LayerTiles::from_vram(&video.vram));
     let mut markers: Vec<UndrawnSprite> = Vec::new();
@@ -100,7 +147,7 @@ pub fn render_loaded(
                 }
             }));
         } else {
-            let scene = expand::capture_sprites(rom, level, &list)?;
+            let scene = expand::capture_controlled(rom, level, &list, operation)?;
             draw_sprite_scene(
                 &mut layers,
                 &scene,
@@ -121,9 +168,15 @@ pub fn render_loaded(
             &video.vram,
         );
     }
+    if let Some(op) = operation {
+        op.stage(Stage::Composing)?;
+    }
     let mut image = compose_level(level, &layers, &video.palette());
     for UndrawnSprite { x, y, id } in markers {
         draw_sprite_marker(&mut image, x as u32 * 16, y as u32 * 16, id, &video.vram);
+    }
+    if let Some(op) = operation {
+        op.stage(Stage::Finished)?;
     }
     Ok((image, diagnostics))
 }

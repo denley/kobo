@@ -12,6 +12,7 @@ pub mod gfx;
 pub mod image;
 pub mod level;
 pub mod map16;
+pub mod operation;
 pub mod palette;
 pub mod ram;
 pub mod render;

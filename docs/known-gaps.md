@@ -42,7 +42,9 @@ What a rendered level does not reproduce, and what the tooling does not handle.
   sprites and player are drawn, but no frame of game mode `$14` is played.
 - HDMA is not run, so whatever a hack changes by scanline is missing: a gradient sky
   (Luminescent level `148` writes the fixed colour per line) comes out as the one colour the
-  level's back area has.
+  level's back area has. A level that enables HDMA, or touches other hardware the bus
+  does not model, says so in a render warning (`Diagnostic::Unsupported`); hardware with
+  nothing to model, such as a probe of open bus, is not reported.
 - The GFX tooling refuses ROMs their authors locked (`GfxError::Locked`, see
   [lunar-magic.md](lunar-magic.md)): their pointer tables are not addresses. Levels are
   unaffected, since the ROM's own decompression runs for them. There is no LC_LZ2 or
