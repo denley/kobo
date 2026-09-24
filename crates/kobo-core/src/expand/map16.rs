@@ -31,10 +31,11 @@ fn bg_map16_base(machine: &mut Machine) -> Result<(u32, usize), ExpandError> {
             .limit(LOOKUP_STEP_LIMIT),
     )?;
     let ram = &machine.bus.ram;
+    // A slot the hack never gave a background (Grand Poo World 2 `09F`,
+    // an unused level) gets a null pointer, and the upload reads its
+    // definitions from wherever that points, as the picture shows:
+    // work RAM at bank 0. So does this.
     let base = ram.u24(ram::BG_MAP16_BASE);
-    if base == 0 || base == 0xFF_FFFF {
-        return Err(ExpandError::MissingBackgroundTable(machine.level));
-    }
     let len = ram.u16(ram::BG_SCREEN_LEN) as usize;
     if len != SCREEN_LEN && len != LM_TALL_SCREEN_LEN {
         return Err(ExpandError::BackgroundLayout {

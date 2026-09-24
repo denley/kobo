@@ -31,7 +31,8 @@ use crate::ram::{self, Ram};
 use crate::rom::Rom;
 use crate::sprites::{SpriteEntry, SpriteList};
 use crate::video::{
-    Character, DynamicObjects, OBJECT_CHARACTER_LEN, SpriteObject, SpriteScene, UndrawnSprite,
+    CapturedSprite, Character, DynamicObjects, OBJECT_CHARACTER_LEN, SpriteObject, SpriteScene,
+    UndrawnSprite,
 };
 
 /// Most frames a sprite pass runs waiting for the sprite to initialise.
@@ -177,7 +178,10 @@ impl LevelLoop<'_> {
 
     /// Mario does not interact with tiles (parked inside a wall he would
     /// be crushed, and his death locks every sprite), so he is put back
-    /// before every frame instead of being left to fall.
+    /// before every frame instead of being left to fall. At the level's
+    /// left edge this puts him on screen `$FF`, where the game never has
+    /// him; keeping him inside the level instead puts him on the screen,
+    /// and his objects into the capture (vanilla `117`).
     fn park_player(&mut self) {
         let (x, y) = (self.camera.0 - 64, self.camera.1 + SCREEN_H / 2 - 16);
         let ram = self.ram();
@@ -292,7 +296,11 @@ pub(crate) fn capture_controlled(
     // Columns go in camera order, so the scene does not depend on the
     // order of the level's sprite list.
     let mut columns: BTreeMap<(i32, i32), Vec<&SpriteEntry>> = BTreeMap::new();
-    for entry in &list.sprites {
+    // An entry outside the level (Lunar Magic keeps what a hack left on
+    // screens past its width) has no column the camera can reach, and
+    // the ROM's loader has never been asked for one: the level's own
+    // data ends where it finds sprites there.
+    for entry in list.sprites.iter().filter(|entry| capture.inside(entry)) {
         columns
             .entry(capture.loader_camera(entry))
             .or_default()
@@ -407,6 +415,12 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
         (x as i32 * 16, y as i32 * 16)
     }
 
+    /// Whether the entry's position is inside the level.
+    fn inside(&self, entry: &SpriteEntry) -> bool {
+        let (x, y) = self.entry_position(entry);
+        x < self.bounds.width && y < self.bounds.height
+    }
+
     /// Camera position whose loading column is the entry's, keeping the
     /// sprite inside the screen on the other axis.
     fn loader_camera(&self, entry: &SpriteEntry) -> (i32, i32) {
@@ -453,12 +467,25 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
 
     /// Adds what a pass drew from `camera` to the scene, in level
     /// coordinates: with the level's objects, or as a capture of its own
-    /// if the pass uploaded characters for it.
-    fn keep(&mut self, camera: (i32, i32), drawn: Drawn) {
-        let objects: Vec<_> = drawn
+    /// if the pass uploaded characters for it. A pass for one entry
+    /// (`entry`: its sprite number and tile position) is also kept as
+    /// that entry's capture.
+    fn keep(&mut self, camera: (i32, i32), drawn: Drawn, entry: Option<(u8, (i32, i32))>) {
+        let translated: Vec<_> = drawn
             .objects
             .iter()
             .map(|object| object.translated(camera.0, camera.1))
+            .collect();
+        if let Some((id, (x, y))) = entry {
+            self.scene.captures.push(CapturedSprite {
+                x,
+                y,
+                id,
+                objects: translated.clone(),
+            });
+        }
+        let objects: Vec<_> = translated
+            .into_iter()
             .filter(|object| self.seen.insert(*object))
             .collect();
         if drawn.characters.is_empty() {
@@ -660,7 +687,7 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
             Drawn::default()
         });
         let nothing = drawn.objects.is_empty();
-        self.keep(self.level_loop.camera, drawn);
+        self.keep(self.level_loop.camera, drawn, Some((id, tile)));
         if nothing {
             self.scene.undrawn.push(UndrawnSprite {
                 x: tile.0.max(0) as usize,
@@ -752,7 +779,7 @@ impl<'a, 'r> SpriteCapture<'a, 'r> {
         }
         let drawn = Drawn::own(&self.level_loop, objects, &level_draws);
         let nothing = drawn.objects.is_empty();
-        self.keep(camera, drawn);
+        self.keep(camera, drawn, None);
         if nothing && !riding {
             self.scene
                 .undrawn

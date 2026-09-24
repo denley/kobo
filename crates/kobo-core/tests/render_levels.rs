@@ -457,12 +457,10 @@ fn grand_poo_world_background_validation() {
         if rom.sha1_hex() != "390583d5faa0cc02e0c4f414f7638228661b2dc9" {
             continue;
         }
-        assert!(matches!(
-            kobo_core::expand::expand_level(&rom, 0x09F),
-            Err(kobo_core::expand::ExpandError::MissingBackgroundTable(
-                0x09F
-            ))
-        ));
+        // An unused slot with no background table of its own: the upload
+        // reads definitions from bank 0, as the game does.
+        let unused = kobo_core::expand::expand_level(&rom, 0x09F).unwrap();
+        assert!(unused.tiles.layer2_tilemap.is_some());
         let objects = kobo_core::expand::expand_level(&rom, 0x00E).unwrap();
         assert!(objects.tiles.layer2_tilemap.is_none());
         let background = kobo_core::expand::expand_level(&rom, 0x046).unwrap();

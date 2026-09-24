@@ -66,6 +66,4 @@ pub enum ExpandError {
     },
     #[error("level {level:03X}: unknown background layout, {len:#x} bytes per screen")]
     BackgroundLayout { level: u16, len: usize },
-    #[error("level {0:03X}: Lunar Magic background Map16 table pointer is null")]
-    MissingBackgroundTable(u16),
 }

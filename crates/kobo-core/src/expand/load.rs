@@ -1,6 +1,6 @@
 //! Loading a level by running the ROM's own loader, phase by phase.
 
-use super::machine::{Call, Machine};
+use super::machine::{Call, Interrupt, Machine};
 use super::tiles::{
     GRID_LEN, LAYER2_TILEMAP_LEN, LevelTiles, SCREEN_COLS, SCREEN_LEN, SCREEN_ROWS,
 };
@@ -67,11 +67,8 @@ pub(crate) fn expand_controlled(
     if let Some(op) = operation {
         op.stage(Stage::Preparing)?;
     }
-    prepare_level(&mut machine)?;
+    let [main, sub] = prepare_level(&mut machine)?;
     let trace = machine.cpu.trace_data_reads.take();
-    // Before any drawing pass: a Mode 7 arena's IRQ handler changes the
-    // layers between the status bar and the playfield.
-    let [main, sub] = machine.bus.screen_layers;
 
     let boss = boss::capture_boss_scene(&mut machine)?;
     let ram = &machine.bus.ram;
@@ -203,8 +200,12 @@ fn load_level(machine: &mut Machine) -> Result<Expanded, ExpandError> {
     ram.set_u8(ram::EXIT_TABLE_LOW, lo);
     ram.set_u8(ram::EXIT_TABLE_HIGH, 0x04 | hi);
     ram.set_u8(ram::OW_PLAYER_SUBMAP, hi);
-    // Run each phase with the game mode the real machine would be in.
+    // Run each phase with the game mode the real machine would be in,
+    // and the vertical blank between them: game mode `$10` ends by
+    // setting `$11`, so the console runs the NMI once with the mode at
+    // `$11` before the frame that loads the level.
     ram.set_u8(ram::GAME_MODE, 0x11);
+    end_frame(machine)?;
     machine.call(Call::jsl(routines::LOAD_HEADER_POINTERS))?;
     // Game mode $11 seeds the camera update's previous positions from the
     // entrance, sets the player up, and places the layers for the entry
@@ -227,7 +228,7 @@ fn load_level(machine: &mut Machine) -> Result<Expanded, ExpandError> {
     machine.call(Call::jsl(routines::LOAD_LEVEL_DATA))?;
     let ram = &machine.bus.ram;
     let vertical = ram.u8(ram::SCREEN_MODE) & 0x01 != 0;
-    Ok(Expanded {
+    let expanded = Expanded {
         // Boss preparation reuses the screen-count byte (level $1C7 ends
         // with $FF). Read the length while it still describes the grid.
         screens: ram.u8(ram::SCREENS) as usize,
@@ -244,24 +245,50 @@ fn load_level(machine: &mut Machine) -> Result<Expanded, ExpandError> {
                     ram.bytes(ram::LAYER2_TILEMAP_HIGH, LAYER2_TILEMAP_LEN),
                 )
             }),
-    })
+    };
+    // Game mode `$11` ends by moving on to `$12`; then comes the
+    // vertical blank that ends the loading frame.
+    machine.bus.ram.set_u8(ram::GAME_MODE, 0x12);
+    end_frame(machine)?;
+    Ok(expanded)
+}
+
+/// The vertical blank at the end of a game-mode frame: the ROM's whole
+/// NMI handler, as the console runs it between two passes of the game
+/// loop, with the lag flag clear so that it does its uploads. Code a
+/// hack hooks into the handler runs here with the game mode the frame
+/// left, which is where some of it initialises what its later frames
+/// use (QLDC 2021 `70_DPBOX` empties its DMA queues under mode `$11`).
+fn end_frame(machine: &mut Machine) -> Result<(), ExpandError> {
+    machine.bus.ram.set_u8(ram::LAG_FLAG, 0);
+    machine.interrupt(Interrupt::Nmi)
 }
 
 /// All of game mode `$12`: this is what draws boss arenas, sets up layer
 /// 3, and uploads GFX and palettes. Then the camera update the level loop
 /// starts with.
-fn prepare_level(machine: &mut Machine) -> Result<(), ExpandError> {
+fn prepare_level(machine: &mut Machine) -> Result<[u8; 2], ExpandError> {
     let ram = &mut machine.bus.ram;
     ram.fill(ram::LOADED_GFX_FILES, ram::LOADED_GFX_FILES_LEN, 0xFF);
     machine.call(Call::jsr(routines::DECOMPRESS_PLAYER_GFX))?;
-    machine.bus.ram.set_u8(ram::GAME_MODE, 0x12);
     machine.call(Call::jsr(routines::PREPARE_LEVEL))?;
+    // The level's own screen designation is what preparation set
+    // (`ScreenSettings`); a Mode 7 arena's handlers change the layers
+    // between the status bar and the playfield, and a hack's handlers
+    // may write a band's designation of their own (Super Hark Bros 2
+    // puts layer 3 on the main screen from a flag its NMI reads out of
+    // a queue it is also using that byte for, which a frame later says
+    // otherwise). So read it before the frame's vertical blank.
+    let screen_layers = machine.bus.screen_layers;
+    // The vertical blank that ends the preparation frame.
+    end_frame(machine)?;
     // The level loop updates the camera before anything is shown, which
     // is what settles the layer 2 position: code a hack runs during
     // preparation may have moved it (Super Hark Bros 2 level `00A` leaves
     // it at `$5D`; the update derives `$C0` from the camera again, which
     // is where the game had uploaded the background for).
-    machine.call(Call::jsl(routines::UPDATE_CAMERA))
+    machine.call(Call::jsl(routines::UPDATE_CAMERA))?;
+    Ok(screen_layers)
 }
 
 /// Rows per screen of the loaded level. Lunar Magic 3's expanded level

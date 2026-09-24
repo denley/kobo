@@ -310,12 +310,29 @@ pub struct UndrawnSprite {
     pub id: u8,
 }
 
+/// What one level sprite entry drew, for telling its part of the picture
+/// from the rest: the objects are the same ones that are in the scene's
+/// `objects` or `dynamic`, in level coordinates.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CapturedSprite {
+    /// Level tile position of the entry.
+    pub x: i32,
+    pub y: i32,
+    /// Sprite number.
+    pub id: u8,
+    pub objects: Vec<SpriteObject>,
+}
+
 /// The sprites of an ordinary level as the game draws them on their first
 /// frame, front to back, plus the level sprite entries that produced no
 /// graphics at all (generators, scroll commands, and the like).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SpriteScene {
     pub objects: Vec<SpriteObject>,
+    /// The objects again, entry by entry, for the entries that took a
+    /// sprite slot; what the slotless pass drew (shooters, generators,
+    /// cluster sprites) is in `objects` only.
+    pub captures: Vec<CapturedSprite>,
     /// Captures drawn with characters of their own, behind `objects`.
     pub dynamic: Vec<DynamicObjects>,
     /// `OBSEL`: object sizes and character base.

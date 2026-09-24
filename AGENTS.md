@@ -79,7 +79,9 @@ Early stage: roadmap step 1 is in progress.
 - `kobo_core::cpu` has one 65816 core and two instances of it. `Cpu::run` takes IRQs from
   the `Bus` and hands over to `Bus::wait` when the CPU stops to wait (`WAI`, or a loop that
   changes nothing); `SmwBus` gives the SA-1 its turn there, through `Sa1View`, the bus as
-  the SA-1 sees it. A wait nothing answers is `CpuError::Waiting`, not 200 million steps.
+  the SA-1 sees it, and failing that the NMI `Bus::vblank` offers, a bounded number of
+  times. A wait nothing answers is `CpuError::Waiting`, not 200 million steps.
+  `KOBO_CPU_TRACE=<n>` prints the last `n` instructions before a routine fails.
 - `kobo_core::expand` runs ROM code. `machine` owns the CPU, the bus, and `Call` (the register
   state a routine is entered with; every call starts from reset registers, and
   `try_call_to` stops one at an address with the call still open); `Machine::interrupt`
@@ -147,6 +149,7 @@ cargo run -- level sprites|map16|wram|reads  # sprite list, resolved Map16, RAM 
 cargo run -- addr '$05E000' [--sa1]          # SNES <-> file offset
 cargo run --release --example sprite_census -- rom.smc  # sprite numbers that draw nothing, by level
 cargo run --release --example render_hashes -- rom.smc  # a hash per level picture, to diff across a change
+cargo run --release --example sprite_oracle -- rom.smc dumpdir...  # per-sprite scores against emulator frames
 cargo run --release --example fuzz_inputs -- 10000      # seeded parser mutation cases, no ROM needed
 ```
 

@@ -102,6 +102,14 @@ pub(super) enum Interrupt {
     TimerIrq,
 }
 
+/// `KOBO_CPU_TRACE`: how many instructions to keep for the trace that
+/// [`Machine::dump_history`] prints when a routine fails (64 if it is
+/// set to nothing a number can be made of).
+fn trace_length() -> Option<usize> {
+    let value = std::env::var("KOBO_CPU_TRACE").ok()?;
+    Some(value.parse().unwrap_or(64))
+}
+
 /// A CPU on a bus, loading or running one level.
 pub(super) struct Machine<'r> {
     pub cpu: Cpu,
@@ -111,10 +119,38 @@ pub(super) struct Machine<'r> {
 
 impl<'r> Machine<'r> {
     pub fn new(rom: &'r Rom, level: u16) -> Self {
+        let mut cpu = Cpu::new();
+        if let Some(len) = trace_length() {
+            cpu.keep_history(len);
+        }
         Self {
-            cpu: Cpu::new(),
+            cpu,
             bus: SmwBus::new(rom),
             level,
+        }
+    }
+
+    /// Debugging aid: with `KOBO_CPU_TRACE` set, prints the instructions
+    /// that led to `error` on standard error.
+    fn dump_history(&self, error: &CpuError) {
+        let Some(history) = &self.cpu.history else {
+            return;
+        };
+        eprintln!("--- {error}: last {} instructions ---", history.len());
+        for e in history.iter() {
+            eprintln!(
+                "${:06X}: {:02X}  A={:04X} X={:04X} Y={:04X} SP={:04X} DP={:04X} DB={:02X} P={:02X}{}",
+                e.addr,
+                e.opcode,
+                e.a,
+                e.x,
+                e.y,
+                e.sp,
+                e.dp,
+                e.db,
+                e.p,
+                if e.emulation { " E" } else { "" }
+            );
         }
     }
 
@@ -173,11 +209,13 @@ impl<'r> Machine<'r> {
 
     /// An SA-1 that has stopped is why the S-CPU gave up waiting for it.
     fn cause(&self, error: CpuError) -> CpuError {
-        if matches!(error, CpuError::Operation(_)) {
+        let error = if matches!(error, CpuError::Operation(_)) {
             error
         } else {
             self.bus.sa1_fault().unwrap_or(error)
-        }
+        };
+        self.dump_history(&error);
+        error
     }
 
     /// [`Machine::try_call`] for routines the level cannot load without.

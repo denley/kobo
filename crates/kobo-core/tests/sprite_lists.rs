@@ -37,7 +37,13 @@ fn check_rom(name: &str, rom: &Rom) -> (usize, usize) {
     for level in 0..0x200u16 {
         let loaded = match expand::expand_level(rom, level) {
             Ok(t) => t,
-            Err(ExpandError::MissingBackgroundTable(_)) => continue,
+            // A level the hack itself cannot load (34_idol's object
+            // pre-scan runs over bank 0 in nine of its slots) has no
+            // pointer to check.
+            Err(ExpandError::Cpu { .. }) => {
+                eprintln!("{name} level {level:03X}: the ROM cannot load it, skipped");
+                continue;
+            }
             Err(e) => panic!("{name} level {level:03X}: {e}"),
         };
         let start = loaded.sprite_data_ptr();

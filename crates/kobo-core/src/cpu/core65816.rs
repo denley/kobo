@@ -34,6 +34,13 @@ pub trait Bus {
     fn wait(&mut self) -> bool {
         false
     }
+
+    /// The CPU is waiting and nothing on the bus answered: the console
+    /// would answer a wait for the vertical blank with the NMI. The
+    /// native-mode vector to take, if the bus has one to give.
+    fn vblank(&mut self) -> Option<u16> {
+        None
+    }
 }
 
 /// Processor status bits.
@@ -68,6 +75,21 @@ pub enum CpuError {
     Sa1(Box<CpuError>),
     #[error("instruction limit of {limit} exceeded at ${pb:02X}:{pc:04X}")]
     Limit { limit: u64, pb: u8, pc: u16 },
+}
+
+/// One executed instruction and the registers it was executed with.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Executed {
+    pub addr: u32,
+    pub opcode: u8,
+    pub a: u16,
+    pub x: u16,
+    pub y: u16,
+    pub sp: u16,
+    pub dp: u16,
+    pub db: u8,
+    pub p: u8,
+    pub emulation: bool,
 }
 
 /// How [`Cpu::run`] ended.
@@ -107,6 +129,10 @@ pub struct Cpu {
     /// When set, every data read (not instruction fetch) is recorded as
     /// (address of the instruction, address read).
     pub trace_data_reads: Option<Vec<(u32, u32)>>,
+    /// When set, the last instructions executed, oldest first, for
+    /// tracing what led a routine somewhere ([`Cpu::keep_history`]).
+    pub history: Option<std::collections::VecDeque<Executed>>,
+    history_len: usize,
     in_fetch: bool,
     op_addr: u32,
     /// Bytes written so far.
@@ -133,6 +159,11 @@ impl Default for Cpu {
 /// the memory helpers strip it.
 const WRAPS_IN_BANK: u32 = 1 << 24;
 
+/// How many vertical blanks a single run answers waits with before
+/// giving the wait up as one nothing is going to end: a handler that
+/// changes nothing the loop looks at would otherwise be run forever.
+const WAIT_VBLANK_LIMIT: u32 = 16;
+
 /// Sentinel return address used by [`Cpu::call`].
 const RETURN_PB: u8 = 0xFF;
 const RETURN_PC: u16 = 0xFFFF;
@@ -154,6 +185,8 @@ impl Cpu {
             emulation: false,
             steps: 0,
             trace_data_reads: None,
+            history: None,
+            history_len: 0,
             in_fetch: false,
             op_addr: 0,
             writes: 0,
@@ -169,9 +202,19 @@ impl Cpu {
     pub fn reset_registers(&mut self) {
         let steps = self.steps;
         let trace = self.trace_data_reads.take();
+        let history = self.history.take();
+        let history_len = self.history_len;
         *self = Self::new();
         self.steps = steps;
         self.trace_data_reads = trace;
+        self.history = history;
+        self.history_len = history_len;
+    }
+
+    /// Keeps the last `len` instructions executed in [`Cpu::history`].
+    pub fn keep_history(&mut self, len: usize) {
+        self.history = Some(std::collections::VecDeque::with_capacity(len));
+        self.history_len = len;
     }
 
     // --- Flag helpers -------------------------------------------------
@@ -711,6 +754,23 @@ impl Cpu {
         self.op_addr = self.pc_addr();
         let opcode = self.fetch8(bus);
         self.steps += 1;
+        if let Some(history) = &mut self.history {
+            if history.len() == self.history_len {
+                history.pop_front();
+            }
+            history.push_back(Executed {
+                addr: self.op_addr,
+                opcode,
+                a: self.a,
+                x: self.x,
+                y: self.y,
+                sp: self.sp,
+                dp: self.dp,
+                db: self.db,
+                p: self.p,
+                emulation: self.emulation,
+            });
+        }
         match opcode {
             // ORA
             0x01 => {
@@ -1904,8 +1964,10 @@ impl Cpu {
     /// Runs until `done`, taking IRQs from the bus. A CPU that stops to
     /// wait (`WAI`, or a loop that polls memory without changing
     /// anything) hands over to [`Bus::wait`] and carries on if that got
-    /// anywhere; otherwise the run ends there, to be resumed by calling
-    /// this again.
+    /// anywhere, or else takes the NMI [`Bus::vblank`] offers, as the
+    /// console ends a wait for the vertical blank (up to
+    /// [`WAIT_VBLANK_LIMIT`] times in one run); otherwise the run ends
+    /// there, to be resumed by calling this again.
     pub fn run(
         &mut self,
         bus: &mut impl Bus,
@@ -1913,6 +1975,7 @@ impl Cpu {
         done: impl Fn(&Self) -> bool,
     ) -> Result<Run, CpuError> {
         let start = self.steps;
+        let mut vblanks = 0;
         loop {
             // Before `done`: an IRQ raised as the routine returned is
             // still work it caused.
@@ -1932,11 +1995,30 @@ impl Cpu {
             self.step(bus)?;
             if self.waiting {
                 self.waiting = false;
-                if !bus.wait() {
-                    return Ok(Run::Waiting);
+                if bus.wait() {
+                    continue;
+                }
+                match bus.vblank() {
+                    Some(vector) if !self.emulation && vblanks < WAIT_VBLANK_LIMIT => {
+                        vblanks += 1;
+                        self.nmi(bus, vector);
+                    }
+                    _ => return Ok(Run::Waiting),
                 }
             }
         }
+    }
+
+    /// Takes an NMI in native mode: pushes the return frame and continues
+    /// at `vector` with interrupts disabled.
+    fn nmi(&mut self, bus: &mut impl Bus, vector: u16) {
+        self.push8(bus, self.pb);
+        self.push16(bus, self.pc);
+        self.push8(bus, self.p);
+        self.p = (self.p | Flags::I) & !Flags::D;
+        self.pb = 0;
+        self.pc = vector;
+        self.last_loop = None;
     }
 
     /// Bytes written so far: a measure of whether a run got anywhere.
@@ -2071,6 +2153,44 @@ mod tests {
         fn write(&mut self, addr: u32, value: u8) {
             self.0[addr as usize] = value;
         }
+    }
+
+    /// Flat RAM whose vertical blank is an NMI handler at `$9000`.
+    struct Console(Ram);
+
+    impl Bus for Console {
+        fn read(&mut self, addr: u32) -> u8 {
+            self.0.read(addr)
+        }
+        fn write(&mut self, addr: u32, value: u8) {
+            self.0.write(addr, value)
+        }
+        fn vblank(&mut self) -> Option<u16> {
+            Some(0x9000)
+        }
+    }
+
+    #[test]
+    fn a_wait_for_the_vertical_blank_takes_the_nmi() {
+        let mut bus = Console(Ram(vec![0; 1 << 24]));
+        // Wait for the NMI to set $10, then count the frame and return.
+        let code = [0xA5, 0x10, 0xF0, 0xFC, 0x64, 0x10, 0xE6, 0x13, 0x6B];
+        bus.0.0[0x8000..0x8000 + code.len()].copy_from_slice(&code);
+        // The handler: INC $10 ; RTI.
+        bus.0.0[0x9000..0x9003].copy_from_slice(&[0xE6, 0x10, 0x40]);
+        let mut cpu = Cpu::new();
+        cpu.call(&mut bus, 0x8000, 10_000).unwrap();
+        assert_eq!(bus.0.0[0x13], 1);
+        assert_eq!(bus.0.0[0x10], 0);
+        assert_eq!(cpu.sp, 0x01FF);
+        // A handler that changes nothing the loop looks at is not run
+        // forever: the wait is given up after a few blanks.
+        bus.0.0[0x9000] = 0xEA; // NOP
+        bus.0.0[0x9001] = 0xEA;
+        bus.0.0[0x9002] = 0x40;
+        let mut cpu = Cpu::new();
+        let error = cpu.call(&mut bus, 0x8000, 10_000).unwrap_err();
+        assert!(matches!(error, CpuError::Waiting { pb: 0, pc: 0x8000 }));
     }
 
     fn run(code: &[u8], setup: impl FnOnce(&mut Cpu, &mut Ram)) -> (Cpu, Ram) {

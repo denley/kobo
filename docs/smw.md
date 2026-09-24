@@ -85,7 +85,19 @@ are SMWDisX's.
   zero rows 16-26 of the layer 2 screens), and uploads GFX, palettes, and initial tilemaps.
   `$0100` is set to `$11` and then `$12` on the way: Lunar Magic's replacement for the initial
   tilemap upload (`CODE_05809E` jumps to `$1FB1E8`) checks the game mode and uploads nothing
-  under a stale value.
+  under a stale value. The console's vertical blanks between those frames run too, each the
+  ROM's whole NMI handler with the lag flag `$10` clear: once with the mode at `$11` (game
+  mode `$10` ends by setting it, and `GM11LoadLevel` keeps NMIs off for its own frame),
+  once after `LoadLevel` with the mode at `$12` (`GM11LoadLevel` increments it before
+  `Mode04Finish` turns NMIs back on), and once after `GM12PrepLevel` with it at `$13`. Code
+  a hack hooks into the handler sets up and consumes its queues there (QLDC 2021 `70_DPBOX`
+  empties a DMA queue under mode `$11` and runs it under `$12`; without the first, a stale
+  count DMAs 64 KiB over bank 0), and Lunar Magic's tilemap uploads for some levels only
+  reach VRAM through the third (Akogare2 `0F8`, Luminescent `0F8`). The level's screen
+  designation (`$212C`/`$212D`) is read before that third blank, as `GM12PrepLevel`'s
+  `ScreenSettings` left it: vanilla's handlers never write it, a Mode 7 arena's write a
+  band's, and Super Hark Bros 2's NMI writes one from a flag that shares a byte with a queue
+  it is also filling, which the frame the emulator shows has clear again.
   The bus captures VRAM/CGRAM port and DMA writes, so rendering uses what the game uploaded:
   ExGFX, custom palettes, and animated tiles come for free. VRAM matches the emulator except
   animated slots (frame-dependent) and tilemap areas filled on later frames; animated
@@ -102,7 +114,15 @@ are SMWDisX's.
   overwrites it (level `$1C7` ends with `$FF`). `LevelTiles::size()` also bounds dimensions
   to complete screens in the captured grid planes.
 - The bus models the CPU multiply/divide registers (`$4202`-`$4206`, `$4214`-`$4217`);
-  sprite code uses them constantly.
+  sprite code uses them constantly. The DMA channel registers read back (`$43x0`-`$43x6`; a
+  transfer leaves its size at zero and its source past the last byte). A LoROM cartridge's
+  save RAM is at `$70`-`$7D` and `$F0`-`$FF` below `$8000`, as much of it as the header
+  declares, mirrored across the window, and starts zeroed like the oracle's; QLDC 2021
+  `77_NerDose` builds a routine there and calls it (`$70210E`).
+- A routine that stops to poll memory for something the console's vertical blank would
+  bring (`LDA $10 : BEQ -`, a frame wait inside sprite code) gets the ROM's NMI handler
+  then and there, as the console gives it, up to 16 times in one run (`Cpu::run`,
+  `Bus::vblank`); a wait the handler does not end is given up as one nothing will.
 
 ## The tile grid and Map16
 

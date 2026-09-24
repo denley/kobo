@@ -10,7 +10,7 @@ use crate::image::RgbImage;
 use crate::operation::{Operation, Stage};
 use crate::rom::Rom;
 use crate::sprites::{self, SpriteError};
-use crate::video::UndrawnSprite;
+use crate::video::{SpriteScene, UndrawnSprite};
 
 /// How a level's sprites are shown.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -55,6 +55,9 @@ pub enum RenderError {
 pub struct LevelRender {
     pub image: RgbImage,
     pub level: LoadedLevel,
+    /// The sprites drawn into the picture, when they were
+    /// ([`Sprites::Drawn`] in an ordinary level).
+    pub sprites: Option<SpriteScene>,
     /// Every pass the CPU core gave up on, from loading and from the
     /// sprite capture; see [`expand::summarize`].
     pub diagnostics: Vec<Diagnostic>,
@@ -89,12 +92,13 @@ fn render_controlled(
     operation: Option<&Operation>,
 ) -> Result<LevelRender, RenderError> {
     let level = expand::expand_controlled(rom, level, false, operation)?.0;
-    let (image, scene_diagnostics) = loaded_controlled(rom, &level, options, operation)?;
+    let (image, scene_diagnostics, sprites) = loaded_controlled(rom, &level, options, operation)?;
     let mut diagnostics = level.diagnostics.clone();
     diagnostics.extend(scene_diagnostics);
     Ok(LevelRender {
         image,
         level,
+        sprites,
         diagnostics,
     })
 }
@@ -109,7 +113,8 @@ pub fn render_loaded(
     level: &LoadedLevel,
     options: RenderOptions,
 ) -> Result<(RgbImage, Vec<Diagnostic>), RenderError> {
-    loaded_controlled(rom, level, options, None)
+    let (image, diagnostics, _) = loaded_controlled(rom, level, options, None)?;
+    Ok((image, diagnostics))
 }
 
 /// Renders a loaded level with cancellation, progress, and an instruction budget.
@@ -119,7 +124,8 @@ pub fn render_loaded_with_control(
     options: RenderOptions,
     operation: &Operation,
 ) -> Result<(RgbImage, Vec<Diagnostic>), RenderError> {
-    loaded_controlled(rom, level, options, Some(operation))
+    let (image, diagnostics, _) = loaded_controlled(rom, level, options, Some(operation))?;
+    Ok((image, diagnostics))
 }
 
 fn loaded_controlled(
@@ -127,7 +133,7 @@ fn loaded_controlled(
     level: &LoadedLevel,
     options: RenderOptions,
     operation: Option<&Operation>,
-) -> Result<(RgbImage, Vec<Diagnostic>), RenderError> {
+) -> Result<(RgbImage, Vec<Diagnostic>, Option<SpriteScene>), RenderError> {
     if let Some(op) = operation {
         op.check()?;
     }
@@ -135,6 +141,7 @@ fn loaded_controlled(
     let mut layers = level_layers(level, &LayerTiles::from_vram(&video.vram));
     let mut markers: Vec<UndrawnSprite> = Vec::new();
     let mut diagnostics = Vec::new();
+    let mut sprites = None;
     if options.sprites != Sprites::Hidden && level.scene.boss.is_none() {
         let list = sprites::read_sprites_at(rom, level.sprite_data_ptr())?;
         if options.sprites == Sprites::Markers {
@@ -154,8 +161,9 @@ fn loaded_controlled(
                 level.scene.layer2_offset(),
                 &video.vram,
             );
-            markers = scene.undrawn;
-            diagnostics = scene.diagnostics;
+            markers = scene.undrawn.clone();
+            diagnostics = scene.diagnostics.clone();
+            sprites = Some(scene);
         }
     }
     // The player's OAM slots follow most of the sprites', so he goes
@@ -178,5 +186,5 @@ fn loaded_controlled(
     if let Some(op) = operation {
         op.stage(Stage::Finished)?;
     }
-    Ok((image, diagnostics))
+    Ok((image, diagnostics, sprites))
 }

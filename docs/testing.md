@@ -20,6 +20,11 @@ how each oracle is produced, where its data lives, and what is known not to matc
   has thrown two Spinies by the end of preparation here and none in the emulator, for a
   reason not found. Dumps live in `~/.local/share/kobo/oracle/`
   and are never committed. `trace_writes.lua` logs who writes a RAM address, for debugging.
+  A level the game itself cannot load ends the script with `stuck in stage level (game
+  mode $xx)` and a garbage mode: that, with the same routine failing in `expand`, is how a
+  hack's own defect is told from a bug here (QLDC 2021 `34_idol`, nine slots). On the
+  `expand` side, `KOBO_CPU_TRACE=<n>` prints the last `n` S-CPU instructions, with
+  registers, before any routine fails, fatal or not.
   A full run of the vanilla ROM takes 20 minutes and an SA-1 ROM emulates slower; four
   runs of 128 levels each into separate directories, moved together afterwards, take a
   quarter of that.
@@ -76,6 +81,26 @@ how each oracle is produced, where its data lives, and what is known not to matc
   upload reading work RAM back out of VRAM, `TM` written past its mirror, a game loop in a
   FastROM bank ([lunar-magic.md](lunar-magic.md)), and layer 2 left wherever level-init
   code put it ([smw.md](smw.md)).
+- **Per-sprite comparison on hacks**: `examples/sprite_oracle.rs` takes a ROM and
+  directories of `KOBO_ORACLE_VIDEO=1` dumps of it, renders each level with sprites, and
+  scores the pixels each captured sprite entry's objects cover against the frame, where
+  the entry is on the emulator's screen, along with the whole visible picture; the final
+  table is per sprite number and extra bits, worst first. It exists to find a custom sprite
+  drawn with the wrong graphics, colours, or not at all, which scores far below one that has
+  merely animated or moved. Run on 2026-09-24 over 12 `dump_hack.sh` levels each of Akogare2,
+  Grand Poo World 2, Luminescent, Invictus, Super Hark Bros 2, and QLDC 2021 `70_DPBOX`,
+  `77_NerDose` and `44_Daizo Dee Von` (84 levels, 108 sprite scores; captures and
+  scores in `~/.local/share/kobo/oracle/sprite-video/`), every custom sprite that scored
+  under 85% was looked at side by side and found drawn as the emulator draws it, at its
+  first-frame position (Akogare2 `008`'s piranha plant is up its stem, NerDose `003`'s
+  mushrooms have fallen). The whole-picture scores under 85% are layer 2 parallax positions
+  (Akogare2 `11A`, GPW2 `107`, DPBOX `102`), an HDMA sky (Luminescent `154`), a player still
+  in his pipe in the frame (Invictus `152`, Luminescent `142`), and Invictus `030`'s layer 3
+  fog. NerDose `104` scores its info box (`B9`) at 0% because the emulator's frame masks the
+  main screen with a window where it and Mario stand (the dumped `windowMaskMain` has BG1,
+  BG3 and objects on): the object is in the dumped OAM where the capture puts it. Daizo's
+  capture got one level: the emulator stays in game mode `$14` on `026`, the cutscene level
+  whose sprite waits for a button ([known-gaps.md](known-gaps.md)).
 - Lunar Magic exports (hashes in `tests/fixtures/`) are the oracle for GFX, palette, and Map16.
 - `tests/render_levels.rs` checks that vanilla level `105`'s dragon coins use the
   ROM's flashing yellow palette after the NMI, even with sprites and Mario hidden.
@@ -110,9 +135,11 @@ how each oracle is produced, where its data lives, and what is known not to matc
   position one row either side: the upload comes before the level loop's first camera
   update, which settles layer 2 by a few pixels in some levels.
   A 2026-09-22 rerun also found Akogare2 levels `0F8` (1792/1920 words) and
-  `111` (21/2048 words) failing this tilemap check. Both reproduce at `9b69ab8`, before
-  the input hardening and operation control; the cause is not established. These are
-  failing checks, not exclusions added to the test.
+  `111` (21/2048 words) failing this tilemap check. Both reproduced at `9b69ab8`, before
+  the input hardening and operation control. `0F8` passes since the loader runs the ROM's
+  NMI at the frame boundaries (its picture was garbage without the upload the third
+  blank does); `111` still fails and its cause is not established. This is a failing
+  check, not an exclusion added to the test.
   Known exception in the corpus: `Smb2dx` (LM 1.63; 173 levels fail, its mode `$00`
   levels carry object layer 2 pointers), failing before the vertical-level checks were
   added. `Super Hark Bros 2` level `00A` used to fail with 896 of 2048 words: its

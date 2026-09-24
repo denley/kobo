@@ -49,6 +49,11 @@ pub struct SmwBus<'a> {
     /// Which VRAM bytes have been written since reset, so callers can
     /// tell uploaded data from the untouched zero fill.
     pub vram_written: Vec<bool>,
+    /// The cartridge's save RAM, as much as the header declares, in
+    /// LoROM banks `$70`-`$7D` and `$F0`-`$FF` below `$8000`, mirrored
+    /// as the chip is across that window. Empty on an SA-1 cartridge,
+    /// whose BW-RAM `Ram` holds, and where those banks map nothing.
+    pub sram: Vec<u8>,
     pub cgram: Vec<u8>,
     /// Object memory as the game's OAM upload last left it.
     pub oam: Vec<u8>,
@@ -142,6 +147,15 @@ pub struct SmwBus<'a> {
     pub trace_rom_reads: Option<Vec<u32>>,
 }
 
+/// Bytes of save RAM a LoROM cartridge declares, capped at the 512 KiB a
+/// header can mean rather than trusting a malformed one with more.
+fn sram_len(rom: &Rom) -> usize {
+    if rom.mapping() != crate::addr::Mapping::LoRom {
+        return 0;
+    }
+    rom.internal_header().sram_size().unwrap_or(0).min(0x8_0000)
+}
+
 impl<'a> SmwBus<'a> {
     pub fn new(rom: &'a Rom) -> Self {
         Self {
@@ -150,6 +164,7 @@ impl<'a> SmwBus<'a> {
             ram: Ram::new(RamMap::of(rom)),
             vram: vec![0; VRAM_LEN],
             vram_written: vec![false; VRAM_LEN],
+            sram: vec![0; sram_len(rom)],
             cgram: vec![0; CGRAM_LEN],
             oam: vec![0; OAM_LEN],
             oam_reload: 0,
@@ -194,6 +209,20 @@ impl<'a> SmwBus<'a> {
             unmapped_writes: 0,
             trace_rom_reads: None,
         }
+    }
+
+    /// Where `addr` falls in save RAM, if it is a LoROM save RAM address
+    /// and the cartridge has any.
+    fn sram_index(&self, addr: u32) -> Option<usize> {
+        if self.sram.is_empty() || addr & 0x8000 != 0 {
+            return None;
+        }
+        let bank = (addr >> 16) as u8;
+        if !matches!(bank, 0x70..=0x7D | 0xF0..=0xFF) {
+            return None;
+        }
+        let offset = (bank as usize & 0x0F) * 0x8000 + (addr as usize & 0x7FFF);
+        Some(offset % self.sram.len())
     }
 
     fn unsupported_access(&mut self, processor: Processor, address: u32, kind: AccessKind) {
@@ -347,6 +376,27 @@ impl<'a> SmwBus<'a> {
                 0
             }
             0x4211 => (std::mem::take(&mut self.timer_irq) as u8) << 7,
+            // The DMA channel registers read back what was written, or
+            // what a transfer left: the size counts down to zero and the
+            // source address ends past the last byte, which code that
+            // continues a transfer where the last one stopped reads.
+            0x4300..=0x437F => {
+                let ch = &self.dma[((reg >> 4) & 7) as usize];
+                match reg & 0x0F {
+                    0x0 => ch.control,
+                    0x1 => ch.dest,
+                    0x2 => ch.src as u8,
+                    0x3 => (ch.src >> 8) as u8,
+                    0x4 => (ch.src >> 16) as u8,
+                    0x5 => ch.size as u8,
+                    0x6 => (ch.size >> 8) as u8,
+                    // HDMA state, which is not run here.
+                    _ => {
+                        self.stubbed_reads += 1;
+                        0
+                    }
+                }
+            }
             0x4214 => self.quotient as u8,
             0x4215 => (self.quotient >> 8) as u8,
             0x4216 => self.product as u8,
@@ -661,6 +711,11 @@ impl Bus for SmwBus<'_> {
             // The S-CPU's DMA, reading characters out of a bitmap.
             return conversion.read(addr, |at| self.ram.read(at).unwrap_or(0));
         }
+        // Before work RAM: the low half of a save RAM bank is the save
+        // RAM, not the work RAM mirror the system banks have there.
+        if let Some(i) = self.sram_index(addr) {
+            return self.sram[i];
+        }
         if let Some(value) = self.ram.read(addr) {
             return value;
         }
@@ -671,6 +726,10 @@ impl Bus for SmwBus<'_> {
     }
 
     fn write(&mut self, addr: u32, value: u8) {
+        if let Some(i) = self.sram_index(addr) {
+            self.sram[i] = value;
+            return;
+        }
         if self.ram.write(addr, value) {
             return;
         }
@@ -696,6 +755,10 @@ impl Bus for SmwBus<'_> {
 
     fn wait(&mut self) -> bool {
         self.run_sa1()
+    }
+
+    fn vblank(&mut self) -> Option<u16> {
+        (self.interrupt_enable & 0x80 != 0).then(|| self.nmi_vector())
     }
 }
 
@@ -1123,6 +1186,45 @@ mod tests {
         }
         let back: Vec<u8> = (0..6).map(|i| bus.ram.peek(0x7E_BD00 + i)).collect();
         assert_eq!(back, [1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn dma_registers_read_back_and_a_transfer_leaves_its_end() {
+        let rom = rom();
+        let mut bus = SmwBus::new(&rom);
+        for (reg, value) in [
+            (0x4310, 0x00), // A to B, one register
+            (0x4311, 0x22), // CGRAM data
+            (0x4312, 0x00),
+            (0x4313, 0x80),
+            (0x4314, 0x00),
+            (0x4315, 0x04),
+            (0x4316, 0x00),
+        ] {
+            bus.write(reg, value);
+            assert_eq!(bus.read(reg), value);
+        }
+        bus.write(0x420B, 0x02);
+        assert_eq!([bus.read(0x4312), bus.read(0x4313)], [0x04, 0x80]);
+        assert_eq!([bus.read(0x4315), bus.read(0x4316)], [0, 0]);
+        assert!(bus.unsupported.is_empty());
+    }
+
+    #[test]
+    fn save_ram_is_mirrored_across_its_banks() {
+        let mut data = vec![0u8; 0x8000];
+        data[0x7FC0 + 0x15] = 0x20;
+        data[0x7FC0 + 0x18] = 0x01; // 2 KiB, as vanilla declares
+        let rom = Rom::from_bytes(data).unwrap();
+        let mut bus = SmwBus::new(&rom);
+        assert_eq!(bus.sram.len(), 0x800);
+        bus.write(0x70_210E, 0x6B);
+        assert_eq!(bus.read(0x70_210E), 0x6B);
+        assert_eq!(bus.read(0x70_010E), 0x6B);
+        assert_eq!(bus.read(0x71_010E), 0x6B);
+        assert_eq!(bus.read(0xF0_010E), 0x6B);
+        assert_eq!(bus.read(0x70_0000), 0);
+        assert!(bus.unsupported.is_empty());
     }
 
     #[test]

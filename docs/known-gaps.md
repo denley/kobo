@@ -15,7 +15,19 @@ What a rendered level does not reproduce, and what the tooling does not handle.
   off the left screen edge and no scrolling, so anything that waits for Mario or spawns
   over time (Bullet Bill shooters, generators, Lakitu's Spinies, a Magikoopa, Monty Moles
   in some hacks) is a marker or not what a player sees, and sprites that interact with one
-  another only do so when they share a spot. A sprite that stays hidden at first is drawn
+  another only do so when they share a spot. Off the left edge of the first screen Mario
+  is on screen `$FF`, where the game never has him: a custom sprite that jumps through a
+  table indexed by his screen (QLDC 2021 `79_Hwailaluta`, levels `105`, `108`, `109`;
+  `34_idol`, levels `1AC`–`1AF`) runs off it (`BRK at $14:C922`) and is a marker; keeping
+  him inside the level instead puts his objects into the capture. A sprite that waits for
+  the player (the cutscene sprite of QLDC 2021 `44_Daizo Dee Von` levels `026`, `027`,
+  `0C5` waits a frame at a time, then for a button) is given the vertical blanks it waits
+  for, 16 of them, and then also a marker. Sprite entries a hack left beyond the level's
+  width or height are skipped: no camera inside the level loads them, and the ROM's
+  loader, asked for such a column, reads past the level's own data (QLDC 2021 `70_DPBOX`
+  `101`, Luminescent `14A`). Custom sprites themselves come out as the emulator draws
+  them: a 2026-09-24 per-sprite comparison over eight hacks found none drawn wrong
+  ([testing.md](testing.md)). A sprite that stays hidden at first is drawn
   where it first appears (a Podoboo at the lava's surface). Cluster sprites are captured
   from their spawner's camera only, except the candle flames. Custom sprite loaders run as
   ROM code; the full render sweep below records sprite-pass failures even in levels whose
@@ -60,35 +72,33 @@ Counts of warnings here mean affected level slots, not individual failed passes.
 See [testing.md](testing.md#full-hack-render-sweep) for the inputs, logs and reproduction.
 
 These are execution results, not a visual accuracy assessment. All slots were attempted,
-including unused, test and unchanged vanilla rooms. Apart from the previously diagnosed
-`76_Bench-kun` defect below, the causes have not been established: a failure is not yet
-proof of a Kobo bug or of a broken playable level. A PNG with warnings may omit or
+including unused, test and unchanged vanilla rooms. A PNG with warnings may omit or
 misrender the player or sprites; a PNG without warnings can still exhibit the visual
-gaps listed above.
+gaps listed above. Every row was traced on 2026-09-23 (`KOBO_CPU_TRACE`, and Mesen on
+the level where a hack defect was suspected); the table gives the cause and what became
+of it.
 
-| Hack | Failed slots | PNGs with warnings | Observed problem |
-| --- | ---: | ---: | --- |
-| QLDC 2021 `70_DPBOX` | 24 | 196 | All fatal errors and most warning messages stop at `BRK at $11:0001`; sprite-loader passes in `101` and `13C` also stop at `$05:49BD`. |
-| QLDC 2021 `34_idol` | 9 | 4 | Five slots stop at `BRK`; four exceed the 200-million-instruction limit. Sprite passes also fail in `1AC`–`1AF`. |
-| QLDC 2021 `79_Hwailaluta` | 0 | 3 | Sprite or slotless-sprite passes in `105`, `108`, `109` stop at `BRK at $14:C922`. |
-| Invictus 1.0 | 0 | 1 | `136`: player entrance and 16 more passes stop at `BRK at $93:9D9F`. |
-| Luminescent v1.02 | 0 | 1 | `14A`: sprite loader with camera at `(4080, 3984)` stops at `BRK at $85:0011`. |
-| QLDC 2021 `44_Daizo Dee Von` | 0 | 3 | `026`, `027`, `0C5`: sprite `00` at tile `(0, 0)` waits at `$9A:C13A` for something that never happens. |
-| QLDC 2021 `77_NerDose` | 0 | 1 | `004`: sprite `73` at tile `(500, 31)` stops at `BRK at $70:0000`. |
-| Grand Poo World 2 | 1 | 0 | `09F`: Lunar Magic background Map16 table pointer is null. |
-| QLDC 2022 `04_Hwailaluta` | 2 | 0 | `09F`, `104`: Lunar Magic background Map16 table pointer is null. |
-| QLDC 2021 `76_Bench-kun` | 18 | 0 | Known hack defect in Mode 7 boss rooms: `COP at $00:E296`, explained below. |
+| Hack | Failed slots | PNGs with warnings | Cause | Status |
+| --- | ---: | ---: | --- | --- |
+| QLDC 2021 `70_DPBOX` | 24 | 196 | Its NMI hook empties a DMA queue under game mode `$11` and runs it under `$12`; without the vertical blanks between the loading frames the count is stale and a 64 KiB DMA from CGRAM lands on bank 0 (`BRK at $11:0001`). `101`, `13C`: sprite entries beyond the level's 4 screens. | Fixed: the loader runs the ROM's NMI at each frame boundary ([smw.md](smw.md)); entries outside the level are skipped. All 512 slots render. |
+| QLDC 2021 `34_idol` | 9 | 4 | An object pre-scan at `$90:8D90` shifts per-screen tables by a screen index it takes from the object data and never bounds; these nine levels give it one past `$3E`, and the fill runs over bank 0. Mesen loads each of them into a garbage game mode. The four warnings (`1AC`–`1AF`) are custom sprites jumping through a table indexed by Mario's screen, as in `79_Hwailaluta`. | Hack defect (the nine). Known gap (the four). Unchanged. |
+| QLDC 2021 `79_Hwailaluta` | 0 | 3 | A custom sprite jumps through a table indexed by Mario's screen (`$95`); the sprite pass parks him at `-64`, screen `$FF`. | Known gap (above). The sprite is a marker. |
+| Invictus 1.0 | 0 | 1 | `136`: the level's per-frame code returns from a `JSL` with `RTS` (`expand::player`). | Hack defect, previously diagnosed. Unchanged. |
+| Luminescent v1.02 | 0 | 1 | `14A`: sprite entries beyond the level's 3 screens; the loader, asked for that column, took the list's end for a scroll sprite (`$05:BCD6`, index `$17`). | Fixed: skipped. |
+| QLDC 2021 `44_Daizo Dee Von` | 0 | 3 | `026`, `027`, `0C5`: a cutscene sprite waits a frame at a time (`LDA $10 : BEQ`) and then for a button. | Known gap (above). Waits get their vertical blanks; the button never comes. |
+| QLDC 2021 `77_NerDose` | 0 | 1 | `004`: the hack builds a routine in save RAM and calls it (`JSL $70210E`); the bus had no save RAM. | Fixed: LoROM save RAM is modelled. |
+| Grand Poo World 2 | 1 | 0 | `09F`, an unused slot: the level has no background table, and the upload reads definitions from bank 0 work RAM. Mesen shows the garbage that gives. | Fixed: the definitions are read from wherever the pointer points, as the game does. |
+| QLDC 2022 `04_Hwailaluta` | 2 | 0 | `09F`, `104`: as above. | Fixed. |
+| QLDC 2021 `76_Bench-kun` | 18 | 0 | Known hack defect in Mode 7 boss rooms: `COP at $00:E296`, explained below. | Hack defect. Unchanged. |
 
-Investigate `70_DPBOX` first: the repeated address across loading and sprite passes
-suggests a shared cause, but that cause has not been traced. Its 24 failed slots are
-`095`–`09B`, `0CC`, `0D5`, `0D9`, `0DF`, `0E2`, `0E5`, `195`–`19B`, `1C7`, `1DE`,
-`1EB`, `1F6`; `105` is one example that produces a PNG with warnings.
-
-For `34_idol`, the instruction-limit failures are `016`, `08F`, `090`, `113`, at
-`$90:8DAB`–`$90:8DB3`. The fatal `BRK` slots are `012`, `038`, `0B1`, `0EB`, `13F`,
-at different addresses. These and the `79_Hwailaluta` sprite failures are the next
-investigation targets. Check the null-background-pointer slots against their intended
-use and emulator behaviour before deciding whether to change the parser.
+Of the 512 slots of each of these ten hacks, the ones that still fail or warn after
+this are `34_idol`'s nine and `76_Bench-kun`'s eighteen (both the hack's own), the three
+`79_Hwailaluta`, four `34_idol` and three `44_Daizo Dee Von` sprite passes above, and
+Invictus `136`.
+The frame-boundary blanks also changed pictures the sweep counted as clean: Akogare2
+`0F8` and Luminescent `0F8` were garbage or black without the upload the third blank
+does, and Luminescent `161`'s shells had uninitialised colours. Every vanilla and SA-1
+reference picture is byte-identical before and after.
 
 The `76_Bench-kun` failure is already attributed to the hack: its patch at `$10E288`
 calls `$00987D` with `JSL`, but the routine returns with `RTS`, into data. The sweep
