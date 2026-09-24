@@ -81,7 +81,8 @@ Early stage: roadmap step 1 is in progress.
   changes nothing); `SmwBus` gives the SA-1 its turn there, through `Sa1View`, the bus as
   the SA-1 sees it, and failing that the NMI `Bus::vblank` offers, a bounded number of
   times. A wait nothing answers is `CpuError::Waiting`, not 200 million steps.
-  `KOBO_CPU_TRACE=<n>` prints the last `n` instructions before a routine fails.
+  `KOBO_CPU_TRACE=<n>` prints the last `n` instructions before a routine fails or a
+  `KOBO_RAM_WATCH` address is written; `KOBO_VRAM_WATCH` reports writes to a VRAM word.
 - `kobo_core::expand` runs ROM code. `machine` owns the CPU, the bus, and `Call` (the register
   state a routine is entered with; every call starts from reset registers, and
   `try_call_to` stops one at an address with the call still open); `Machine::interrupt`

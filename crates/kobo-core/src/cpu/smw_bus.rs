@@ -145,6 +145,18 @@ pub struct SmwBus<'a> {
     pub unmapped_writes: u64,
     /// When set, every ROM read address is appended here.
     pub trace_rom_reads: Option<Vec<u32>>,
+    /// Debugging aid: a VRAM word address whose every write is reported
+    /// on standard error, from `KOBO_VRAM_WATCH` (`$3A1E` or `3A1E`).
+    vram_watch: Option<usize>,
+    /// The A-bus address the DMA in progress is reading, for the report.
+    dma_source: Option<u32>,
+}
+
+/// `KOBO_VRAM_WATCH`: the VRAM word every write to is reported.
+fn watched_vram_word() -> Option<usize> {
+    let value = std::env::var("KOBO_VRAM_WATCH").ok()?;
+    let word = u32::from_str_radix(value.trim().trim_start_matches('$'), 16).ok()?;
+    Some(word as usize & 0x7FFF)
 }
 
 /// Bytes of save RAM a LoROM cartridge declares, capped at the 512 KiB a
@@ -208,6 +220,24 @@ impl<'a> SmwBus<'a> {
             unmapped_reads: 0,
             unmapped_writes: 0,
             trace_rom_reads: None,
+            vram_watch: watched_vram_word(),
+            dma_source: None,
+        }
+    }
+
+    /// Reports a write of VRAM byte `a` when its word is watched.
+    fn report_vram_write(&self, a: usize, value: u8) {
+        if self.vram_watch == Some(a / 2) {
+            let from = match self.dma_source {
+                Some(src) => format!("DMA from ${src:06X}"),
+                None => "port write".to_string(),
+            };
+            eprintln!(
+                "vram watch: word ${:04X} {} byte <- ${value:02X} ({from}, VMAIN ${:02X})",
+                a / 2,
+                if a.is_multiple_of(2) { "low" } else { "high" },
+                self.vmain
+            );
         }
     }
 
@@ -544,6 +574,7 @@ impl<'a> SmwBus<'a> {
             }
             0x2118 => {
                 let a = (self.vram_remap(self.vmadd) as usize * 2) % VRAM_LEN;
+                self.report_vram_write(a, value);
                 self.vram[a] = value;
                 self.vram_written[a] = true;
                 if self.vmain & 0x80 == 0 {
@@ -552,6 +583,7 @@ impl<'a> SmwBus<'a> {
             }
             0x2119 => {
                 let a = (self.vram_remap(self.vmadd) as usize * 2 + 1) % VRAM_LEN;
+                self.report_vram_write(a, value);
                 self.vram[a] = value;
                 self.vram_written[a] = true;
                 if self.vmain & 0x80 != 0 {
@@ -675,7 +707,9 @@ impl<'a> SmwBus<'a> {
                     self.write(src, value);
                 } else {
                     let value = self.read(src);
+                    self.dma_source = Some(src);
                     self.write_register(regs[i & 3], value);
+                    self.dma_source = None;
                 }
                 if !fixed {
                     let off = ((src as u16) as i32 + step) as u16;

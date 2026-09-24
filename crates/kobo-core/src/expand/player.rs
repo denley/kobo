@@ -5,6 +5,7 @@ use super::load_flags::LoadFlags;
 use super::machine::Machine;
 use super::oam;
 use crate::cpu::CpuError;
+use crate::cpu::smw_bus::SmwBus;
 use crate::ram;
 use crate::video::SpriteObject;
 
@@ -21,8 +22,9 @@ const PLAYER_OAM_SLOTS: std::ops::Range<usize> = 64..72;
 /// marked as already loaded so nothing else spawns, until his entrance
 /// action (`$71`) has finished. Each frame runs the ROM's whole NMI,
 /// uploading player graphics and animated tiles and palettes, including
-/// the dragon coin's flashing colour. The bus keeps VRAM and CGRAM; RAM
-/// is restored. Only his own OAM slots are read: the cluster
+/// the dragon coin's flashing colour. The bus keeps those character and
+/// palette uploads; RAM and the tilemaps are restored to the loader's
+/// ([`Tilemaps`]). Only his own OAM slots are read: the cluster
 /// sprites the loader spawned are still drawn in this pass, and the
 /// sprite passes already capture them. They are found in the image as
 /// drawn ([`oam::Frame`]), since SA-1 Pack moves every object at the end
@@ -38,6 +40,7 @@ pub(super) fn capture_player(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Vec<SpriteObject> {
     let saved = machine.bus.ram.clone();
+    let tilemaps = Tilemaps::take(&machine.bus);
     let objects = match enter(machine) {
         Ok(objects) => objects,
         Err(error) => {
@@ -49,7 +52,50 @@ pub(super) fn capture_player(
         }
     };
     machine.bus.ram = saved;
+    tilemaps.restore(&mut machine.bus);
     objects
+}
+
+/// The three background tilemaps as the loader left them in VRAM. The
+/// entrance frames run the level's own per-frame code, which can move a
+/// layer and have the game upload tilemap rows for the new position
+/// (Akogare2 level `111` pans layer 2 upward from its second dozen
+/// frames, and Lunar Magic's row updater follows it). The picture is
+/// drawn at the positions the loader's RAM holds, so the tilemaps have to
+/// be the loader's as well; only the character and palette uploads the
+/// frames make are kept.
+struct Tilemaps {
+    /// (first VRAM byte, bytes, whether each was written) per layer.
+    areas: Vec<(usize, Vec<u8>, Vec<bool>)>,
+}
+
+impl Tilemaps {
+    fn take(bus: &SmwBus) -> Self {
+        let len = bus.vram.len();
+        let areas = bus.bg_sc[..3]
+            .iter()
+            .map(|&sc| {
+                let base = ((sc >> 2) as usize) << 11;
+                let size = 0x800 * (1 + (sc & 1) as usize) * (1 + ((sc >> 1) & 1) as usize);
+                let bytes = (0..size).map(|i| bus.vram[(base + i) % len]).collect();
+                let written = (0..size)
+                    .map(|i| bus.vram_written[(base + i) % len])
+                    .collect();
+                (base, bytes, written)
+            })
+            .collect();
+        Self { areas }
+    }
+
+    fn restore(&self, bus: &mut SmwBus) {
+        let len = bus.vram.len();
+        for (base, bytes, written) in &self.areas {
+            for (i, (&byte, &was)) in bytes.iter().zip(written).enumerate() {
+                bus.vram[(base + i) % len] = byte;
+                bus.vram_written[(base + i) % len] = was;
+            }
+        }
+    }
 }
 
 fn enter(machine: &mut Machine) -> Result<Vec<SpriteObject>, CpuError> {

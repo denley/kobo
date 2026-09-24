@@ -102,14 +102,6 @@ pub(super) enum Interrupt {
     TimerIrq,
 }
 
-/// `KOBO_CPU_TRACE`: how many instructions to keep for the trace that
-/// [`Machine::dump_history`] prints when a routine fails (64 if it is
-/// set to nothing a number can be made of).
-fn trace_length() -> Option<usize> {
-    let value = std::env::var("KOBO_CPU_TRACE").ok()?;
-    Some(value.parse().unwrap_or(64))
-}
-
 /// A CPU on a bus, loading or running one level.
 pub(super) struct Machine<'r> {
     pub cpu: Cpu,
@@ -119,12 +111,8 @@ pub(super) struct Machine<'r> {
 
 impl<'r> Machine<'r> {
     pub fn new(rom: &'r Rom, level: u16) -> Self {
-        let mut cpu = Cpu::new();
-        if let Some(len) = trace_length() {
-            cpu.keep_history(len);
-        }
         Self {
-            cpu,
+            cpu: Cpu::new(),
             bus: SmwBus::new(rom),
             level,
         }
@@ -133,25 +121,7 @@ impl<'r> Machine<'r> {
     /// Debugging aid: with `KOBO_CPU_TRACE` set, prints the instructions
     /// that led to `error` on standard error.
     fn dump_history(&self, error: &CpuError) {
-        let Some(history) = &self.cpu.history else {
-            return;
-        };
-        eprintln!("--- {error}: last {} instructions ---", history.len());
-        for e in history.iter() {
-            eprintln!(
-                "${:06X}: {:02X}  A={:04X} X={:04X} Y={:04X} SP={:04X} DP={:04X} DB={:02X} P={:02X}{}",
-                e.addr,
-                e.opcode,
-                e.a,
-                e.x,
-                e.y,
-                e.sp,
-                e.dp,
-                e.db,
-                e.p,
-                if e.emulation { " E" } else { "" }
-            );
-        }
+        self.cpu.print_history(&error.to_string());
     }
 
     /// The registers every entry into the ROM starts from.

@@ -49,6 +49,9 @@ What a rendered level does not reproduce, and what the tooling does not handle.
   can carry sprite-pass warnings. The emulator oracle compares tile grids, layer 3
   tilemaps, and sprite slots on a sample of each hack's levels ([testing.md](testing.md)),
   not their pictures.
+- The frame counter is `$40` on a level's first frame ([smw.md](smw.md)), one of the 256
+  values a player's entry can have. Whatever the game decides by it is that value's: the
+  phase of a Boo ring, which side the offscreen check looks at first, when Lakitu throws.
 - Code a hack runs every frame of the level loop (a custom status bar, a power-up handed
   to the player, UberASM `main` code) has not run: a level is loaded and prepared, and its
   sprites and player are drawn, but no frame of game mode `$14` is played.

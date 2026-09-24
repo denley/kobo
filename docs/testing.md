@@ -16,23 +16,30 @@ how each oracle is produced, where its data lives, and what is known not to matc
   another. All 512 vanilla levels match byte for byte in the tile grid, and in which sprite
   is in which slot (the sprite and its place, not whether it is alive: the dump comes a
   frame or so into the level, and a sprite spawned beyond the despawn range is erased and
-  spawned again as the loader comes round). Test level `132` is the exception: its Lakitu
-  has thrown two Spinies by the end of preparation here and none in the emulator, for a
-  reason not found. Dumps live in `~/.local/share/kobo/oracle/`
+  spawned again as the loader comes round). Test level `132` used to differ: its Lakitu's
+  cloud had thrown two Spinies here and none in the emulator. The cloud throws when the
+  frame counter's low seven bits are clear (`$01E98D`), and the loader's counter started
+  at zero; it now starts at `$40` ([smw.md](smw.md)). Dumps live in `~/.local/share/kobo/oracle/`
   and are never committed. `trace_writes.lua` logs who writes a RAM address, for debugging.
   A level the game itself cannot load ends the script with `stuck in stage level (game
   mode $xx)` and a garbage mode: that, with the same routine failing in `expand`, is how a
   hack's own defect is told from a bug here (QLDC 2021 `34_idol`, nine slots). On the
-  `expand` side, `KOBO_CPU_TRACE=<n>` prints the last `n` S-CPU instructions, with
-  registers, before any routine fails, fatal or not.
+  `expand` side, `KOBO_CPU_TRACE=<n>` prints the last `n` instructions of the CPU (either
+  one, on an SA-1 ROM), with registers, before any routine fails, fatal or not.
+  `KOBO_RAM_WATCH=$40D5D5` reports every write to a bus address with the instruction that
+  made it, and the `n` before it when the trace is on: it found PIXI's offscreen routine
+  erasing a sprite in `43_gui` on the SA-1. `KOBO_VRAM_WATCH=$3A1E` does the same for a
+  VRAM word, naming the DMA source: it found the row updater behind Akogare2 `111`.
   A full run of the vanilla ROM takes 20 minutes and an SA-1 ROM emulates slower; four
   runs of 128 levels each into separate directories, moved together afterwards, take a
   quarter of that.
   `KOBO_ORACLE_VIDEO=1 dump.sh ...` instead waits for visible video and also writes PPM,
   full WRAM, and PPU state. Keep these later-frame captures in a separate directory. The
   screen buffer the script reads is a frame or two behind the PPU state, which of the two
-  varying from run to run, so it waits for four frames at full brightness; captures made
-  before that wait was added can be a fade step darker than the render and match nothing.
+  varying from run to run, so it waits for four frames at full brightness
+  (`KOBO_ORACLE_VISIBLE_FRAMES=<n>` waits for another count, to see a level's first frames
+  one by one); captures made before that wait was added can be a fade step darker than
+  the render and match nothing.
   `KOBO_BOSS_ORACLE_DIR` enables stable boss graphics comparisons for levels 096, 0CC,
   0D9, and 1C7 (Mode 7 characters, layer 3 GFX, arena tilemap, SP3); either capture mode
   works. The loader override must only run in game mode `$11`: overriding the
@@ -70,8 +77,13 @@ how each oracle is produced, where its data lives, and what is known not to matc
   same way, six levels each: 37 get into a level (`28_Kitikuchan`'s title screen is a room
   to play through), and 35 of those match throughout. `61_Wakana_Sariel` level `13B`
   differs in the layer 3 tilemap, which its per-frame status bar code has drawn into by
-  the time of the dump, and `43_gui` level `105` has its custom sprites `99` and `91` one
-  slot further on than the emulator.
+  the time of the dump, and `43_gui` level `105` differs in slots 10 to 13 by the parity
+  of the frame its sprites first ran on. The hack places sprites beyond the camera's right
+  edge, which PIXI's offscreen routine (`$10FEDC`, one side per frame by `$13 & 1`) erases
+  on even frames and the loader brings back; the dump's first sprite frame was odd and
+  kept them all, the loader's here is even (`$13 = $40`, [smw.md](smw.md)) and one had gone
+  before a spawner's child took its slot. Captures of the level one to twelve frames on
+  (`KOBO_ORACLE_VISIBLE_FRAMES`) show the emulator erasing them from its second frame.
   Dumps live in `~/.local/share/kobo/oracle/hacks/`. With `KOBO_ORACLE_VIDEO=1` the same
   dumps give whole frames; of 27 levels of four hacks whose pictures changed when the
   faults below were fixed, the entry screen of 23 went from 10-56% of pixels matching to
@@ -138,8 +150,12 @@ how each oracle is produced, where its data lives, and what is known not to matc
   `111` (21/2048 words) failing this tilemap check. Both reproduced at `9b69ab8`, before
   the input hardening and operation control. `0F8` passes since the loader runs the ROM's
   NMI at the frame boundaries (its picture was garbage without the upload the third
-  blank does); `111` still fails and its cause is not established. This is a failing
-  check, not an exclusion added to the test.
+  blank does). `111` failed because the player pass kept every VRAM upload of its
+  entrance frames, among them the rows Lunar Magic's row updater (`$1FA6xx`) uploads as
+  the level's own code pans layer 2 upward from its second dozen frames, while the
+  level's layer 2 position stayed the loader's; the pass now puts the tilemaps back
+  ([smw.md](smw.md)), and an emulator frame of the level agreed with the expected words.
+  The failure message lists the words that differ.
   Known exception in the corpus: `Smb2dx` (LM 1.63; 173 levels fail, its mode `$00`
   levels carry object layer 2 pointers), failing before the vertical-level checks were
   added. `Super Hark Bros 2` level `00A` used to fail with 896 of 2048 words: its

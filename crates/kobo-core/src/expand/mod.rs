@@ -35,7 +35,8 @@ mod tiles;
 pub use diagnostics::{Diagnostic, Pass, summarize};
 pub(crate) use load::expand_controlled;
 pub use load::{
-    ReadTrace, decompress_gfx_file, expand_level, expand_level_traced, expand_level_with_control,
+    ENTRY_FRAME_COUNTER, ReadTrace, decompress_gfx_file, expand_level, expand_level_traced,
+    expand_level_with_control,
 };
 pub use loaded::LoadedLevel;
 pub use oam::object_sizes;

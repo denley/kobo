@@ -43,6 +43,35 @@ pub trait Bus {
     }
 }
 
+/// `KOBO_CPU_TRACE`: how many instructions every CPU keeps in
+/// [`Cpu::history`] (64 if it is set to nothing a number can be made of),
+/// for the trace printed when a routine fails or a watched write happens.
+fn trace_length() -> Option<usize> {
+    let value = std::env::var("KOBO_CPU_TRACE").ok()?;
+    Some(value.parse().unwrap_or(64))
+}
+
+/// `KOBO_RAM_WATCH`: the bus address every CPU reports its writes to.
+fn watched_address() -> Option<u32> {
+    let value = std::env::var("KOBO_RAM_WATCH").ok()?;
+    let addr = u32::from_str_radix(value.trim().trim_start_matches('$'), 16).ok()?;
+    Some(mirror_free(addr & 0xFF_FFFF))
+}
+
+/// The one address of a location the system area mirrors: the low half
+/// of banks `$00`-`$3F` and `$80`-`$BF` is the same registers and RAM in
+/// every one of them, and its first 8 KiB are the start of `$7E`.
+fn mirror_free(addr: u32) -> u32 {
+    let (bank, offset) = (addr >> 16, addr & 0xFFFF);
+    if (bank & 0x40 != 0) || offset >= 0x8000 {
+        addr
+    } else if offset < 0x2000 {
+        0x7E_0000 | offset
+    } else {
+        offset
+    }
+}
+
 /// Processor status bits.
 pub struct Flags;
 
@@ -133,6 +162,11 @@ pub struct Cpu {
     /// tracing what led a routine somewhere ([`Cpu::keep_history`]).
     pub history: Option<std::collections::VecDeque<Executed>>,
     history_len: usize,
+    /// Debugging aid: a bus address whose every write is reported on
+    /// standard error with the instruction that made it, from
+    /// `KOBO_RAM_WATCH` (`$40D5D5` or `40D5D5`; a bus address, so a
+    /// relocated variable is named where the ROM's map puts it).
+    watch: Option<u32>,
     in_fetch: bool,
     op_addr: u32,
     /// Bytes written so far.
@@ -172,6 +206,14 @@ impl Cpu {
     /// A CPU in native mode with 8-bit accumulator and index registers,
     /// interrupts disabled, stack at `$01FF`.
     pub fn new() -> Self {
+        let mut cpu = Self::fresh();
+        if let Some(len) = trace_length() {
+            cpu.keep_history(len);
+        }
+        cpu
+    }
+
+    fn fresh() -> Self {
         Self {
             a: 0,
             x: 0,
@@ -187,6 +229,7 @@ impl Cpu {
             trace_data_reads: None,
             history: None,
             history_len: 0,
+            watch: watched_address(),
             in_fetch: false,
             op_addr: 0,
             writes: 0,
@@ -209,6 +252,30 @@ impl Cpu {
         self.trace_data_reads = trace;
         self.history = history;
         self.history_len = history_len;
+    }
+
+    /// Prints [`Cpu::history`] on standard error under `heading`, if it
+    /// is kept.
+    pub fn print_history(&self, heading: &str) {
+        let Some(history) = &self.history else {
+            return;
+        };
+        eprintln!("--- {heading}: last {} instructions ---", history.len());
+        for e in history.iter() {
+            eprintln!(
+                "${:06X}: {:02X}  A={:04X} X={:04X} Y={:04X} SP={:04X} DP={:04X} DB={:02X} P={:02X}{}",
+                e.addr,
+                e.opcode,
+                e.a,
+                e.x,
+                e.y,
+                e.sp,
+                e.dp,
+                e.db,
+                e.p,
+                if e.emulation { " E" } else { "" }
+            );
+        }
     }
 
     /// Keeps the last `len` instructions executed in [`Cpu::history`].
@@ -304,7 +371,16 @@ impl Cpu {
 
     fn write8(&mut self, bus: &mut impl Bus, addr: u32, value: u8) {
         self.writes += 1;
-        bus.write(addr & 0xFF_FFFF, value);
+        let addr = addr & 0xFF_FFFF;
+        if self.watch == Some(mirror_free(addr)) {
+            let what = format!(
+                "watch: ${addr:06X} <- ${value:02X} at ${:06X} (A={:04X} X={:04X} Y={:04X})",
+                self.op_addr, self.a, self.x, self.y
+            );
+            self.print_history(&what);
+            eprintln!("{what}");
+        }
+        bus.write(addr, value);
     }
 
     fn write16(&mut self, bus: &mut impl Bus, addr: u32, value: u16) {

@@ -71,15 +71,28 @@ fn candidates(loaded: &LoadedLevel, shift: isize) -> HashMap<usize, Vec<[u8; 2]>
 /// 2 by a few pixels in some levels (Super Hark Bros 2 level `135` goes
 /// from `$C0` to `$BD`), so the rows may be those of a position one row
 /// either side of where the layer ends up.
-fn check_level(loaded: &LoadedLevel) -> (usize, usize) {
+fn check_level(loaded: &LoadedLevel) -> (usize, Vec<String>) {
     let check = |shift| {
         let mut checked = 0;
-        let mut bad = 0;
-        for (at, want) in candidates(loaded, shift) {
+        let mut bad = Vec::new();
+        let mut candidates: Vec<_> = candidates(loaded, shift).into_iter().collect();
+        candidates.sort();
+        for (at, want) in candidates {
             checked += 1;
             let written = loaded.video.vram_written[at] && loaded.video.vram_written[at + 1];
-            if !written || !want.iter().any(|w| loaded.video.vram[at..at + 2] == w[..]) {
-                bad += 1;
+            let got = &loaded.video.vram[at..at + 2];
+            if !written || !want.iter().any(|w| got == w) {
+                let want: Vec<String> = want
+                    .iter()
+                    .map(|w| format!("{:04X}", u16::from_le_bytes(*w)))
+                    .collect();
+                bad.push(format!(
+                    "VRAM ${:04X}: {} {:04X}, expected {}",
+                    at / 2,
+                    if written { "holds" } else { "never written," },
+                    u16::from_le_bytes([got[0], got[1]]),
+                    want.join("|")
+                ));
             }
         }
         (checked, bad)
@@ -87,7 +100,7 @@ fn check_level(loaded: &LoadedLevel) -> (usize, usize) {
     [0, -1, 1]
         .into_iter()
         .map(check)
-        .min_by_key(|&(_, bad)| bad)
+        .min_by_key(|(_, bad)| bad.len())
         .unwrap()
 }
 
@@ -120,10 +133,13 @@ fn check_rom(rom: &Rom) -> (usize, Vec<String>) {
         let (words, bad) = check_level(&loaded);
         // At least 960 words, including when scrolling through the five
         // rows outside a 27-row buffer. Both background screens count.
-        if words < 30 * 32 || bad != 0 {
+        if words < 30 * 32 || !bad.is_empty() {
             failures.push(format!(
-                "level {level:03X} (mode {}, BG2SC ${:02X}): {bad} of {words} tilemap words missing or different",
-                loaded.tiles.level_mode, loaded.video.bg_sc[1]
+                "level {level:03X} (mode {}, BG2SC ${:02X}): {} of {words} tilemap words missing or different\n  {}",
+                loaded.tiles.level_mode,
+                loaded.video.bg_sc[1],
+                bad.len(),
+                bad.iter().take(24).cloned().collect::<Vec<_>>().join("\n  ")
             ));
         }
     }

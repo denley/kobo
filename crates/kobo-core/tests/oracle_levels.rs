@@ -69,10 +69,6 @@ fn sprite_slots_match_emulator_dumps() {
     use kobo_core::ram;
     /// Pixels a sprite may have moved by the time of the dump.
     const MOVED: i32 = 4;
-    /// The Lakitu of test level `132` has thrown two Spinies by the end
-    /// of level preparation here and none in the emulator, on both ROMs;
-    /// why is not known.
-    const KNOWN_EXCEPTIONS: [u16; 1] = [0x132];
     let Some(rom) = common::oracle_rom() else {
         return;
     };
@@ -94,9 +90,6 @@ fn sprite_slots_match_emulator_dumps() {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => panic!("{}: {e}", path.display()),
         };
-        if KNOWN_EXCEPTIONS.contains(&level) {
-            continue;
-        }
         let loaded = expand::expand_level(&rom, level).unwrap();
         let slots = loaded.ram.map().sprite_slots();
         assert_eq!(want.len(), slots as usize * tables.len());

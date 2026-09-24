@@ -12,6 +12,10 @@ use crate::ram::{self, Ram};
 use crate::rom::Rom;
 use crate::video::{LevelScene, Screen, VideoMemory};
 
+/// What the frame counter `$13` holds when a level's first frame runs
+/// (see `load_level`).
+pub const ENTRY_FRAME_COUNTER: u8 = 0x40;
+
 /// Instruction limit for the reset code, which uploads the SPC engine.
 const RESET_STEP_LIMIT: u64 = 200_000_000;
 
@@ -200,6 +204,16 @@ fn load_level(machine: &mut Machine) -> Result<Expanded, ExpandError> {
     ram.set_u8(ram::EXIT_TABLE_LOW, lo);
     ram.set_u8(ram::EXIT_TABLE_HIGH, 0x04 | hi);
     ram.set_u8(ram::OW_PLAYER_SUBMAP, hi);
+    // The frame counter has counted every vertical blank since power-on
+    // by the time a player enters a level, so its value there is any at
+    // all. Straight from reset it is zero, which is the one value that
+    // fires the rarest of the game's periodic events on the level's first
+    // frame: Lakitu's cloud throws a Spiny when the counter's low seven
+    // bits are clear (`$01E98D`), and vanilla test level `132` gained two
+    // Spinies that no emulator entry shows. Bit 6 alone moves that event
+    // 192 frames off, further than any pass runs, and leaves every shorter
+    // period (`$3F` down to `$01`, animation phases among them) as it was.
+    ram.set_u8(ram::TRUE_FRAME, ENTRY_FRAME_COUNTER);
     // Run each phase with the game mode the real machine would be in,
     // and the vertical blank between them: game mode `$10` ends by
     // setting `$11`, so the console runs the NMI once with the mode at

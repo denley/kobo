@@ -492,7 +492,10 @@ fn boss_arenas_capture_mode_switches_and_object_art() {
         assert_eq!(scene.window.masks, [0x11, 0x00]);
         assert_eq!(scene.window.select, [0x02, 0x00, 0x32]);
         // Keep the frame counter from before the drawing pass.
-        assert_eq!(loaded.ram.u8(ram::TRUE_FRAME), 0);
+        assert_eq!(
+            loaded.ram.u8(ram::TRUE_FRAME),
+            kobo_core::expand::ENTRY_FRAME_COUNTER
+        );
     }
 }
 

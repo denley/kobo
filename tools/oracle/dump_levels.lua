@@ -56,7 +56,7 @@ local POINTER_LOOKUP = 0x05D8B7 -- CODE_05D8B7: level number in $0E-$0F becomes 
 local INTRO_CHOSEN = 0x05DA65 -- in CODE_05DA38, past every check that skips the intro
 local rom = emu.memType.snesPrgRom
 local MAX_FRAMES_PER_STATE = 1800
-local VISIBLE_FRAMES = 4
+local VISIBLE_FRAMES = tonumber(os.getenv("KOBO_ORACLE_VISIBLE_FRAMES") or "4")
 -- Map mode $23 in the header, which is at the same file offset either way.
 local sa1 = emu.read(0x7FD5, rom) == 0x23
 

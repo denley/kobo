@@ -71,8 +71,9 @@ are SMWDisX's.
   reloading. The screen-exit entry skips it; the oracle script sees the game choose it (an
   exec callback at `$05DA65`, past every check that skips it) and dumps the second level
   frame.
-- `expand::expand_level` seeds the RAM-resident OAM routine by running the reset code, then
-  runs game mode `$11` in the game's order: `CODE_05D796` (header pointers and entrance),
+- `expand::expand_level` seeds the RAM-resident OAM routine by running the reset code, sets
+  the frame counter `$13` to `$40`, and then runs game mode `$11` in the game's order:
+  `CODE_05D796` (header pointers and entrance),
   `$1A`-`$21` copied to `$1462`-`$1469`, `CODE_00A635`, `$5E = $20`, `CODE_00A796`, one
   `UpdateScreenPosition` with vertical scrolling at will on (`$1404`), and only then
   `CODE_05801E` (clear buffers, `LoadLevel`), which ends by spawning the sprites around the
@@ -106,7 +107,7 @@ are SMWDisX's.
   in vanilla level `105`. The regular level NMI calls `CODE_00A390`, whose tail at
   `$00A418` replaces it with a flashing yellow from `FlashingColors` (`$00B60C`), at
   byte offset `($14 & $1C) >> 1`. The player pass runs the whole NMI after each frame
-  and retains its video uploads, so the level's palette includes this update even
+  and retains its character and palette uploads, so the level's palette includes this update even
   when rendering with the player and sprites hidden. Calling only OAM and player
   graphics uploads left the dragon coin magenta; sprite-pass NMIs alone cannot fix
   it because those passes use separate video memory.
@@ -322,7 +323,21 @@ are SMWDisX's.
   characters of a pass's objects that differ from the level's (`SpriteScene::dynamic`,
   `video::DynamicObjects`): two sprites can put different pictures in the same tile, so the
   scene cannot share one VRAM. The player pass also runs the whole NMI, retaining
-  its uploads in the level's video memory, including animated background palettes.
+  its character and palette uploads in the level's video memory, including animated
+  background palettes, but not its tilemaps (`player::Tilemaps`): the level's own
+  per-frame code can move a layer and have Lunar Magic's row updater (`$1FA6xx`) upload
+  rows for the new position (Akogare2 `111` pans layer 2 upward from its second dozen
+  frames), and the picture is drawn at the positions the loader's RAM holds.
+- The frame counter `$13` counts every vertical blank since power-on, so a player enters a
+  level with any value in it. Straight from reset it is zero, which is the one value that
+  fires the game's longest periodic event on the level's first frame: Lakitu's cloud
+  throws a Spiny when the counter's low seven bits are clear (`$01E98D`), and test level
+  `132` gained two Spinies no emulator entry showed. The loader starts it at `$40`: bit 6
+  alone puts that event 192 frames off, further than any pass runs, and leaves every
+  shorter period, animation phases among them, as it was with zero. What the game decides
+  by the counter's parity is decided by an even first frame: the offscreen check looks at
+  the right side then, and a sprite a hack has placed beyond `$130` pixels right of the
+  camera is erased before a frame has passed (QLDC 2022 `43_gui` `105`, [testing.md](testing.md)).
 
 - OAM is read as the PPU gets it. After every frame the ROM's own upload runs
   (`DoSomeSpriteDMA`, `$008449`: a DMA of `$0200`-`$041F` to `$2104`), and the bus keeps
