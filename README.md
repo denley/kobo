@@ -1,6 +1,6 @@
 # Kobo
 
-Kobo aspires to be an open-source Super Mario World ROM editor and build system. It is currently in development.
+Kobo aspires to be an open-source Super Mario World ROM editor and build system. It is currently in development and supports rendering a level to a png.
 
 The long-term model:
 1. A GUI editor for SMW romhacks
@@ -9,9 +9,11 @@ The long-term model:
 
 ## What it can do today
 
-- **Render any level to PNG** - Few limitations, documented in [known gaps](docs/known-gaps.md)
-- **Inspect a level**: header and pointers, sprite list, Map16 grid/definitions, etc.
-- **Show a level's palette and Map16 tiles**
+- __Render any level to PNG__ - Few limitations, documented in [known gaps](docs/known-gaps.md)
+- __Inspect a level__: header and pointers, sprite list, Map16 grid/definitions, etc.
+- __Show a level's palette and Map16 tiles__
+
+**It is not yet a working build system or level editor**
 
 ## Build and try it
 
