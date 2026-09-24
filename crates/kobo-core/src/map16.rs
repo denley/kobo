@@ -5,7 +5,8 @@
 //! tileset-specific one, selected per tile by a bitmask. For layer 2 the
 //! pointers all come from the BG table, which Lunar Magic numbers as tiles
 //! `0x200` to `0x3FF`. This module reproduces that assembly for a vanilla
-//! ROM; Lunar Magic's relocated Map16 is not handled yet.
+//! ROM. Lunar Magic's relocated pages are resolved by running its own
+//! pointer routine during a level load: see `expand::LevelTiles::map16`.
 
 use thiserror::Error;
 

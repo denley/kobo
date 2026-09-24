@@ -39,6 +39,7 @@ pub use load::{
     expand_level_with_control,
 };
 pub use loaded::LoadedLevel;
+pub use map16::{FG_PAGES, PAGE_TILES};
 pub use oam::object_sizes;
 pub(crate) use sprite_capture::capture_controlled;
 pub use sprite_capture::{LATE_SPRITE_FRAMES, capture_sprites, capture_sprites_with_control};

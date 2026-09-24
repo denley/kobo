@@ -76,12 +76,15 @@ fn read_map16(bus: &mut SmwBus, ptr: u32) -> Map16Tile {
 }
 
 /// Resolves the Map16 definition of every tile number present in the
-/// loaded level's object grid, the way the level's tilemap upload does.
-/// Vanilla reads pages 0 and 1 through the pointer table the loader built
-/// in RAM; Lunar Magic replaces that lookup (`$058A65`) with a call to its
-/// foreground pointer routine for every tile number, which is also the only
-/// way to reach pages 2 and up. Background definitions stay separate:
-/// their tile numbers overlap foreground pages 2 and 3.
+/// loaded level's object grid, and of every other tile of the pages
+/// those numbers are on and of the first [`FG_PAGES`] pages, the way the
+/// level's tilemap upload does. Vanilla reads pages 0 and 1 through the
+/// pointer table the loader built in RAM; Lunar Magic replaces that
+/// lookup (`$058A65`) with a call to its foreground pointer routine for
+/// every tile number, which is also the only way to reach pages 2 and up.
+/// Background definitions stay separate: their tile numbers overlap
+/// foreground pages 2 and 3. A tile the grid does not use and the
+/// routine cannot resolve is left out rather than failing the level.
 pub(super) fn lookup_map16(
     machine: &mut Machine,
     lunar_magic: bool,
@@ -95,29 +98,64 @@ pub(super) fn lookup_map16(
         .collect();
     numbers.sort_unstable();
     numbers.dedup();
-    let mut out = HashMap::with_capacity(numbers.len());
+    let mut pages: Vec<usize> = (0..FG_PAGES)
+        .chain(numbers.iter().map(|&n| n as usize / PAGE_TILES))
+        .collect();
+    pages.sort_unstable();
+    pages.dedup();
+    let mut out = HashMap::with_capacity(pages.len() * PAGE_TILES);
     for n in numbers {
-        let ptr = if lunar_magic {
-            machine.call(
-                Call::jsl(routines::LM_MAP16_POINTER)
-                    .wide_accumulator()
-                    .wide_index()
-                    .accumulator(n.wrapping_mul(2))
-                    .limit(LOOKUP_STEP_LIMIT),
-            )?;
-            let bank = machine.bus.ram.u8(ram::LM_MAP16_BANK) as u32;
-            Some((bank << 16) | machine.cpu.a as u32)
-        } else if n < 0x200 {
-            let pointer = machine.bus.ram.u16_at(ram::MAP16_POINTERS, n as u32);
-            Some(0x0D_0000 | pointer as u32)
-        } else {
-            None
-        };
-        if let Some(ptr) = ptr {
-            out.insert(n, read_map16(&mut machine.bus, ptr));
+        if let Some(tile) = lookup_one(machine, lunar_magic, n)? {
+            out.insert(n, tile);
+        }
+    }
+    for n in pages.into_iter().flat_map(|page| {
+        let first = (page * PAGE_TILES) as u16;
+        first..first + PAGE_TILES as u16
+    }) {
+        if out.contains_key(&n) {
+            continue;
+        }
+        if let Ok(Some(tile)) = lookup_one(machine, lunar_magic, n) {
+            out.insert(n, tile);
         }
     }
     Ok(out)
+}
+
+/// Tiles per Map16 page.
+pub const PAGE_TILES: usize = 0x100;
+
+/// Foreground pages resolved for every level, used or not: the vanilla
+/// pages 0 and 1, and Lunar Magic's pages 2 and 3, which the numbers of
+/// the background tiles overlap. Higher pages are resolved whole only
+/// when the grid uses a tile on them.
+pub const FG_PAGES: usize = 4;
+
+/// The definition of one foreground tile number, or `None` where the ROM
+/// has no such tile (a vanilla ROM has pages 0 and 1 only).
+fn lookup_one(
+    machine: &mut Machine,
+    lunar_magic: bool,
+    n: u16,
+) -> Result<Option<Map16Tile>, ExpandError> {
+    let ptr = if lunar_magic {
+        machine.call(
+            Call::jsl(routines::LM_MAP16_POINTER)
+                .wide_accumulator()
+                .wide_index()
+                .accumulator(n.wrapping_mul(2))
+                .limit(LOOKUP_STEP_LIMIT),
+        )?;
+        let bank = machine.bus.ram.u8(ram::LM_MAP16_BANK) as u32;
+        (bank << 16) | machine.cpu.a as u32
+    } else if n < 0x200 {
+        let pointer = machine.bus.ram.u16_at(ram::MAP16_POINTERS, n as u32);
+        0x0D_0000 | pointer as u32
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(read_map16(&mut machine.bus, ptr)))
 }
 
 /// The four position-dependent definitions of each vertical pipe tile,
@@ -169,5 +207,13 @@ mod tests {
         let result = lookup_map16(&mut machine, true).unwrap();
         assert_eq!(result[&0x200], page_two);
         assert_eq!(result[&0x300], page_three);
+        // Every tile of the first four pages is resolved, used or not,
+        // and so is the rest of a higher page the grid touches.
+        machine.bus.ram.set_u8_at(ram::TILES_HIGH, 2, 0x10);
+        let result = lookup_map16(&mut machine, true).unwrap();
+        assert!((0..(FG_PAGES * PAGE_TILES) as u16).all(|n| result.contains_key(&n)));
+        assert_eq!(result[&0x3FF], Map16Tile::from_bytes([0; 8]));
+        assert!((0x1000..0x1100).all(|n| result.contains_key(&n)));
+        assert!(!result.contains_key(&0x0400));
     }
 }

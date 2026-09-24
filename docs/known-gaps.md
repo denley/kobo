@@ -6,6 +6,12 @@ What a rendered level does not reproduce, and what the tooling does not handle.
   (see the layer facts in [smw.md](smw.md)); parallax is not reproduced away from the entry
   screen, the status bar is left out, and an axis layer 3 does not scroll along cannot be
   followed once the camera moves.
+  Decided 2026-09-24: this stays as it is. Lunar Magic simulates no parallax either; it
+  tiles both layers from the level's origin at layer 1's scale. Anchoring at the entry
+  frame instead is exact on the entry screen, which the video oracle checks, and shows
+  what the game's load-time offsets and a hack's level-init code did to the layer; the two
+  coincide when the level is entered at its origin. Origin anchoring, if a GUI wants the
+  familiar picture, is a render option to add, not a change of model.
 - Windows are applied only on a boss arena's fixed screen: they are screen positions, which
   a picture of a whole scrolling level has no place for. The spotlight rooms (mode `$11`)
   render uniformly dark, which is what the game shows until the light switch is hit (the
@@ -15,7 +21,13 @@ What a rendered level does not reproduce, and what the tooling does not handle.
   off the left screen edge and no scrolling, so anything that waits for Mario or spawns
   over time (Bullet Bill shooters, generators, Lakitu's Spinies, a Magikoopa, Monty Moles
   in some hacks) is a marker or not what a player sees, and sprites that interact with one
-  another only do so when they share a spot. Off the left edge of the first screen Mario
+  another only do so when they share a spot. Decided 2026-09-24: this stays as it is.
+  Lunar Magic shows every sprite as a static picture at its placement (its own tile
+  mappings for vanilla sprites, the `.ssc` display file's for custom ones, a numbered box
+  otherwise) and never runs one, so a marker here is what the editor shows too, and a
+  sprite that draws on its first frame is already better than that. Drawing the waiting
+  and spawning ones one day (by giving a pass the player, or frames) would be welcome; it
+  is not owed before the renderer is called complete. Off the left edge of the first screen Mario
   is on screen `$FF`, where the game never has him: a custom sprite that jumps through a
   table indexed by his screen (QLDC 2021 `79_Hwailaluta`, levels `105`, `108`, `109`;
   `34_idol`, levels `1AC`–`1AF`) runs off it (`BRK at $14:C922`) and is a marker; keeping
@@ -60,6 +72,12 @@ What a rendered level does not reproduce, and what the tooling does not handle.
   level's back area has. A level that enables HDMA, or touches other hardware the bus
   does not model, says so in a render warning (`Diagnostic::Unsupported`); hardware with
   nothing to model, such as a probe of open bus, is not reported.
+  Decided 2026-09-24: this stays as it is. The game builds its HDMA tables each frame of
+  the level loop, which the renderer never plays, and an effect is defined per scanline of
+  a 224-line frame, which a whole-level picture has no place for. Lunar Magic's editor view
+  shows no HDMA effects either, so the picture matches what hack authors edit against. The
+  boss arena window is the one exception, since its table is written during loading and
+  describes a fixed screen. Revisit only for a GUI viewport, which is a single frame.
 - The GFX tooling refuses ROMs their authors locked (`GfxError::Locked`, see
   [lunar-magic.md](lunar-magic.md)): their pointer tables are not addresses. Levels are
   unaffected, since the ROM's own decompression runs for them. There is no LC_LZ2 or

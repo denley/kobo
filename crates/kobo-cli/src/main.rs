@@ -9,7 +9,7 @@ use kobo_core::expand;
 use kobo_core::gfx::{self, Bpp, GFX_FILE_COUNT};
 use kobo_core::image::{grayscale, tile_sheet};
 use kobo_core::level::{self, Layer2Data};
-use kobo_core::map16;
+use kobo_core::map16::{self, Map16Tile};
 use kobo_core::palette::{self, LevelPaletteSelect};
 use kobo_core::ram::RamAddr;
 use kobo_core::render::{self, LayerTiles, RenderOptions, Sprites};
@@ -168,7 +168,7 @@ enum LevelCommand {
         #[arg(long)]
         near_bank: Option<String>,
     },
-    /// Print foreground Map16 definitions from the loaded object grid,
+    /// Print the foreground Map16 definitions the loaded level resolved,
     /// as `NNNN: 8 hex bytes` lines.
     Map16 {
         #[command(flatten)]
@@ -199,7 +199,10 @@ enum LevelCommand {
 
 #[derive(Subcommand)]
 enum PaletteCommand {
-    /// Render the level palette as a 16x16 swatch grid.
+    /// Render a level palette as a 16x16 swatch grid. With `--level`, the
+    /// palette the ROM's loader uploaded for that level, custom palettes
+    /// and patches included; otherwise the vanilla assembly of the rows
+    /// given.
     Png {
         #[command(flatten)]
         rom: RomArg,
@@ -212,15 +215,22 @@ enum PaletteCommand {
 
 #[derive(Subcommand)]
 enum Map16Command {
-    /// Render all 0x400 Map16 tiles of a tileset as a 16-column sheet.
+    /// Render a layer's Map16 tiles as a 16-column sheet in tile number
+    /// order. With `--level`, the definitions, graphics, and palette the
+    /// ROM's loader resolved for that level, Lunar Magic pages included;
+    /// otherwise the vanilla tables of a tileset.
     Png {
         #[command(flatten)]
         rom: RomArg,
         #[command(flatten)]
         sel: PaletteArgs,
-        /// Object tileset (0 to 14). Overrides the level's tileset.
+        /// Object tileset (0 to 14) for the vanilla tables. Not used with
+        /// `--level`, whose graphics are the ones the level loaded.
         #[arg(long)]
         tileset: Option<u8>,
+        /// Layer 1 (foreground) or 2 (background, tiles from 200).
+        #[arg(long, default_value_t = 1)]
+        layer: u8,
         /// Output PNG path.
         out: PathBuf,
     },
@@ -353,9 +363,10 @@ fn main() -> Result<()> {
                     rom,
                     sel,
                     tileset,
+                    layer,
                     out,
                 },
-        } => map16_png(&rom.load()?, &sel, tileset, &out),
+        } => map16_png(&rom.load()?, &sel, tileset, layer, &out),
         Command::Addr { addr, sa1 } => convert_addr(&addr, sa1),
     }
 }
@@ -592,27 +603,91 @@ fn level_tiles(rom: &Rom, level: &str) -> Result<()> {
     Ok(())
 }
 
+/// Loads a level for a sheet command, reporting its diagnostics as
+/// `level png` does.
+fn load_for_sheet(rom: &Rom, level: &str) -> Result<(u16, expand::LoadedLevel)> {
+    let level = parse_level(level)?;
+    let loaded = expand::expand_level(rom, level)?;
+    for line in expand::summarize(&loaded.diagnostics) {
+        eprintln!("warning: level {level:03X}: {line}");
+    }
+    Ok((level, loaded))
+}
+
 fn palette_png(rom: &Rom, sel: &PaletteArgs, out: &PathBuf) -> Result<()> {
-    let (sel, _) = sel.resolve(rom)?;
-    let pal = palette::vanilla_level_palette(rom, sel)?;
+    let (pal, what) = match &sel.level {
+        Some(level) => {
+            let (level, loaded) = load_for_sheet(rom, level)?;
+            (loaded.video.palette(), format!("level {level:03X}"))
+        }
+        None => {
+            let (sel, _) = sel.resolve(rom)?;
+            (
+                palette::vanilla_level_palette(rom, sel)?,
+                format!("palette {sel:?}"),
+            )
+        }
+    };
     let img = render::palette_swatch(&pal, 16);
     img.write_png(out)?;
-    println!("palette {sel:?} -> {}", out.display());
+    println!("{what} -> {}", out.display());
     Ok(())
 }
 
-fn map16_png(rom: &Rom, sel: &PaletteArgs, tileset: Option<u8>, out: &PathBuf) -> Result<()> {
-    let (sel, level_tileset) = sel.resolve(rom)?;
-    let tileset = tileset.or(level_tileset).unwrap_or(0);
-    let pal = palette::vanilla_level_palette(rom, sel)?;
-    let back = palette::vanilla_back_area_color(rom, sel.back_area)?.to_rgb8();
-    let table = map16::vanilla_map16(rom, tileset, true)?;
-    let tiles = LayerTiles::for_object_tileset(rom, tileset)?;
-    let img = render::map16_sheet(&table, &tiles, &pal, back, 16);
+fn map16_png(
+    rom: &Rom,
+    sel: &PaletteArgs,
+    tileset: Option<u8>,
+    layer: u8,
+    out: &PathBuf,
+) -> Result<()> {
+    if !(1..=2).contains(&layer) {
+        bail!("layer must be 1 or 2");
+    }
+    let first = if layer == 1 { 0 } else { map16::FG_TILE_COUNT };
+    let (definitions, tiles, pal, back, what): (Vec<Option<Map16Tile>>, _, _, _, _) =
+        match &sel.level {
+            Some(level) => {
+                if tileset.is_some() {
+                    bail!("--tileset selects the vanilla tables; leave it out with --level");
+                }
+                let (level, loaded) = load_for_sheet(rom, level)?;
+                let definitions = if layer == 1 {
+                    loaded.tiles.foreground_map16()
+                } else {
+                    loaded.tiles.bg_map16.iter().copied().map(Some).collect()
+                };
+                // The back area colour is the fixed colour the level set
+                // up, not a CGRAM entry.
+                let back = loaded.scene.screen.fixed_color.to_rgb8();
+                (
+                    definitions,
+                    LayerTiles::from_vram(&loaded.video.vram),
+                    loaded.video.palette(),
+                    back,
+                    format!("level {level:03X}"),
+                )
+            }
+            None => {
+                let (sel, _) = sel.resolve(rom)?;
+                let tileset = tileset.unwrap_or(0);
+                let table = map16::vanilla_map16(rom, tileset, true)?;
+                let (foreground, background) = table.tiles.split_at(map16::FG_TILE_COUNT);
+                let tiles = if layer == 1 { foreground } else { background };
+                (
+                    tiles.iter().copied().map(Some).collect(),
+                    LayerTiles::for_object_tileset(rom, tileset)?,
+                    palette::vanilla_level_palette(rom, sel)?,
+                    palette::vanilla_back_area_color(rom, sel.back_area)?.to_rgb8(),
+                    format!("tileset {tileset}, palette {sel:?}"),
+                )
+            }
+        };
+    let img = render::map16_sheet(&definitions, &tiles, &pal, back, 16);
     img.write_png(out)?;
     println!(
-        "tileset {tileset}, palette {sel:?}: {} tiles, {}x{} -> {}",
-        table.tiles.len(),
+        "{what}, layer {layer}: tiles {first:03X}-{:03X}, {}x{} -> {}",
+        first + definitions.len().max(1) - 1,
         img.width,
         img.height,
         out.display()

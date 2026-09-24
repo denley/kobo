@@ -114,6 +114,12 @@ how each oracle is produced, where its data lives, and what is known not to matc
   capture got one level: the emulator stays in game mode `$14` on `026`, the cutscene level
   whose sprite waits for a button ([known-gaps.md](known-gaps.md)).
 - Lunar Magic exports (hashes in `tests/fixtures/`) are the oracle for GFX, palette, and Map16.
+- `tests/map16_sheet.rs` checks that the foreground Map16 a loaded vanilla level resolves
+  (`LevelTiles::foreground_map16`, what `map16 png --level` draws) is the vanilla table of
+  its tileset, and its background definitions the BG table. The sheet a level shows differs
+  from the tileset's only where a tile references the animated area of VRAM (`$040`-`$07F`
+  and the coin, water, and scenery frames), which the loaded level has as the first frame
+  uploaded it, and in the palette entries the vanilla assembly leaves black (Mario's row).
 - `tests/render_levels.rs` checks that vanilla level `105`'s dragon coins use the
   ROM's flashing yellow palette after the NMI, even with sprites and Mario hidden.
   It also changes the animation colours in an in-memory ROM copy to check that the

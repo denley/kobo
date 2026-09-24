@@ -15,7 +15,7 @@ pub use level::{
 use crate::expand::{LevelTiles, LoadedLevel};
 use crate::gfx::{self, Bpp, GfxError, Tile8};
 use crate::image::RgbImage;
-use crate::map16::{Map16Table, Map16Tile, Tile8Ref};
+use crate::map16::{Map16Tile, Tile8Ref};
 use crate::palette::{Color15, Palette};
 use crate::rom::Rom;
 use crate::video::{BossScene, LAYER_BITS, Layer1Registers, Layer3, Screen, SpriteObject, Window};
@@ -360,20 +360,21 @@ pub fn draw_map16_tile(
     }
 }
 
-/// Renders every tile of a Map16 table, `columns` per row, over a solid
-/// background colour.
+/// Renders a run of Map16 definitions in tile number order, `columns` per
+/// row, over a solid background colour; a `None` leaves its cell blank.
 pub fn map16_sheet(
-    table: &Map16Table,
+    definitions: &[Option<Map16Tile>],
     tiles: &LayerTiles,
     palette: &Palette,
     background: [u8; 3],
     columns: u32,
 ) -> RgbImage {
     let columns = columns.max(1);
-    let rows = (table.tiles.len() as u32).div_ceil(columns);
+    let rows = (definitions.len() as u32).div_ceil(columns);
     let mut img = RgbImage::new(columns * 16, rows * 16);
     img.pixels.fill(background);
-    for (i, tile) in table.tiles.iter().enumerate() {
+    for (i, tile) in definitions.iter().enumerate() {
+        let Some(tile) = tile else { continue };
         let x = (i as u32 % columns) * 16;
         let y = (i as u32 / columns) * 16;
         draw_map16_tile(&mut img, x, y, tile, tiles, palette);

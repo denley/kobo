@@ -140,8 +140,8 @@ cargo fmt --all
 cargo run -- rom info [-r rom]               # header, checksum, hash, identity
 cargo run -- gfx list|export|png [-r rom]    # GFX files: table, LM-layout .bin export, tile sheet
 cargo run -- level info 105                  # primary header and data pointers
-cargo run -- palette png --level 105 out.png # 16x16 swatch of the assembled level palette
-cargo run -- map16 png --level 105 out.png   # all 0x400 Map16 tiles in colour
+cargo run -- palette png --level 105 out.png # 16x16 swatch of the palette the level loaded
+cargo run -- map16 png --level 105 out.png   # the level's Map16 tiles in colour (--layer 2: BG)
 cargo run -- level png 105 out.png           # render a level by running the ROM's own loader
 cargo run -- level png 105 out.png --markers # ID boxes instead of sprite graphics (--no-sprites: none)
 cargo run -- level png 105 out.png --no-player # leave Mario out of the entrance

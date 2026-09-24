@@ -14,9 +14,11 @@ executable. Vanilla behaviour is in [smw.md](smw.md).
   `$058DA4` in the layer 2 tilemap upload with a `JSL` (to `$0EFD00`) that leaves the level's BG
   table pointer in `$0A`-`$0C`, chosen from a 3-byte pointer table at `$0EFD50` by the level's
   flags in `$7FC00B`. `expand` calls whatever the hook targets; 1.6x ROMs keep `$0D9100`.
-  `LevelTiles::map16` holds foreground definitions (including pages 2-3 resolved through
-  `$06F540`); `bg_map16` holds background definitions. Keep these separate despite their
-  overlapping tile numbers.
+  `LevelTiles::map16` holds foreground definitions (all of pages 0-3, resolved through
+  `$06F540`, plus whatever higher numbers the grid uses); `bg_map16` holds background
+  definitions. Keep these separate despite their overlapping tile numbers. The `palette png`
+  and `map16 png` commands with `--level` show these and the loaded CGRAM and VRAM, which
+  is what Lunar Magic's palette and Map16 editors show for a level.
 - Per-level flags at `$0EF310` (copied to `$7FC00B` by the hook at `$05803B`): bit 1 marks a
   Lunar Magic background stored at the level's own layer 2 pointer, bit 2 a 32-row background
   whose buffer uses `$200` bytes per screen. The hook leaves that stride in `$05`;

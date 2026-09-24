@@ -51,7 +51,9 @@ cargo run -- palette png --level 105 palette.png
 cargo run -- map16 png --level 105 map16.png
 ```
 
-Palette and Map16 sheet commands use the vanilla tables. Full level rendering follows
+With `--level`, the palette and Map16 sheet commands show what the ROM's loader produced
+for that level, as Lunar Magic's editors do; without it they use the vanilla tables. Full
+level rendering follows
 the ROM's loader and captured video state for Lunar Magic modifications. Rendering is a
 static editor view, not full emulation: animation, HDMA, and some interactions differ.
 See [known gaps](docs/known-gaps.md). A successful PNG can carry warnings; inspect them

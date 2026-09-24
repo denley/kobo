@@ -150,7 +150,9 @@ pub struct LevelTiles {
     pub rows: usize,
     pub low: Vec<u8>,
     pub high: Vec<u8>,
-    /// Foreground Map16 definitions for tile numbers in the object grid.
+    /// Foreground Map16 definitions as the level's upload resolves them:
+    /// every tile the ROM defines on the first [`super::FG_PAGES`] pages
+    /// and on any page the object grid uses a tile of.
     /// Lunar Magic pages 2 and 3 are distinct from the same-numbered BG
     /// tiles, which live in `bg_map16`. Prefer [`LevelTiles::map16_at`],
     /// which also knows the position-dependent pipe tiles.
@@ -218,6 +220,24 @@ impl LevelTiles {
             return Some(&variants[(along / 8) % PIPE_VARIANTS][(n - PIPE_TILES.start()) as usize]);
         }
         self.map16.get(&n)
+    }
+
+    /// The foreground Map16 definitions by tile number, from `0` to the
+    /// end of the last page that has one, with `None` where the ROM
+    /// defines no tile: the sheet Lunar Magic's Map16 editor shows for
+    /// layer 1. A vanilla pipe tile shows the variant the loader's pointer
+    /// table was left with; see [`LevelTiles::map16_at`] for its
+    /// position-dependent one.
+    pub fn foreground_map16(&self) -> Vec<Option<Map16Tile>> {
+        let pages = self
+            .map16
+            .keys()
+            .map(|&n| n as usize / super::PAGE_TILES + 1)
+            .max()
+            .unwrap_or(0);
+        (0..pages * super::PAGE_TILES)
+            .map(|n| self.map16.get(&(n as u16)).copied())
+            .collect()
     }
 
     /// Whether layer 2 shows the decoded background tilemap. A buffer held
