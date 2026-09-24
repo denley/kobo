@@ -2,7 +2,7 @@
 
 An open-source Super Mario World ROM editor and build system.
 Desktop app for Windows, Linux, and macOS.
-Early stage: roadmap step 1 is in progress.
+Early stage: roadmap step 1 is complete; step 2 is next.
 
 ## Principles
 

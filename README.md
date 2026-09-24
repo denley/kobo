@@ -1,13 +1,41 @@
 # Kobo
 
 Kobo is an open-source Super Mario World ROM editor and build system in development.
-What exists today is a **Rust library and command-line renderer**: it reads vanilla
-and Lunar Magic ROMs and renders levels to PNG, including many custom sprites and
-SA-1 hacks. The build pipeline and desktop editor are planned; they are not implemented.
+What exists today is a **Rust library and command-line renderer**. The build pipeline
+and desktop editor are planned; they are not implemented.
 
 The long-term model is a git-friendly project of text source files and assets, compiled
 by patching a separately supplied clean ROM. See [AGENTS.md](AGENTS.md) for the project
 principles, roadmap, and development conventions.
+
+## What it can do today
+
+- **Read any SMW ROM**: vanilla, Lunar Magic hacks, and SA-1 hacks, including images over
+  4 MiB, with or without a copier header. Address mapping is typed (LoROM, SA-1), and
+  SNES addresses convert to and from file offsets the way Asar does.
+- **Render any level to PNG** by running the ROM's own level loader on a headless 65816
+  core (two of them for SA-1), so whatever a hack patched into the loader, Lunar Magic's
+  Map16 pages, expanded level heights, custom palettes, ExGFX, and custom sprite loaders
+  (PIXI) come out as the game produces them. Layers 1, 2, and 3 are composed with the
+  PPU's screen designation and colour math; sprites are drawn by the game's own sprite
+  engine, one at a time, or as ID markers; Mario stands at the entrance; Mode 7 boss
+  arenas are rendered with their window.
+- **Inspect a level**: its header and pointers, its sprite list with extension bytes, the
+  expanded Map16 grid as hex or raw planes, the Map16 definitions it resolved, a RAM dump
+  after loading, and a trace of which ROM pages the loader read.
+- **Show a level's palette and Map16 tiles** as the loader produced them, which is what
+  Lunar Magic's palette and Map16 editors show, or the vanilla tables of any tileset.
+- **Work with graphics**: list, decompress (LC_LZ2 and LC_LZ3), and export GFX files in
+  Lunar Magic's layout, or render one as a tile sheet.
+- **Run under a budget**: long operations take an instruction budget, cancellation, and a
+  progress stage, and report hardware the machine does not model instead of guessing.
+
+Validation is against emulators and Lunar Magic rather than by eye: every vanilla level
+and every level of the SA-1 reference ROM match Mesen 2 dumps in tile grid, layer 3, and
+sprite slots; whole pictures match emulator frames on a sample; all 512 slots of 173 hack
+ROMs were rendered, with the remaining failures traced to the hacks themselves; and GFX,
+palette, and Map16 output is hashed against Lunar Magic's exports.
+What a picture does not reproduce is in [known gaps](docs/known-gaps.md).
 
 ## Build and try it
 
