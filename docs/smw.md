@@ -140,6 +140,36 @@ are SMWDisX's.
   then and there, as the console gives it, up to 16 times in one run (`Cpu::run`,
   `Bus::vblank`); a wait the handler does not end is given up as one nothing will.
 
+- Exits and entrances. Secondary entrances are one byte in each of four 512-entry tables
+  (`$05F800` destination low byte, `$05FA00`, `$05FC00`, `$05FE00`), indexed by the 9-bit
+  exit number whose bit 8 is the player's submap (`$0F` in `CODE_05D796`); of
+  `$05FE00` the game reads only bits 0-2, the entrance type (`$192A`). Exits `0CE`,
+  `0CF`, `0D0`, `0D9`, `0DB`, `0DE`, `0E1`, `0F0`, `0F6`, `0F7`, and `0FF` go to level 0 with
+  stray position bytes. The layer 2 scroll settings come from the high nibble of `$05F000`
+  through `DATA_05D720` (horizontal, `$1413`) and `DATA_05D710` (vertical, `$1414`), whose
+  entries 8-15 are zero. `$13CD` holds the midway screen (from `$05F400`); the midway tape's
+  block code (`$00F2DB`) skips setting `$13CE` when it is 0, so a midway point on screen
+  0 is never recorded. `CODE_05DBAC` sends the bonus game and the Yoshi wings to level low
+  byte `$00` or `$C8` (`DATA_05DBA9`) through the screen's exit, high byte from the submap.
+  Sublevels of translevel `$24` (Choc Island 2) run `CODE_05DAEF`, which picks alternate
+  rooms (`CODE_05DB3E` and on) from tables of 16-bit pointers (`ChocIsld2Layer1`,
+  `ChocIsld2Sprites`, `ChocIsld2Layer2`), banks left as the level's. On the overworld,
+  `CODE_04E5EE` adds 1 to the level's event (`$1DEA`) when the exit mode (`$0DD5`) is 2.
+- Every lookup of a block in a horizontal level assumes 27 rows (`$1B0` bytes a screen):
+  `LoadBlkPtrs` (`$00BEA8`) gives per level mode four tables of 3-byte screen pointers
+  (`Ptrs00BDA8`, `Ptrs00BDE8`, `Ptrs00BE28`, `Ptrs00BE68`: layers 1 and 2, low and high
+  planes) for the object loader (`$0586A1`), and the block code of Mario (`$00F492`),
+  sprites (`$019500`), the cape (`$0292F9`, `$0295EC`), fireballs (`$02A6BA`), Yoshi
+  (`$02BA71`), and others adds the split screen offsets `DATA_00BA60`/`BA70` (low) and
+  `BA9C`/`BAAC` (high). Bounds are `CMP #$01B0` (`$00F478`, `$0194D6`), rows `AND #$01F0`
+  (`GenerateTile`, the row and column uploads), and a sprite is erased once `Y + $50`
+  reaches `$200` (`$01AC40`, `$02D03A`, `$02FED6`, `$03B86C`). The column DMAs of
+  `Layer1Map16DMAData` move 22 rows (`$2C` bytes).
+- `CODE_02ABF2` clears only 64 (`LDX #$3F`) of the 128 sprite load flags at `$1938`.
+- `GfxDecompSP1` (`$0BF6`-`$0D75`) holds sprite tiles `4A`-`4F` and `5A`-`5F`
+  decompressed; Lunar Magic's VRAM patch frees it and keeps per-screen tables there
+  ([lunar-magic-install.md](lunar-magic-install.md)).
+
 ## Level data
 
 - Object data (`kobo_core::level::objects`): a five-byte header (layer 1's is the primary

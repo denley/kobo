@@ -163,8 +163,17 @@ on the built ROM.
    it, but its one-time install is gated by `$06F600` alone and wipes its tables when it
    runs, and a save never adds the 15 one-time hooks to a ROM whose gate is set.
 3. Write-side research. The tools are done ([toolchain.md](toolchain.md)). For Lunar
-   Magic, [lunar-magic.md](lunar-magic.md) has the footprint and the hook sites; what each
-   table and one-time hook does, and how older versions differ, is still to find.
+   Magic, [lunar-magic.md](lunar-magic.md) has the footprint and the hook sites, and
+   [lunar-magic-install.md](lunar-magic-install.md) the one-time set piece by piece: the
+   vanilla code each replaces, the feature (Map16 pages and the acts-like chain, taller
+   levels, backgrounds, exits and midway points, the sprite loader, per-level tables,
+   3.70's game loop hook), the fixed operands and slots other tools use, and the RAM a
+   level load leaves. A save keeps foreign code in the set's areas and never reinstalls
+   it, but rewrites four areas next to it (`$03BB00`, `$03BCA0`, `$05DD30`, `$0EF510`)
+   and six table pointers inside Kobo's code. Still to find: whether Lunar Magic's
+   restorable code reads the RAM the set leaves, the behaviour a level load does not
+   exercise (tile changes, block contact, scrolling, the overworld, special exits), the
+   custom block slots' empty state, and older versions' pieces.
 4. ROM writing. Done: writes through `SnesAddr` and `Mapping`, expansion, header and
    checksum (`Rom`), and `rats::FreeSpace`, tested on synthetic LoROM and SA-1 images.
    Its bank preferences and tag placement follow Asar's, with a deliberate difference:
@@ -287,8 +296,12 @@ on the built ROM.
 - AddmusicK overwrites `$0FF035`-`$0FF050`, which Lunar Magic's install fills. Lunar
   Magic's first save of a build with music writes its bytes back over AddmusicK's unused
   `$55` filler there and leaves AddmusicK's code and data alone
-  ([lunar-magic.md](lunar-magic.md)); whether AddmusicK run after Lunar Magic's install
-  keeps what Lunar Magic needs there is not checked (a build never does that).
+  ([lunar-magic.md](lunar-magic.md)). Every save rewrites `$0FF035`, and bytes below it
+  that are not `$FF`, from the state of the one-time code; what they record is unknown
+  ([lunar-magic-install.md](lunar-magic-install.md)).
+- Lunar Magic's layout fixes operands inside code: the Map16 page table pointers in the
+  `$06F540` routine, the secondary entrance table pointers at `$05DC81`-`$05DC8D` and
+  `$0DE191`-`$0DE1A1`, which every save rewrites, so Kobo's code has to put them there.
 - The tools: licences (three have none), directory-order dependence, and UberASM Tool on
   .NET outside Windows.
 - The corpus is ROMs, not projects; every test project is made by exporting from Lunar

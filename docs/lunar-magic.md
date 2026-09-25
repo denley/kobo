@@ -269,6 +269,8 @@ after a save and by changing bytes and saving again (the hook spike of
   hooks (`$00C17A`, `$00C25C`, `$02BA9E`, `$04DCFA`, `$04E5F1`, `$05803B`, `$058A65`,
   `$058B45`, `$058C33`, `$058D2A`, `$058DA4`, `$05D7CE`, `$05D8E2`, `$05DB5B`,
   `$05DBC2`) and 95 other ranges, `$695` bytes, in banks `$00`-`$06`, `$0D`, and `$0E`.
+  [lunar-magic-install.md](lunar-magic-install.md) has what each of them replaces, what it
+  is for, and what it leaves behind.
 - It never checks the code behind a hook. Foreign bytes at all 46 hook targets survive a
   save, and all 52 sites retargeted to a foreign RATS block count as installed, with the
   block kept.
