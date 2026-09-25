@@ -223,6 +223,12 @@ on the built ROM.
   level reader and writer, ROM writing and the allocator, the staged build and its cache, BPS output, Asar
   for Kobo's own patches, and import from MWL files and ROMs. Milestone: every vanilla
   level imported as text, rebuilt into expanded space, and rendering as vanilla does.
+  The MWL reader and writer are done (`kobo_core::mwl`, `kobo mwl info`), checked on
+  21,504 files Lunar Magic 3.70 exported from vanilla and 41 hacks
+  ([lunar-magic.md](lunar-magic.md#mwl-files)); importing one into a project waits for
+  the source format. An MWL is Lunar Magic's view of a level, not the ROM's: it rewrites
+  screen exits, objects `3C`-`3F` in tileset 4, and pre-3.00 header bits on export, so
+  import from an MWL and from the ROM can differ in those.
 - 2b starts with the one-time set. The first Lunar Magic-layout table Kobo writes needs the
   gate set, or Lunar Magic's install wipes it, and with the gate set Lunar Magic never
   installs the 15 one-time hooks and 95 one-time ranges itself. So Kobo provides all of

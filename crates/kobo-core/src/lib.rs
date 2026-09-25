@@ -15,6 +15,7 @@ pub mod image;
 pub mod import;
 pub mod level;
 pub mod map16;
+pub mod mwl;
 pub mod names;
 pub mod operation;
 pub mod palette;

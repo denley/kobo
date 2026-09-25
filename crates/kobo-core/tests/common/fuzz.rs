@@ -2,7 +2,56 @@
 //! Reproduce a case with its seed; this is not coverage-guided fuzzing.
 
 use kobo_core::level::objects::{self, Jumps, Layout};
+use kobo_core::mwl::{Layer2Data, Mwl, MwlFile};
 use kobo_core::{Rom, SnesAddr, compress, gfx, sprites};
+
+/// A small MWL file in Lunar Magic's layout: objects on both layers
+/// (mode 1), two sprites, one entrance, some ExAnimation bytes.
+fn mwl_seed() -> Vec<u8> {
+    let with_header = |b0: u8, data: &[u8]| {
+        let mut out = vec![b0, 0, 0, 0, 0x00, 0x80, 0x10, 0];
+        out.extend_from_slice(data);
+        out
+    };
+    let mut info = vec![0x05, 0x01, 0x5B, 0x00, 0x9A, 0x00];
+    info.resize(0x40, 0);
+    let objects = [
+        0x33, 0x01, 0x08, 0x80, 0x27, 0x0A, 0x53, 0x12, 0x98, 0xD2, 0x00, 0x03, 0x00, 0x01, 0x05,
+        0x04, 0x2D, 0x04, 0x03, 0x00, 0x21, 0xFF,
+    ];
+    let sections = [
+        info,
+        with_header(0, &objects),
+        with_header(0, &objects),
+        with_header(
+            0,
+            &[
+                0x20, 0x31, 0x61, 0x35, 0xFF, 0x01, 0x40, 0x81, 0x99, 0xFF, 0xFE,
+            ],
+        ),
+        with_header(0, &[0x11; 514]),
+        with_header(0, &[0xCB, 0x01, 0xA9, 0x08, 0x0E, 0, 0, 0]),
+        with_header(0, &[0x02, 0x00, 0xFF, 0xFF, 0, 0]),
+        vec![0x7F; 32],
+    ];
+    MwlFile {
+        version: 0x0370,
+        flags: [0; 4],
+        comment: [b' '; 48],
+        sections: sections.to_vec(),
+    }
+    .to_bytes()
+}
+
+/// The level without its encoded lengths, which the encoder chooses.
+fn without_lengths(mut mwl: Mwl) -> Mwl {
+    mwl.layer1.data.len = 0;
+    if let Layer2Data::Objects(data) = &mut mwl.layer2.data {
+        data.len = 0;
+    }
+    mwl.sprites.list.len = 0;
+    mwl
+}
 
 pub fn case(mut seed: u64) {
     let mut next = || {
@@ -69,6 +118,30 @@ pub fn case(mut seed: u64) {
         assert_eq!(back.data, *data);
         assert_eq!(back.consumed, packed.len());
         assert!(packed.len() <= data.len() + 2 * data.len().div_ceil(1024) + 1);
+    }
+    if let Ok(list) = sprites::decode(&input, None) {
+        assert!(list.len <= input.len());
+    }
+    // An MWL file with a few bytes changed and maybe cut short: what
+    // decodes encodes to a file that decodes the same.
+    let mut mwl = mwl_seed();
+    let changes = next() % 8;
+    for _ in 0..changes {
+        let at = next() as usize % mwl.len();
+        mwl[at] = next() as u8;
+    }
+    if next() % 4 == 0 {
+        mwl.truncate(next() as usize % mwl.len());
+    } else if changes == 0 {
+        assert!(MwlFile::parse(&mwl).and_then(|f| f.decode(None)).is_ok());
+    }
+    for bytes in [&mwl, &input] {
+        if let Ok(level) = MwlFile::parse(bytes).and_then(|f| f.decode(None))
+            && let Ok(file) = level.to_file(None)
+        {
+            let again = file.decode(None).unwrap();
+            assert!(without_lengths(again) == without_lengths(level));
+        }
     }
     // Valid container shape, arbitrary headers and pointer operands. Without
     // a structured seed, almost every ROM mutation is rejected at BadSize.

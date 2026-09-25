@@ -136,15 +136,99 @@ executable. Vanilla behaviour is in [smw.md](smw.md).
   (`ScreenExit::in_lunar_magic_format`). Its restore system will not change a ROM it
   does not recognise unless `sysLMRestore/smwOrig.smc` beside the ROM holds the original
   game with a copier header; the script puts one there.
-- An MWL export records where the level's data was in the ROM (three bytes of the layer 1
-  section's header, and the layer 2 pointer in its section's), so exports of the same
-  level from two ROMs differ there. Exporting a vanilla ROM, Lunar Magic records a
-  different background than the level's pointer for some levels (level `019`: `$FFDE54`,
-  where the pointer is `$FFD900`) and its export of the background differs from a
-  build's with the same pointer; not yet understood.
+- An MWL export records where the level's data was in the ROM, so exports of the same
+  level from two ROMs differ there (see "MWL files" below). A level whose layer 1 is the
+  shared empty level at `$068000` exports with the background at `$FFDE54`, so exports of
+  such a level from a vanilla ROM and from a build that moved its layer 1 differ in the
+  background too.
 - ROMs locked by their authors (see below) add objects past the level's last screen:
   Baby Kaizo World 3's level `014` has 8 screens and 779 objects, running to screen 48 and
   back, which no screen jump can express. `tests/level_data.rs` skips them.
+
+## MWL files
+
+Lunar Magic's single-level file ("Save Level to File", `-ExportLevel`, `-ExportMultLevels`),
+read and written by `kobo_core::mwl`. The layout is the community write-up "MWL File
+Format" (kaizoman666's SMW-Data repository, accurate to 3.63) with SMW Speedruns' level
+data format page, both saved in `~/.local/share/kobo/docs/`. What follows was checked on
+every level of the vanilla ROM and of 41 corpus hacks (Lunar Magic 1.62 to 3.51, two of
+them SA-1) exported by 3.70: 21,504 files, against the ROM each came from
+(`tests/mwl_files.rs`, [testing.md](testing.md)). The help file says only that an MWL holds
+the level, its background, sprites, palette, secondary entrances "and a few other things",
+and no graphics, Map16, or shared palettes. Lunar Magic refuses to open the seven locked
+ROMs of the corpus and Smb2dx ("Requested operation failed").
+
+- Container, confirmed: `"LM"`, the version as a word (`70 03`), the section table at `$40`,
+  `$40` long, flags `00 00 00 00`, and the comment `Lunar Magic 3.70  ©2026 FuSoYa  Defender
+  of Relm` (Latin-1). Eight sections follow the table in order with no gaps, the last
+  ending the file. Exporting again gives the same bytes.
+- Level information, 64 bytes: the level; the game's four secondary header bytes, equal to
+  the ROM's; `$05DE00`; two zero bytes; the four midway entrance bytes and a zero; then
+  `$06FC00`, `$06FE00`, the level size byte, and `$06FA00`, equal to the ROM's where its
+  version has them (3.00, 3.40); the rest zero.
+- Layer 1 and layer 2, sprites, palette, secondary entrances, and ExAnimation start with 8
+  bytes: byte 0 is the section's own, bytes 4-6 where the data was in the ROM (the layer 1
+  pointer, always), the rest zero. Layer 1's byte 0 is 1 exactly when `$0EF600` has a
+  custom palette for the level; layer 2's is the level's `$0EF310` flags as Lunar Magic 3.70
+  writes them; ExAnimation's is `$03FE00`.
+- Object data is the ROM's format and decodes to the ROM's objects, with screen jumps as
+  Lunar Magic 3 reads them whatever the ROM's version. A background is 2048 bytes of
+  16-bit tiles, the left half's 32 rows of 16 first, uncompressed, and equals
+  `level::Background::tiles` of the ROM's (27-row formats pad with tile 0). Its flags are
+  `V` and `F` (`$0C`) for the game's format, and `C` and `F` for Lunar Magic's: the ROM's
+  top nibble (`BB`, the BG Map16 bank) is kept if it had `F`, and folded into the tiles'
+  high bytes and cleared if not. Layer 2 objects or a background follow the flags, not the
+  level mode: boss levels export their pointer's background.
+- Sprite data is the ROM's list byte for byte, from the level's sprite pointer, and parses
+  to the same sprites given the ROM's PIXI size table, which the file lacks.
+- The palette section holds 256 colours and then the back area colour: a custom palette
+  equals the ROM's (which has the back area colour first). Without one, it is the palette
+  the header selects as the editor shows it, `palette::vanilla_level_palette` but for row 8,
+  where the editor puts the player's colours, and rows 0-1 colours 8-15, which the title
+  screen (level `0C7`, as the help file says) and some layer 3 settings replace.
+- Secondary entrances: 8 bytes each, the number, `$05FA00`, `$05FC00`, `$05FE00`, two
+  bytes of Lunar Magic 3's tables, and a zero. A level gets every entrance in use whose
+  destination is the level, destination bit 8 being bit 3 of `$05FE00` in Lunar Magic ROMs
+  and the entrance number's bit 8 in vanilla, and in use meaning any of its four bytes
+  nonzero. That does not hold for levels `000` and `100`, where the table's never-used
+  entries point, some with other bytes set; which of those Lunar Magic exports is not known.
+- ExAnimation data is the ROM's bytes at the header's address; the address is the ROM's
+  pointer as is, `$0000FF` (middle byte zero) meaning none.
+- ExGFX: sixteen words in the write-up's slot order; the vanilla ROM's levels all have `7F`
+  but SP4 `FFFF` and LG1-LG4 `28`-`2B`.
+
+Lunar Magic rewrites some things on export, which an import from the ROM will not see:
+
+- Screen exits come out in its own format (`u` set, `s` per exit, `h` the level's bit 8),
+  and not in the ROM's order.
+- In object tileset 4, objects `3C`-`3F` are rewritten: vanilla level `0BD`'s `3F` with
+  settings `F1` becomes `F0` and three more `3C`/`3F` objects, and `3D` settings `2F` become
+  `1F`. That is eleven vanilla levels (their copies in the hacks), and no other object
+  of any level is changed.
+- Level `0C5`'s vertical scroll setting 0 becomes 3, the only primary header change.
+- From a ROM before 3.00: layer 2 scroll setting 8 becomes 3; the Y bit of `$05DE00`
+  (`IWPYX---`, bit 4) and of `$05FE00` (`IPYXDAAA`, bit 5, when `P` is set) moves to bit 0
+  of `$06FC00` and of the entrance's first Lunar Magic 3 byte, except in vertical levels,
+  which keep it where it was; Lunar Magic 1.62's missing `$03FE00` (`$FF`) becomes 0; and
+  Lunar Magic 2.41's ExAnimation comes out in the current format (Kaizo Mario World 3,
+  seven levels).
+- Bit 3 of `$05FE00` is set to bit 8 of the destination.
+- A level whose layer 1 is vanilla's shared empty level (`$068000`) gets the background at
+  `$FFDE54` whatever its own pointer is. A background stream shorter than its format
+  (Kaizo Mario 2 level `1C7`, 743 bytes of 864) comes out with other tiles past its end.
+
+Not confirmed:
+
+- The midway entrance bytes, the level size byte, the entrance's two Lunar Magic 3 bytes,
+  and the ExGFX files were not compared with the ROM: the write-up locates their tables
+  through pointers in what Lunar Magic installs (`read3($05D9E4)+$0A`,
+  `read3(read3($05D9A2)+70)`, `read3($05DC86)`, `read3($0FF7FF)`), some of them surely
+  operands of its code, which Kobo does not read. Their layouts are the write-up's.
+- A ROM whose secondary entrance tables Lunar Magic moved (entrances past `$1FF`, Super
+  Riff World 2) is not compared; the tables are behind such pointers too.
+- No flag bit but SMA2 is known, and no SMA2 file was seen; nor any file from another
+  Lunar Magic version, whose layout may differ. Files before 1.60 were several files and
+  are not read. What Lunar Magic does with each section on import was not tested.
 
 ## What Lunar Magic installs, and how it decides
 

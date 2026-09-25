@@ -11,6 +11,7 @@ use kobo_core::gfx::{self, Bpp, GFX_FILE_COUNT};
 use kobo_core::image::{grayscale, tile_sheet};
 use kobo_core::level::{self, Layer2Data};
 use kobo_core::map16::{self, Map16Tile};
+use kobo_core::mwl::{self, MwlFile, Section};
 use kobo_core::palette::{self, LevelPaletteSelect};
 use kobo_core::ram::RamAddr;
 use kobo_core::rats::{self, FreeSpace};
@@ -115,6 +116,11 @@ enum Command {
         /// `tools.asar` in the user config.
         #[arg(long)]
         asar: Option<PathBuf>,
+    },
+    /// Inspect Lunar Magic's MWL level files.
+    Mwl {
+        #[command(subcommand)]
+        command: MwlCommand,
     },
     /// Convert between SNES addresses and ROM file offsets.
     Addr {
@@ -271,6 +277,19 @@ enum LevelCommand {
         rom: RomArg,
         /// Level number in hex, for example `105`.
         level: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum MwlCommand {
+    /// Print an MWL file's header and the sections found in it.
+    Info {
+        /// The MWL file.
+        file: PathBuf,
+        /// The ROM the file came from, whose PIXI size table says how
+        /// many extension bytes its sprites have; the file does not.
+        #[arg(long, short = 'r')]
+        rom: Option<PathBuf>,
     },
 }
 
@@ -461,6 +480,9 @@ fn main() -> Result<()> {
             &define,
             asar.as_deref(),
         ),
+        Command::Mwl {
+            command: MwlCommand::Info { file, rom },
+        } => mwl_info(&file, rom.as_deref()),
         Command::Addr { addr, sa1 } => convert_addr(&addr, sa1),
         Command::Import {
             from,
@@ -529,6 +551,99 @@ fn asm(
         rom.internal_header().checksum,
         asar.version()
     );
+    Ok(())
+}
+
+fn mwl_info(path: &std::path::Path, rom: Option<&std::path::Path>) -> Result<()> {
+    let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let file = MwlFile::parse(&bytes)?;
+    let comment: String = file.comment.iter().map(|&b| b as char).collect();
+    println!(
+        "version:          {}.{:02X}",
+        file.version >> 8,
+        file.version & 0xFF
+    );
+    println!(
+        "flags:            {:02X?}{}",
+        file.flags,
+        if file.is_sma2() { " (SMA2)" } else { "" }
+    );
+    println!("comment:          {:?}", comment.trim_end());
+    println!("sections:");
+    for (index, data) in file.sections.iter().enumerate() {
+        let name = Section::ALL.get(index).map_or("unknown", |s| s.name());
+        println!("  {index}  {name:20} {:5} bytes", data.len());
+    }
+    let rom = rom.map(Rom::load).transpose()?;
+    let sizes = rom
+        .as_ref()
+        .map(sprites::pixi_size_table)
+        .transpose()?
+        .flatten();
+    let level = file.decode(sizes)?;
+    let source = |h: mwl::SectionHeader| h.source().map_or("-".into(), |a| a.to_string());
+    let header = level.layer1.primary_header();
+    let info = &level.info;
+    println!("level:            {:03X}", info.level);
+    println!(
+        "secondary header: {:02X?}, Lunar Magic {:02X?} {:02X?}, midway {:02X?}",
+        info.secondary.to_bytes(),
+        info.secondary_lm,
+        info.lm3,
+        info.midway
+    );
+    println!(
+        "layer 1:          {} objects from {}, {} screens, mode {}, tileset {}",
+        level.layer1.data.objects.len(),
+        source(level.layer1.header),
+        header.screens,
+        header.level_mode,
+        header.object_tileset
+    );
+    let layer2 = match &level.layer2.data {
+        mwl::Layer2Data::Objects(data) => format!("{} objects", data.objects.len()),
+        mwl::Layer2Data::Background(tiles) => format!("background of {} tiles", tiles.len()),
+        mwl::Layer2Data::Empty => "empty".into(),
+    };
+    println!(
+        "layer 2:          {layer2} from {}, flags ${:02X}",
+        source(level.layer2.header),
+        level.layer2.flags()
+    );
+    let list = &level.sprites.list;
+    println!(
+        "sprites:          {} from {}, header ${:02X}",
+        list.sprites.len(),
+        source(level.sprites.header),
+        list.header.to_byte()
+    );
+    println!(
+        "palette:          {}, back area ${:04X}",
+        if level.layer1.custom_palette() {
+            "custom"
+        } else {
+            "the header's"
+        },
+        level.palette.back_area.0
+    );
+    let ids: Vec<String> = level
+        .entrances
+        .entries
+        .iter()
+        .map(|e| format!("{:03X}", e.id))
+        .collect();
+    println!("entrances:        {}", ids.join(" "));
+    println!(
+        "ExAnimation:      {} bytes, settings ${:02X}",
+        level.animation.data.len(),
+        level.animation.settings()
+    );
+    let exgfx: Vec<String> = mwl::ExGfx::SLOTS
+        .iter()
+        .zip(level.exgfx.0)
+        .map(|(slot, file)| format!("{slot} {file:03X}"))
+        .collect();
+    println!("ExGFX:            {}", exgfx.join(", "));
     Ok(())
 }
 

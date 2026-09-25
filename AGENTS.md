@@ -146,6 +146,8 @@ Early stage: roadmap step 1 is complete; step 2 is next, planned in `docs/step-2
 - `kobo_core::names` holds the names Kobo writes after ids (objects by object set, extended
   objects, sprites, tilesets, music) as data in `names.toml`; `LevelMode::name` names level
   modes. Take names from there; do not write lists of them elsewhere.
+- `kobo_core::mwl` reads and writes MWL files: `MwlFile` is the container, byte for byte,
+  and `Mwl` the level decoded through the codecs above.
 - `kobo_core::rats::FreeSpace` is the one way Kobo takes free space: everything it writes
   outside fixed addresses goes in a RATS-tagged block placed there. Asar interoperability
   limits and required toolchain checks are in `docs/toolchain.md`.
@@ -178,6 +180,7 @@ cargo run -- level png 105 out.png --markers # ID boxes instead of sprite graphi
 cargo run -- level png 105 out.png --no-player # leave Mario out of the entrance
 cargo run -- level tiles|dump 105 [dir]      # the expanded Map16 grid as hex, or raw planes
 cargo run -- level sprites|map16|wram|reads  # sprite list, resolved Map16, RAM dump, read trace
+cargo run -- mwl info level.mwl [-r rom]     # an MWL file's sections (-r: its ROM's PIXI sprite sizes)
 cargo run -- addr '$05E000' [--sa1]          # SNES <-> file offset
 cargo run --release --example sprite_census -- rom.smc  # sprite numbers that draw nothing, by level
 cargo run --release --example render_hashes -- rom.smc  # a hash per level picture, to diff across a change
@@ -211,8 +214,9 @@ Windows, and macOS. Keep all three green.
   committed: `KOBO_ORACLE_DIR` (Mesen 2 dumps of every vanilla level, `tools/oracle/`; of
   another ROM, the SA-1 reference ROM say, with `KOBO_ORACLE_ROM`),
   `KOBO_BOSS_ORACLE_DIR`, `KOBO_VIDEO_ORACLE_DIRS` (whole pictures), `KOBO_65816_TESTS`
-  (SingleStepTests), and `KOBO_LM_ROMS` (`:`-separated Lunar Magic hacks). Lunar Magic
-  exports (hashes in `tests/fixtures/`) are the oracle for GFX, palette, and Map16.
+  (SingleStepTests), `KOBO_LM_ROMS` (`:`-separated Lunar Magic hacks), and `KOBO_MWL_DIR`
+  (MWL exports, `tools/lunar-magic/export-mwl`). Lunar Magic exports (hashes in
+  `tests/fixtures/`) are the oracle for GFX, palette, Map16, and MWL files.
   `docs/testing.md` has how each is produced, where the data lives, and the known exceptions.
 - A change to `expand` or `render` that should not change any picture is checked with
   `examples/render_hashes.rs`: run it before and after on the vanilla ROM and a few hacks and
