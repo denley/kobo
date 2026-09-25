@@ -214,6 +214,27 @@ how each oracle is produced, where its data lives, and what is known not to matc
   vanilla all 538 object lists and 512 sprite lists but 18 object lists come out byte for
   byte ([smw.md](smw.md)). In the corpus, 70% to 100% of each ROM's lists do; the rest are
   Lunar Magic's encoding choices (every run on 2026-09-25 passed).
+- **MWL files**: `tests/mwl_files.rs` reads Lunar Magic's MWL exports when `KOBO_MWL_DIR`
+  is set, a directory of directories each holding one ROM (`.smc` or `.sfc`) and the MWL
+  files of its levels, named `level NNN.mwl`. `tools/lunar-magic/export-mwl <outdir>
+  rom...` makes them: it copies each ROM to `<outdir>/<name>/<name>.smc` and has Lunar
+  Magic 3.70 `-ExportMultLevels` all 512 levels from the copy (flags 0), reporting a ROM
+  it refuses. Every file must come back byte for byte from `MwlFile`, decode with the
+  ROM's PIXI size table, encode to a file that decodes the same, and agree with the level
+  in the ROM section by section, apart from the rewrites Lunar Magic makes on export
+  ([lunar-magic.md](lunar-magic.md#mwl-files)), which the test counts per ROM. A ROM
+  whose headerless SHA-1 is in `fixtures/lunar_magic_mwl_export.txt` must also have
+  exactly the files recorded there (a SHA-1 of the 512 concatenated in level order); the
+  test prints the line for one that is not. The export in `~/.local/share/kobo/mwl/`
+  (190 MiB, never committed) covers the vanilla ROM and 41 loose and `corpus_more` hacks,
+  every one Lunar Magic opens (it refuses the seven locked ROMs and Smb2dx); all 21,504
+  files passed on 2026-09-25, in two seconds:
+
+  ```sh
+  tools/lunar-magic/export-mwl ~/.local/share/kobo/mwl ~/.local/share/kobo/roms/*.smc \
+    ~/.local/share/kobo/roms/corpus_more/*.smc
+  KOBO_MWL_DIR=~/.local/share/kobo/mwl cargo test --release --test mwl_files -- --nocapture
+  ```
 - **SA-1**: the oracle script reads SA-1 Pack's RAM map (`ram()` in `dump_levels.lua` is
   `RamMap::Sa1Pack` for what it touches, and the full-WRAM dump is laid out as vanilla's)
   and hooks the pointer lookup on the SA-1 too, where the level loader runs. With
@@ -283,9 +304,10 @@ anything.
 
 `tests/input_robustness.rs` runs 512 repeatable synthetic mutation cases in CI, covering
 header size codes, mapped pointers, overflowing reads, truncated LC_LZ2, LC_LZ3, and
-LC_RLE1 streams, sprite lists, and object data, which must also encode back to the same
-objects, and round-trips noise and generated runs and repeats through the LC_LZ2
-compressor. The same generator runs for longer as an example:
+LC_RLE1 streams, sprite lists, object data, which must also encode back to the same
+objects, and MWL files, a small valid one with bytes changed or cut short, which must
+encode to a file that decodes the same, and round-trips noise and generated runs and
+repeats through the LC_LZ2 compressor. The same generator runs for longer as an example:
 
 ```sh
 cargo run --release --example fuzz_inputs -- 10000

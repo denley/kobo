@@ -174,11 +174,7 @@ pub fn encode(
                 });
             }
         }
-        let expected = sizes
-            .map(|t| t[(sprite.extra_bits as usize) << 8 | sprite.id as usize] as usize)
-            .unwrap_or(3)
-            .max(3)
-            - 3;
+        let expected = entry_size(sizes, sprite.extra_bits, sprite.id) - 3;
         if sprite.extension.len() != expected {
             return Err(SpriteEncodeError::Extension {
                 index,
@@ -208,6 +204,46 @@ pub fn encode(
         out.push(0xFF);
     }
     Ok(out)
+}
+
+/// An entry's size in bytes: 3, or what PIXI's size table says if more.
+/// A table too short to hold the entry says nothing about it.
+fn entry_size(sizes: Option<&[u8]>, extra_bits: u8, id: u8) -> usize {
+    sizes
+        .and_then(|t| t.get((extra_bits as usize) << 8 | id as usize))
+        .map_or(3, |&n| n as usize)
+        .max(3)
+}
+
+/// Why sprite data in memory does not parse.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum SpriteDecodeError {
+    #[error("sprite data ends at byte {0} without a terminator")]
+    Truncated(usize),
+    #[error("sprite data has no terminator within 64 KiB")]
+    TooLarge,
+    #[error("sprite data uses the unknown command $FF ${0:02X} at offset {1}")]
+    UnknownCommand(u8, usize),
+}
+
+/// Parses a sprite list held in memory, header byte first, as
+/// [`read_sprites_at`] does in a ROM; `sizes` is PIXI's size table (see
+/// [`pixi_size_table`]). Trailing bytes are ignored.
+pub fn decode(data: &[u8], sizes: Option<&[u8]>) -> Result<SpriteList, SpriteDecodeError> {
+    parse_with(
+        |i| {
+            if i >= MAX_LIST_BYTES {
+                return Err(ParseError::TooLarge);
+            }
+            data.get(i).copied().ok_or(ParseError::Need(i + 1))
+        },
+        sizes,
+    )
+    .map_err(|error| match error {
+        ParseError::Need(n) => SpriteDecodeError::Truncated(n - 1),
+        ParseError::TooLarge => SpriteDecodeError::TooLarge,
+        ParseError::UnknownCommand(b, at) => SpriteDecodeError::UnknownCommand(b, at),
+    })
 }
 
 /// PIXI's data-size table, if installed: one byte per (extra bits, sprite
@@ -295,10 +331,7 @@ fn parse_with(
         let b1 = get(i)?;
         let id = get(i + 1)?;
         let extra_bits = (b0 >> 2) & 0x03;
-        let size = sizes
-            .map(|t| t[(extra_bits as usize) << 8 | id as usize] as usize)
-            .unwrap_or(3)
-            .max(3);
+        let size = entry_size(sizes, extra_bits, id);
         let extension = (2..size - 1)
             .map(|k| get(i + k))
             .collect::<Result<_, _>>()?;
@@ -501,6 +534,23 @@ mod tests {
             encode(header, &[tall], None),
             Err(SpriteEncodeError::OutOfRange { field: "Y", .. })
         ));
+    }
+
+    #[test]
+    fn decodes_from_memory() {
+        let data = [0x80, 0x31, 0x61, 0x35, 0xFF, 0x12];
+        assert_eq!(decode(&data, None).unwrap(), parse(&data));
+        assert_eq!(
+            decode(&data[..3], None),
+            Err(SpriteDecodeError::Truncated(3))
+        );
+        assert_eq!(
+            decode(&[0x20, 0xFF, 0x80], None),
+            Err(SpriteDecodeError::UnknownCommand(0x80, 1))
+        );
+        // A size table too short for an entry says nothing about it.
+        let list = decode(&[0x00, 0x08, 0x00, 0x2A, 0xFF], Some(&[5; 0x100][..])).unwrap();
+        assert!(list.sprites[0].extension.is_empty());
     }
 
     #[test]

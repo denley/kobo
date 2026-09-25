@@ -366,11 +366,14 @@ pub fn read_objects(rom: &Rom, level: u16) -> Result<LevelObjects, LevelError> {
 /// keeps that for vanilla backgrounds (flag `V`) and has its own: 32 rows
 /// to a half, with the high bytes in a second block of the same size in
 /// the same stream when flag `F` is set, and the flags' top nibble for a
-/// high byte otherwise.
+/// high byte otherwise. A pointer with bank `$FF` is the game's format
+/// whatever the flags say.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Background {
     /// Where the stream starts.
     pub address: SnesAddr,
+    /// Whether the pointer had bank `$FF`.
+    pub bank_ff: bool,
     /// Lunar Magic's flags for the level, where it has them.
     pub flags: Option<u8>,
     /// The decompressed stream.
@@ -379,11 +382,73 @@ pub struct Background {
     pub stream_len: usize,
 }
 
+/// Columns in each half of a background tilemap.
+pub const BACKGROUND_COLUMNS: usize = 16;
+/// Rows in each half as Lunar Magic lays a background out, and as
+/// [`Background::tiles`] gives it; the game's format has 27.
+pub const BACKGROUND_ROWS: usize = 32;
+/// Tiles in a background: two halves.
+pub const BACKGROUND_TILES: usize = 2 * BACKGROUND_ROWS * BACKGROUND_COLUMNS;
+const GAME_BACKGROUND_ROWS: usize = 27;
+/// Where the game's backgrounds start using Map16 page 1.
+const BACKGROUND_PAGE_1: SnesAddr = SnesAddr::new(0x0CE8FE);
+/// Lunar Magic's level flags ([`tables::LEVEL_FLAGS`]) for backgrounds.
+pub const FLAG_VANILLA_BACKGROUND: u8 = 0x08;
+pub const FLAG_HIGH_BYTES: u8 = 0x04;
+pub const FLAG_CUSTOM_BACKGROUND: u8 = 0x02;
+
+impl Background {
+    /// The tilemap as Map16 numbers: the left half's 32 rows of 16, then
+    /// the right half's, as Lunar Magic's MWL files hold it. Formats with
+    /// 27 rows leave the rest 0, as do tiles past the end of the stream.
+    pub fn tiles(&self) -> Vec<u16> {
+        let flags = self.flags.unwrap_or(0);
+        let custom = !self.bank_ff
+            && flags & FLAG_VANILLA_BACKGROUND == 0
+            && flags & FLAG_CUSTOM_BACKGROUND != 0;
+        let byte = |i: usize| self.data.get(i).copied().unwrap_or(0) as u16;
+        let mut tiles = vec![0; BACKGROUND_TILES];
+        if custom && flags & FLAG_HIGH_BYTES != 0 {
+            for (i, tile) in tiles.iter_mut().enumerate() {
+                *tile = byte(BACKGROUND_TILES + i) << 8 | byte(i);
+            }
+            return tiles;
+        }
+        let high = if custom {
+            flags as u16 >> 4
+        } else {
+            (self.address >= BACKGROUND_PAGE_1) as u16
+        };
+        let half = GAME_BACKGROUND_ROWS * BACKGROUND_COLUMNS;
+        for side in 0..2 {
+            for i in 0..half {
+                let at = side * BACKGROUND_ROWS * BACKGROUND_COLUMNS + i;
+                tiles[at] = high << 8 | byte(side * half + i);
+            }
+        }
+        tiles
+    }
+}
+
 /// Reads and decompresses a level's background tilemap, if its level
 /// mode has one.
 pub fn read_background(rom: &Rom, level: u16) -> Result<Option<Background>, LevelError> {
-    let Layer2::Background(address) = read_objects(rom, level)?.layer2 else {
+    let Layer2::Background(_) = read_objects(rom, level)?.layer2 else {
         return Ok(None);
+    };
+    read_background_at(rom, level, layer2_ptr(rom, level)?).map(Some)
+}
+
+/// Reads and decompresses the background tilemap a level's layer 2
+/// pointer names, whatever its level mode.
+pub fn read_background_at(
+    rom: &Rom,
+    level: u16,
+    pointer: Layer2Data,
+) -> Result<Background, LevelError> {
+    let (address, bank_ff) = match pointer {
+        Layer2Data::Objects(address) => (address, false),
+        Layer2Data::Tilemap(address) => (address, true),
     };
     let unpacked = rle1::decompress(rom.read_tail(address)?)
         .map_err(|source| LevelError::Background { level, source })?;
@@ -391,12 +456,13 @@ pub fn read_background(rom: &Rom, level: u16) -> Result<Option<Background>, Leve
         .lunar_magic
         .then(|| rom.read_u8(tables::LEVEL_FLAGS.add(level as u32)))
         .transpose()?;
-    Ok(Some(Background {
+    Ok(Background {
         address,
+        bank_ff,
         flags,
         data: unpacked.data,
         stream_len: unpacked.consumed,
-    }))
+    })
 }
 
 /// A level's secondary header: one byte from each table in
@@ -518,6 +584,37 @@ mod tests {
         assert_eq!((h.midway_screen, h.fg_position, h.bg_position), (9, 1, 2));
         assert!(h.no_yoshi_intro && !h.unknown && h.vertical_position);
         assert_eq!(h.entrance_screen, 5);
+    }
+
+    #[test]
+    fn background_tiles_in_each_format() {
+        let game = |address: u32, flags| Background {
+            address: SnesAddr::new(address),
+            bank_ff: true,
+            flags,
+            data: (0..864).map(|i| i as u8).collect(),
+            stream_len: 0,
+        };
+        // 27 rows a half, the page by address, rows 27 to 31 blank.
+        let tiles = game(0x0CE8FE, Some(0x06)).tiles();
+        assert_eq!(tiles.len(), BACKGROUND_TILES);
+        assert_eq!((tiles[0], tiles[431], tiles[432]), (0x100, 0x1AF, 0));
+        assert_eq!(tiles[512], 0x100 | (432 % 256) as u16);
+        assert_eq!(game(0x0CE8FD, None).tiles()[1], 0x001);
+        // Lunar Magic's own: the flags' top nibble for a high byte, or
+        // high bytes after the low ones.
+        let custom = Background {
+            bank_ff: false,
+            ..game(0x108000, Some(0x32))
+        };
+        assert_eq!(custom.tiles()[1], 0x301);
+        let full = Background {
+            flags: Some(0x06),
+            data: (0..2048).map(|i| (i / 4) as u8).collect(),
+            ..custom
+        };
+        assert_eq!(full.tiles()[1023], 0xFFFF);
+        assert_eq!(full.tiles()[4], 0x0101);
     }
 
     #[test]
