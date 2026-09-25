@@ -1,7 +1,7 @@
 //! `kobo`: command-line shell over the Kobo core library.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
@@ -54,6 +54,47 @@ enum Command {
     Map16 {
         #[command(subcommand)]
         command: Map16Command,
+    },
+    /// Import a ROM's levels into a new project.
+    Import {
+        /// The ROM to import from.
+        from: PathBuf,
+        /// The project directory to create.
+        dir: PathBuf,
+        /// Import every level, not only those that differ from the clean ROM.
+        #[arg(long)]
+        all: bool,
+        /// The clean ROM. Defaults to the configured vanilla ROM.
+        #[command(flatten)]
+        rom: RomArg,
+    },
+    /// Build a project into a ROM.
+    Build {
+        /// The project directory.
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+        /// Output ROM path.
+        #[arg(long, short = 'o', default_value = "build.sfc")]
+        out: PathBuf,
+        /// Run every stage, without reading or keeping snapshots.
+        #[arg(long)]
+        no_cache: bool,
+        /// The clean ROM. Defaults to the configured vanilla ROM.
+        #[command(flatten)]
+        rom: RomArg,
+    },
+    /// Compare the levels of two ROMs as Kobo reads them, whatever their
+    /// layouts; exits nonzero if any differ.
+    Diff { a: PathBuf, b: PathBuf },
+    /// Rewrite a project's level files in Kobo's format, keeping comments
+    /// on lines of their own.
+    Fmt {
+        /// The project directory.
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+        /// Only report files that would change, and fail if any would.
+        #[arg(long)]
+        check: bool,
     },
     /// Convert between SNES addresses and ROM file offsets.
     Addr {
@@ -386,6 +427,20 @@ fn main() -> Result<()> {
                 },
         } => map16_png(&rom.load()?, &sel, tileset, layer, &out),
         Command::Addr { addr, sa1 } => convert_addr(&addr, sa1),
+        Command::Import {
+            from,
+            dir,
+            all,
+            rom,
+        } => import(&from, &dir, all, &rom.load()?),
+        Command::Build {
+            dir,
+            out,
+            no_cache,
+            rom,
+        } => build(&dir, &out, no_cache, &rom.load()?),
+        Command::Fmt { dir, check } => fmt(&dir, check),
+        Command::Diff { a, b } => diff(&a, &b),
     }
 }
 
@@ -794,6 +849,102 @@ fn rom_rats(rom: &Rom) -> Result<()> {
         blocks.len(),
         FreeSpace::scan(rom).free_bytes()
     );
+    Ok(())
+}
+
+fn import(from: &Path, dir: &Path, all: bool, clean: &Rom) -> Result<()> {
+    let rom = Rom::load(from).with_context(|| format!("loading {}", from.display()))?;
+    let report = kobo_core::import::import_rom(&rom, clean, dir, all)?;
+    for note in &report.notes {
+        println!("note: {note}");
+    }
+    let bytes: usize = report.unmodelled.iter().map(|(_, len)| len).sum();
+    if bytes > 0 {
+        println!(
+            "not imported: {} ranges ({bytes} bytes) of the clean ROM's space that the ROM changed outside its levels:",
+            report.unmodelled.len()
+        );
+        for (at, len) in report.unmodelled.iter().take(20) {
+            println!("  {at} +{len}");
+        }
+        if report.unmodelled.len() > 20 {
+            println!("  ...");
+        }
+    }
+    if !report.unread_blocks.is_empty() {
+        let bytes: usize = report.unread_blocks.iter().map(|b| b.len).sum();
+        println!(
+            "not imported: {} tagged blocks ({bytes} bytes) in the expanded ROM that no level uses",
+            report.unread_blocks.len()
+        );
+    }
+    println!("{}: {} levels imported", dir.display(), report.levels.len());
+    Ok(())
+}
+
+fn build(dir: &Path, out: &Path, no_cache: bool, clean: &Rom) -> Result<()> {
+    use kobo_core::build::{self, Cache, Project};
+    let project = Project::load(dir)?;
+    let cache = if no_cache { None } else { Cache::user() };
+    let rom = build::build_cached(clean, &project, cache.as_ref())?;
+    rom.save(out)?;
+    println!(
+        "{}: {} KiB, {} levels, sha1 {}",
+        out.display(),
+        rom.len() / 1024,
+        project.levels.len(),
+        rom.sha1_hex()
+    );
+    Ok(())
+}
+
+fn diff(a: &Path, b: &Path) -> Result<()> {
+    let load = |p: &Path| Rom::load(p).with_context(|| format!("loading {}", p.display()));
+    let diffs = kobo_core::import::diff_levels(&load(a)?, &load(b)?);
+    for d in &diffs {
+        println!("{:03X}: {}", d.level, d.parts.join(", "));
+    }
+    if !diffs.is_empty() {
+        bail!("{} levels differ", diffs.len());
+    }
+    println!("all 512 levels are the same");
+    Ok(())
+}
+
+fn fmt(dir: &Path, check: bool) -> Result<()> {
+    use kobo_core::source::level::Level;
+    use kobo_core::source::project::{MANIFEST, Manifest};
+    let manifest_path = dir.join(MANIFEST);
+    let text = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("reading {}", manifest_path.display()))?;
+    let manifest = Manifest::from_toml(&text)
+        .with_context(|| format!("reading {}", manifest_path.display()))?;
+    let mut files = vec![(manifest_path, text, manifest.to_toml())];
+    for file in manifest.levels.values() {
+        let path = dir.join(file);
+        let text =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let (level, comments) =
+            Level::from_toml(&text).with_context(|| format!("reading {}", path.display()))?;
+        let formatted = level.to_toml(&comments);
+        files.push((path, text, formatted));
+    }
+    let mut changed = 0;
+    for (path, text, formatted) in files {
+        if text != formatted {
+            changed += 1;
+            if check {
+                println!("would reformat {}", path.display());
+            } else {
+                fs::write(&path, formatted)
+                    .with_context(|| format!("writing {}", path.display()))?;
+                println!("reformatted {}", path.display());
+            }
+        }
+    }
+    if check && changed > 0 {
+        bail!("{changed} files are not in Kobo's format");
+    }
     Ok(())
 }
 

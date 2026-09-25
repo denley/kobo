@@ -132,6 +132,59 @@ pub struct ScreenExit {
     pub destination: u8,
 }
 
+/// What a standard object's settings byte holds, from the game's handlers
+/// (`CODE_0DA40F`'s table): a height and a width nibble, each one less than
+/// the tiles it gives, a type in place of one of them, or a length in the
+/// whole byte. The tileset-specific objects (`2E`-`3F`) differ by tileset
+/// and are kept as they are.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Settings {
+    HeightWidth,
+    HeightType,
+    TypeWidth,
+    /// A height, and a low nibble the handler does not read.
+    Height,
+    /// A width, and a high nibble the handler does not read.
+    Width,
+    /// A length in the whole byte.
+    Length,
+    Raw,
+}
+
+impl Settings {
+    pub fn of(number: u8) -> Self {
+        match number {
+            0x01..=0x0E | 0x14 | 0x16 | 0x18..=0x1B | 0x1D => Self::HeightWidth,
+            0x0F | 0x12 | 0x13 | 0x15 | 0x1E => Self::HeightType,
+            0x10 | 0x17 => Self::TypeWidth,
+            0x11 | 0x1F => Self::Height,
+            0x1C | 0x20 => Self::Width,
+            0x21 => Self::Length,
+            _ => Self::Raw,
+        }
+    }
+}
+
+impl ScreenExit {
+    /// Lunar Magic's format (`u`), where `h` is bit 8 of the destination.
+    pub const LUNAR_MAGIC: u8 = 0x04;
+    pub const HIGH: u8 = 0x01;
+
+    /// The exit in Lunar Magic's format, which says the destination's bit
+    /// 8 itself: in the game's, it is the current level's. Lunar Magic
+    /// rewrites a level's exits so when it saves the level.
+    pub fn in_lunar_magic_format(self, level: u16) -> Self {
+        if self.flags & Self::LUNAR_MAGIC != 0 {
+            return self;
+        }
+        let high = if level & 0x100 != 0 { Self::HIGH } else { 0 };
+        Self {
+            flags: (self.flags & !Self::HIGH) | Self::LUNAR_MAGIC | high,
+            ..self
+        }
+    }
+}
+
 /// Decoded object data.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ObjectData {
@@ -504,6 +557,22 @@ mod tests {
             }
         );
         round_trip(&decoded.objects, Layout::Horizontal, Jumps::Vanilla);
+    }
+
+    #[test]
+    fn exits_in_lunar_magic_format() {
+        let exit = ScreenExit {
+            screen: 7,
+            flags: 0x02,
+            destination: 0xCB,
+        };
+        assert_eq!(exit.in_lunar_magic_format(0x105).flags, 0x07);
+        assert_eq!(exit.in_lunar_magic_format(0x005).flags, 0x06);
+        let lunar = ScreenExit {
+            flags: 0x04,
+            ..exit
+        };
+        assert_eq!(lunar.in_lunar_magic_format(0x105), lunar);
     }
 
     #[test]

@@ -140,6 +140,9 @@ Early stage: roadmap step 1 is complete; step 2 is next, planned in `docs/step-2
   positions and drops screen jumps, `encode` chooses its own. `level::read_objects`,
   `read_background`, and `sprite_ptr` find a level's data from the ROM's tables, vanilla or
   Lunar Magic (`LevelFormat`); do not run the loader to find it.
+- `kobo_core::source` is the project's text formats (`kobo.toml`, level files); `import`
+  reads a ROM into them and `build` writes them onto the clean ROM. Kobo owns their
+  formatting: `Level::to_toml` of `from_toml` must give the same text back.
 - `kobo_core::rats::FreeSpace` is the one way Kobo takes free space: everything it writes
   outside fixed addresses goes in a RATS-tagged block placed there. Asar interoperability
   limits and required toolchain checks are in `docs/toolchain.md`.
@@ -154,6 +157,11 @@ cargo fmt --all
 cargo run -- rom info [-r rom]               # header, checksum, hash, identity
 cargo run -- rom expand 2M out.sfc [-r rom]  # a copy expanded, with the checksum fixed
 cargo run -- rom rats [-r rom]               # RATS blocks from $108000 on, and free space
+cargo run -- import hack.smc dir [--all]     # a ROM's changed (or all) levels as a new project
+cargo run -- build [dir] [-o out.sfc]        # a project onto the clean ROM
+cargo run -- fmt [dir] [--check]             # rewrite a project's files in Kobo's format
+cargo run -- diff a.sfc b.sfc                # levels that differ, however each ROM stores them
+tools/lunar-magic/save-check built.sfc       # Lunar Magic saves a copy; every level must survive
 cargo run -- gfx list|export|png [-r rom]    # GFX files: table, LM-layout .bin export, tile sheet
 cargo run -- level info 105                  # primary header and data pointers
 cargo run -- palette png --level 105 out.png # 16x16 swatch of the palette the level loaded
