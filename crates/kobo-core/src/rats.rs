@@ -2,14 +2,17 @@
 //!
 //! A RATS tag is the eight bytes before a block: `STAR`, then the block's
 //! length minus one and that value's complement, both 16-bit little-endian.
-//! Asar and every tool built on it take any run of `$00` for free space
-//! unless a valid tag covers it, and never let a block's contents cross a
-//! bank. Kobo tags every block it places the same way, so the tools that
-//! run after it leave its blocks alone, and places them first-fit in a
-//! fixed order, so the same image and the same requests give the same
-//! addresses. The placement follows Asar's `freecode` and `freedata`: on
-//! a LoROM image, a sequence of requests lands byte for byte where Asar
-//! 1.91 puts the same sequence.
+//! Kobo treats runs of `$00` outside valid tags as free space and keeps
+//! each block's contents within one bank. It places blocks first-fit in
+//! a fixed order, so the same image and requests give the same addresses.
+//! Its bank preferences and tag placement follow Asar's `freecode` and
+//! `freedata`, but placement is not guaranteed to match Asar byte for byte.
+//!
+//! Asar 1.91 can skip a valid tag when advancing to a bank boundary and
+//! overwrite zeros inside the protected block. Kobo preserves that block,
+//! including after a rescan. Tags alone therefore do not guarantee safety
+//! when a later tool runs Asar; `docs/toolchain.md` records the reproduction
+//! and the mitigation required before toolchain integration.
 
 use thiserror::Error;
 
@@ -321,6 +324,34 @@ mod tests {
             space.alloc(&mut rom, 0, Contents::Data),
             Err(FreeSpaceError::BadLength(0))
         ));
+    }
+
+    #[test]
+    fn bank_boundary_search_preserves_tagged_zeros() {
+        // Asar 1.91 overwrites the second block's last eight bytes with
+        // its third tag for this sequence. See docs/toolchain.md.
+        for rescan in [false, true] {
+            let mut rom = image(0x20, MIB);
+            let mut space = FreeSpace::scan(&rom);
+            let a = space.alloc(&mut rom, BANK, Contents::Code).unwrap();
+            let b = space
+                .alloc(&mut rom, BANK - TAG_LEN, Contents::Code)
+                .unwrap();
+            assert_eq!(a, SnesAddr::new(0x118000));
+            assert_eq!(b, SnesAddr::new(0x128008));
+            let protected_end = pc(&rom, b) + BANK - TAG_LEN;
+            let before = rom.data()[..protected_end].to_vec();
+
+            if rescan {
+                rom = Rom::from_bytes(rom.data().to_vec()).unwrap();
+                space = FreeSpace::scan(&rom);
+            }
+            let c = space.alloc(&mut rom, BANK, Contents::Code).unwrap();
+            assert_eq!(c, SnesAddr::new(0x148000));
+            assert_eq!(&rom.data()[..protected_end], before);
+            assert_eq!(blocks(&rom).len(), 3);
+            assert_eq!(tag_at(rom.data(), pc(&rom, c) - TAG_LEN), Some(BANK));
+        }
     }
 
     #[test]

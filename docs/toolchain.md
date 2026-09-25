@@ -7,8 +7,9 @@ address, "PC" an offset in the headerless file.
 
 ## Asar 1.91, and every tool built on it
 
-- Free space is runs of `$00`, skipping valid RATS blocks (`assembleblock.cpp:746`). LoROM
-  code goes in banks `$10`-`$3F`; data tries banks `$40` and up first on images over 2 MiB,
+- Free space is runs of `$00`, normally skipping valid RATS blocks (with the boundary
+  exception below). LoROM code goes in banks `$10`-`$3F`; data tries banks `$40` and up
+  first on images over 2 MiB,
   and never crosses a bank. A patch that needs more space expands the image, 512 KiB to
   1 MiB to 2 MiB (4 MiB for data), and rewrites `$00FFD7` and the checksum
   (`libsmw.cpp:244-352`).
@@ -17,6 +18,37 @@ address, "PC" an offset in the headerless file.
   `assembleblock.cpp:2081-2158`). Anything a tool repoints, or a hook site a tool takes
   over, has to lead to a block of its own: the tables at `$06F624` and `$06F63A` (GPS) and
   `$0EF30C` (PIXI), and the targets of the jumps at every tool's hook sites.
+
+### Asar 1.91 RATS boundary limitation
+
+Confirmed 2026-09-25 against Asar 1.91. On a synthetic 1 MiB LoROM, with `$FF` in the
+first 512 KiB and `$00` afterwards, Kobo allocates zero-filled code blocks of `$8000`
+and `$7FF8` bytes at `$118000` (PC `0x88000`) and `$128008` (PC `0x90008`). Their tags
+are at PC `0x87FF8` and `0x90000`; the second block ends at PC `0x98000`, exclusive.
+
+An Asar `freecode cleaned` request for another `$8000` bytes puts its tag at PC
+`0x97FF8`, overwriting the second block's last eight zeros with `53 54 41 52 FF 7F 00 80`.
+In `libsmw.cpp`, `trypcfreespace` advances to a bank edge before checking for a tag:
+after skipping the first block, it jumps past the second tag and searches inside that
+block. Kobo instead puts the third tag at PC `0x9FFF8`, with contents at `$148000`, and
+preserves both previous blocks. Byte-identical placement is not a requirement in this case.
+
+Reproduce the upstream behavior without a game ROM:
+
+```sh
+python3 tools/asar/rats_boundary.py ~/.local/bin/asar
+```
+
+The script constructs the two tagged blocks at the offsets above in a temporary synthetic
+image and checks the overwritten bytes after running Asar. It expects the 1.91 bug and
+fails if the behavior changes; it is a diagnostic, not a requirement for future Asar versions.
+The always-run `rats::tests::bank_boundary_search_preserves_tagged_zeros` regression checks
+Kobo's safe behavior for the same sequence, including after reloading the image and rescanning.
+
+Toolchain integration must guard against this corruption or detect it and fail the build
+before publishing an output. This remains open work in [step-2.md](step-2.md); the current
+allocator does not protect its blocks from subsequent Asar runs. Tests of tool stages must
+check preservation of existing blocks as well as placement of new ones.
 
 ## PIXI 1.43 (GPL-3.0)
 
