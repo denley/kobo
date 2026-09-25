@@ -265,6 +265,11 @@ on the built ROM.
   and tiles on pages 2 to `7F`, and page 2 per tileset, resolve from tables where Lunar
   Magic's layout puts their pointers (`tests/install.rs`). The overworld entry keeps the
   game's behaviour; how Lunar Magic stores overworld pages past 0 is not known.
+  `actslike.asm`: the gate, the acts-like chain, and the custom block actions, with
+  GPS's entry blocks and slots where GPS expects them. Its behaviour was learned from a
+  Lunar Magic-saved ROM by playing it against a logging GPS block
+  (`examples/contact_probe.rs`), and matches it in every scenario tried; vanilla with both
+  pieces renders all 512 levels as vanilla does.
 - 2b starts with the one-time set. The first Lunar Magic-layout table Kobo writes needs the
   gate set, or Lunar Magic's install wipes it, and with the gate set Lunar Magic never
   installs the 15 one-time hooks and 95 one-time ranges itself. So Kobo provides all of

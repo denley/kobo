@@ -179,7 +179,23 @@ call site of `$00F44D` whose return address the chain sees (the low byte GPS com
   the block while walking off either edge; with the right foot alone on the block
   standing still it gives "above". The condition is not yet known.
 - The "head" action is the side head point, not the head point (which gives "below").
-- Sprites, the cape, fireballs, and Yoshi's tongue are not yet probed.
+- Top corner: a foot contact whose touch point's X within its tile (`$9A & $0F`) is 0-2
+  or 13-15; any other foot contact is "above". A solid tile beside the block hides the
+  corner only because the game's feet check stops at the first foot on solid ground.
+- Sprites: "sprite above/below" from the vertical check (`CODE_0192C9`, its call into
+  `CODE_019441` returning to `$0192D2`), "sprite side" from the horizontal one
+  (`CODE_01928E`, `$019293`); the water check (`$01921E`) runs no action.
+- Order: the actions see the tile after the acts-like chain and before the game's
+  `RemapBlocks` (a tile acting as a coin is reported as `$02B` to them with the blue
+  P-switch running, and is then solid for the player). `$03` is the last tile looked up.
+- The default table a fresh install writes: pages 0 and 1 act as themselves, pages 2 to
+  `3F` as `$130` (cement); `$06F63A`-`$06F63C` is `$FF8000`, none. Solid matters: the
+  boss arenas' floors are sampled with high bytes past 1.
+- Kobo's implementation (`asm/lunar-magic/actslike.asm`) gives the same actions, at the
+  same points, with the same `Y`, `$1693`, and `$03`, in every probe scenario: the
+  player's, sprites', the cape's spin on both sides, and a fireball in the block (34
+  scenarios, 2026-09-26); GPS 1.4.4 inserts into it unchanged. Yoshi's tongue (3.70) is
+  neither probed nor implemented.
 
 ### Taller levels (3.00, "ExLevel")
 

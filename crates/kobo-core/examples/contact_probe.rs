@@ -6,7 +6,8 @@
 //! `contact_probe place in.mwl out.mwl x y` adds tile `$200` at (x, y) to an
 //! MWL file (Lunar Magic's object `27`). `contact_probe run rom.sfc [x y]`
 //! plays level `105` with the player put next to the tile at (x, y),
-//! default (6, 20), in each scenario, for small and big Mario, and prints
+//! default (6, 20), which it writes into the level's grid first, in each
+//! scenario, for small and big Mario, and prints
 //! the actions the probe block (`tools/lunar-magic/block-probe/probe.asm`)
 //! logged, with where the game sampled, relative to the player.
 
@@ -63,6 +64,13 @@ fn place(input: &str, output: &str, x: u16, y: u16) {
 fn run(path: &str, tile_x: i32, tile_y: i32) {
     let rom = Rom::load(path).unwrap();
     let (bx, by) = (tile_x * 16, tile_y * 16);
+    // Tile $200 in the grid (horizontal, 27 rows a screen), as Lunar
+    // Magic's object puts it and a ROM without that object code cannot.
+    let index = (tile_x / 16 * 0x1B0 + tile_y * 16 + tile_x % 16) as u32;
+    let place = |ram: &mut ram::Ram| {
+        ram.set_u8(ram::RamAddr::new(0x7E_C800 + index), 0x00);
+        ram.set_u8(ram::RamAddr::new(0x7F_C800 + index), 0x02);
+    };
     // Name, and the player's position and speeds on the first frame.
     let scenarios: [(&str, i32, i32, i8, i8); 12] = [
         ("fall onto", bx, by - 40, 0, 0x30),
@@ -82,6 +90,7 @@ fn run(path: &str, tile_x: i32, tile_y: i32) {
         for (name, x, y, x_speed, y_speed) in scenarios {
             let ram = expand::play_level(&rom, 0x105, 12, |frame, ram| {
                 if frame == 0 {
+                    place(ram);
                     ram.set_u8(ram::RamAddr::new(0x7E_0019), powerup);
                     ram.set_u16(ram::PLAYER_X, x as u16);
                     ram.set_u16(ram::PLAYER_Y, y as u16);
@@ -91,23 +100,99 @@ fn run(path: &str, tile_x: i32, tile_y: i32) {
                 }
             })
             .unwrap();
-            let mut seen = Vec::new();
-            for entry in 0..ram.u8(ram::RamAddr::new(LOG)) as u32 {
-                let byte = |k: u32| ram.u8(ram::RamAddr::new(LOG + 1 + 16 * entry + k)) as i32;
-                let word = |k: u32| byte(k) | byte(k + 1) << 8;
-                let (touch_x, touch_y) = (word(3), word(1));
-                let (player_x, player_y) = (word(5), word(7));
-                let text = format!(
-                    "{}@({:+},{:+})",
-                    ACTIONS[byte(0) as usize],
-                    touch_x - player_x,
-                    touch_y - player_y
-                );
-                if !seen.contains(&text) {
-                    seen.push(text);
-                }
-            }
-            println!("{size:5} {name:22} {}", seen.join(" "));
+            println!("{size:5} {name:22} {}", log(&ram).join(" "));
         }
     }
+    // Sprites: slot 0 alone, the player out of the way. Number, status
+    // (1 to start, $0A a kicked shell), position, speeds.
+    let sprites: [(&str, u8, u8, i32, i32, i8, i8); 4] = [
+        ("goomba dropped on", 0x0F, 0x01, bx, by - 20, 0, 0x10),
+        ("shell into left side", 0x04, 0x0A, bx - 20, by, 0x30, 0),
+        ("shell into right side", 0x04, 0x0A, bx + 20, by, -0x30, 0),
+        ("shell up into", 0x04, 0x0A, bx, by + 20, 0, -0x40),
+    ];
+    for (name, number, status, x, y, x_speed, y_speed) in sprites {
+        let ram = expand::play_level(&rom, 0x105, 16, |frame, ram| {
+            if frame == 0 {
+                place(ram);
+                ram.fill(ram::SPRITE_STATUS, ram.map().sprite_slots(), 0);
+                ram.set_u16(ram::PLAYER_X, (bx + 0x80) as u16);
+                ram.set_u8_at(ram::SPRITE_NUMBER, 0, number);
+                ram.set_u8_at(ram::SPRITE_STATUS, 0, status);
+                ram.set_u8_at(ram::SPRITE_X_LOW, 0, x as u8);
+                ram.set_u8_at(ram::SPRITE_X_HIGH, 0, (x >> 8) as u8);
+                ram.set_u8_at(ram::SPRITE_Y_LOW, 0, y as u8);
+                ram.set_u8_at(ram::SPRITE_Y_HIGH, 0, (y >> 8) as u8);
+                ram.set_u8_at(ram::RamAddr::new(0x7E_00B6), 0, x_speed as u8);
+                ram.set_u8_at(ram::RamAddr::new(0x7E_00AA), 0, y_speed as u8);
+                ram.set_u8(ram::RamAddr::new(LOG), 0);
+            }
+        })
+        .unwrap();
+        println!("sprite {name:22} {}", log(&ram).join(" "));
+    }
+    // The cape, spinning beside the block, and a fireball thrown into it
+    // (extended sprite 5, in one of the player's two slots).
+    for (name, side) in [
+        ("cape spin, left of it", -12i32),
+        ("cape spin, right of it", 12),
+    ] {
+        let ram = expand::play_level(&rom, 0x105, 12, |frame, ram| {
+            if frame == 0 {
+                place(ram);
+                ram.set_u8(ram::RamAddr::new(0x7E_0019), 2);
+                ram.set_u16(ram::PLAYER_X, (bx + side) as u16);
+                ram.set_u16(ram::PLAYER_Y, (by - 16) as u16);
+                ram.set_u8(ram::RamAddr::new(LOG), 0);
+            }
+            ram.set_u8(ram::RamAddr::new(0x7E_14A6), 0x12);
+        })
+        .unwrap();
+        println!("cape   {name:22} {}", log(&ram).join(" "));
+    }
+    for (name, x, y, speed, fall) in [
+        ("fireball from the left", bx - 24, by + 4, 0x30i8, 0i8),
+        ("fireball from the right", bx + 24, by + 4, -0x30, 0),
+        ("fireball in it", bx + 4, by + 4, 0x30, 0),
+        ("fireball onto it", bx + 4, by - 12, 0x10, 0x30),
+    ] {
+        let ram = expand::play_level(&rom, 0x105, 12, |frame, ram| {
+            if frame == 0 {
+                place(ram);
+                ram.set_u16(ram::PLAYER_X, (bx + 0x80) as u16);
+                ram.set_u8(ram::RamAddr::new(0x7E_170B + 8), 5);
+                ram.set_u8(ram::RamAddr::new(0x7E_171F + 8), x as u8);
+                ram.set_u8(ram::RamAddr::new(0x7E_1733 + 8), (x >> 8) as u8);
+                ram.set_u8(ram::RamAddr::new(0x7E_1715 + 8), y as u8);
+                ram.set_u8(ram::RamAddr::new(0x7E_1729 + 8), (y >> 8) as u8);
+                ram.set_u8(ram::RamAddr::new(0x7E_1747 + 8), speed as u8);
+                ram.set_u8(ram::RamAddr::new(0x7E_173D + 8), fall as u8);
+                ram.set_u8(ram::RamAddr::new(LOG), 0);
+            }
+        })
+        .unwrap();
+        println!("fire   {name:22} {}", log(&ram).join(" "));
+    }
+}
+
+/// The probe block's log: each action once, with where the game sampled
+/// relative to the player (or, for a sprite, where it sampled).
+fn log(ram: &ram::Ram) -> Vec<String> {
+    let mut seen = Vec::new();
+    for entry in 0..ram.u8(ram::RamAddr::new(LOG)) as u32 {
+        let byte = |k: u32| ram.u8(ram::RamAddr::new(LOG + 1 + 16 * entry + k)) as i32;
+        let word = |k: u32| byte(k) | byte(k + 1) << 8;
+        let (touch_x, touch_y) = (word(3), word(1));
+        let (player_x, player_y) = (word(5), word(7));
+        let text = format!(
+            "{}@({:+},{:+})",
+            ACTIONS[byte(0) as usize],
+            touch_x - player_x,
+            touch_y - player_y
+        );
+        if !seen.contains(&text) {
+            seen.push(text);
+        }
+    }
+    seen
 }

@@ -1,7 +1,9 @@
 //! Kobo's clean-room code for Lunar Magic's layout (`kobo_core::install`),
-//! checked by running it: the ROM's own loader and Map16 routine on the
-//! vanilla ROM with the patches applied. Needs Asar's library and the
-//! vanilla ROM.
+//! checked by running it: the ROM's own loader, Map16 routine, and block
+//! interaction on the vanilla ROM with the patches applied. Needs Asar's
+//! library and the vanilla ROM. That custom blocks run as under Lunar
+//! Magic's code is checked by hand with `examples/contact_probe.rs`
+//! (docs/testing.md).
 
 mod common;
 
@@ -57,8 +59,9 @@ fn vanilla_levels_draw_the_same() {
         assert!(a.pixels == b.pixels, "level {level:03X}");
     }
     // Sprites that change tiles while they run, through the tile change
-    // and tile generation code.
-    for level in [0x006, 0x0C3] {
+    // and tile generation code; boss arenas, whose floors the player samples
+    // with high bytes past 1, which the acts-like chain must keep solid.
+    for level in [0x006, 0x0C3, 0x095, 0x1C7] {
         let options = RenderOptions::default();
         let a = render::render_level(&clean, level, options).unwrap().image;
         let b = render::render_level(&rom, level, options).unwrap().image;
