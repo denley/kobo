@@ -139,6 +139,13 @@ how each oracle is produced, where its data lives, and what is known not to matc
   Lunar Magic asks before it touches a headerless ROM, which a headless run never gets
   past: a patched BPS comes out headerless, so export from a copy with 512 zero bytes in
   front.
+- **Compression**: `tests/lz2_compression.rs` recompresses the 52 vanilla GFX files with
+  `compress::lz2::compress`, writes them over the originals in a copy of the ROM, and
+  checks that the native decoder and the game's routine (the 50 table files through
+  `decompress_gfx_file`, `GFX32` and `GFX33` through a load of level `105`) read them back,
+  and that none is larger than Nintendo's (121,663 bytes against 130,317 in all). The unit
+  tests check the parse against a brute-force search of every command, length, and source
+  on small inputs.
 - **CPU suite**: `tests/cpu_single_step.rs` runs the 65816 core against SingleStepTests
   (10,000 native-mode tests per opcode, about a second in release) when `KOBO_65816_TESTS`
   points at the suite's `v1` directory. The native files are in
@@ -255,7 +262,8 @@ anything.
 `tests/input_robustness.rs` runs 512 repeatable synthetic mutation cases in CI, covering
 header size codes, mapped pointers, overflowing reads, truncated LC_LZ2, LC_LZ3, and
 LC_RLE1 streams, sprite lists, and object data, which must also encode back to the same
-objects. The same generator runs for longer as an example:
+objects, and round-trips noise and generated runs and repeats through the LC_LZ2
+compressor. The same generator runs for longer as an example:
 
 ```sh
 cargo run --release --example fuzz_inputs -- 10000
