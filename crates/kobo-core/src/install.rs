@@ -14,8 +14,13 @@ use crate::rom::Rom;
 
 /// The patches, by file name under `asm/lunar-magic/`, in the order they
 /// apply.
-pub const LUNAR_MAGIC: &[(&str, &str)] =
-    &[("map16.asm", include_str!("../asm/lunar-magic/map16.asm"))];
+pub const LUNAR_MAGIC: &[(&str, &str)] = &[
+    ("map16.asm", include_str!("../asm/lunar-magic/map16.asm")),
+    (
+        "actslike.asm",
+        include_str!("../asm/lunar-magic/actslike.asm"),
+    ),
+];
 
 /// Applies the Lunar Magic layout patches to a ROM.
 pub fn apply_lunar_magic(asar: &Asar, rom: &Rom) -> Result<Rom, AsarError> {

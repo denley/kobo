@@ -1,5 +1,7 @@
 ; Logs each action: its number, then the game's touch position ($98-$9B),
-; and Mario's position ($94-$97), at $7FB410 + 16 * n, n counted at $7FB40F.
+; Mario's position ($94-$97), then Y, $1693, $03-$04, and the player's $77, $72,
+; and $92, at $7FB410 + 16 * n,
+; n counted at $7FB40F.
 db $37
 JMP MarioBelow : JMP MarioAbove : JMP MarioSide
 JMP SpriteV : JMP SpriteH : JMP MarioCape : JMP MarioFireball
@@ -27,6 +29,13 @@ Log:
   LDA $99 : STA $7FB412,x
   LDA $9A : STA $7FB413,x
   LDA $9B : STA $7FB414,x
+  TYA : STA $7FB419,x
+  LDA $1693 : STA $7FB41A,x
+  LDA $03 : STA $7FB41B,x
+  LDA $04 : STA $7FB41C,x
+  LDA $77 : STA $7FB41D,x
+  LDA $72 : STA $7FB41E,x
+  LDA $92 : STA $7FB41F,x
   LDA $94 : STA $7FB415,x
   LDA $95 : STA $7FB416,x
   LDA $96 : STA $7FB417,x
