@@ -151,10 +151,35 @@ are SMWDisX's.
   `ExtOBJScreenExit`), and `01` a screen jump, which sets the screen to the first byte's
   low five bits (`ExtOBJScreenJump`). Extended objects `02`-`0F` have null handler
   pointers.
-- On a vertical layer (`VerticalTable` at `$058417`: bit 0 layer 1, bit 1 layer 2; layer 1
+- On a vertical layer (`VerticalTable` at `$058417`: bit 0 layer 1, bit 1 layer 2, bit 7
+  lets the player interact with layer 2, in modes `02`, `04`, `06`, `08`, and `1F`; layer 1
   is vertical in modes `03`, `04`, `07`, `08`, `0A`, `0D`) `CODE_0585D8` swaps the two
   place nibbles of every object but extended `00` and `01`: the first byte's low five bits
   are the column across the 32-tile screen, the second byte's low nibble the row.
+- Standard objects `2E`-`3F` depend on the object tileset: `CODE_0DA415` dispatches the 15
+  tilesets through the long pointers at `$0DA41E` to five object sets (`names::ObjectSet`,
+  numbered as Lunar Magic's "T" value seems to be: its help puts object `3C`, the mushroom
+  ledge, at T = 2): 0, 7, C (normal); 1 (castle); 2, 6, 8 (rope); 3, 9, A, B, E
+  (underground, so Switch Palace 2 and Castle 2 take its objects); 4, 5, D (ghost house,
+  whose objects include the switch palace walls, so Switch Palace 1 uses them). Tileset F
+  indexes past the table. Each set's routine (`OBJTS*`) dispatches `01`-`3F` from its own
+  table ten bytes in; `01`-`21` are the same in all five. Objects `22`-`2D`, and the start
+  of the tileset range up to `30` (normal), `34` (castle), `32` (rope), `34`
+  (underground), or `2E` (ghost house), run `OBJRepTileWithTop`, the water surface
+  routine, whose index (`number - $18`) then runs past its four-entry tile table: no
+  vanilla level uses them.
+- The extended object dispatch at `$0DA10F` (after `CODE_0DA106`) has null pointers for
+  `02`-`0F`, and sends `98`-`FF` to the door routine, which indexes its tile tables with
+  `number - $47` and reads past them.
+- Sprite numbers in a sprite list (`LoadSprFromLevel`, `$02A7FC`): `00`-`C8` are sprites,
+  `C9`-`CA` shooters (number minus `$C8`), `CB`-`D9` generators (`$18B9` = number minus
+  `$CA`), `DA`-`DD` and `DF` sprites `04`-`07` and `09` loaded stunned (shells), `DE` five
+  Eeries, `E0` three platforms on chains, `E1`-`E6` cluster sprites, and `E7`-`FF` scroll
+  commands (`$143E` = number minus `$E7`), whose dispatches (`CODE_05BC76`, `CODE_05BCE9`)
+  have 15 entries, so `F6`-`FF` run past them.
+- The music setting indexes `LevelMusicTable` (`$0584DB`: songs `02 06 01 08 07 03 05 12`).
+  `SpecialLevTable` (`$058497`) marks the boss modes: `$C0` in `09` (Morton, Roy, Ludwig,
+  Reznor), `$80` in `0B` (Iggy, Larry), `$C1` in `10` (Bowser).
 - Nintendo's data has redundant screen jumps: a jump to the screen already current, or to
   one a new-screen bit would reach. Eighteen of the 538 object lists have one, so Kobo's
   encoder, which uses the bit where it can, writes those shorter; the other 520 come out
@@ -220,7 +245,7 @@ are SMWDisX's.
   screen designation, and colour math also follow the mode, but through the ROM's own tables,
   which the game's code reads; they are taken from RAM after loading, not restated.
 - Screen designation and colour math come from three per-level-mode tables in `LoadLevel`
-  (`LevMainScrnTbl`, `LevSubScrnTbl`, `LevCGADSUBtable` at `$0581E0`, `$058200`, `$058220`;
+  (`LevMainScrnTbl`, `LevSubScrnTbl`, `LevCGADSUBtable` at `$058437`, `$058457`, `$058477`;
   mirrors `$0D9D`, `$0D9E`, `$40`), with `CGWSEL` (`$44`) at `$02` (add the subscreen, fixed
   colour where it is transparent) and `COLDATA` fed from the back area colour `$0701`.
   CGRAM colour 0 stays black: the "back area colour" is the fixed colour, added to the
