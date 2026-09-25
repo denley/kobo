@@ -15,6 +15,7 @@ pub mod map16;
 pub mod operation;
 pub mod palette;
 pub mod ram;
+pub mod rats;
 pub mod render;
 pub mod rom;
 pub mod sprites;

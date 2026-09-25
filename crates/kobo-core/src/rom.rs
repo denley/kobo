@@ -1,13 +1,14 @@
-//! Loading and identifying SMW ROM images.
+//! Loading, identifying, and writing SMW ROM images.
 //!
 //! A [`Rom`] holds the headerless image. Copier headers (the 512-byte prefix
-//! some dumps carry) are stripped on load and remembered so they can be
-//! written back out. All reads take SNES addresses and go through the ROM's
-//! [`Mapping`].
+//! some dumps carry) are stripped on load and never written back: a saved
+//! image is headerless. All reads and writes take SNES addresses and go
+//! through the ROM's [`Mapping`].
 
 use std::fmt;
 use std::fs;
 use std::io;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use sha1::{Digest, Sha1};
@@ -23,6 +24,17 @@ const BANK_LEN: usize = 0x8000;
 
 /// Offset of the internal header for LoROM and SA-1 images.
 const INTERNAL_HEADER: PcAddr = PcAddr::new(0x7FC0);
+
+/// The internal header's ROM size code.
+const ROM_SIZE_CODE: SnesAddr = SnesAddr::new(0x00FFD7);
+
+/// The internal header's checksum complement, followed by the checksum.
+const CHECKSUM_COMPLEMENT: SnesAddr = SnesAddr::new(0x00FFDC);
+
+/// What an image is expanded in: the tools only ever expand to multiples
+/// of it, and a smaller step would leave a size whose checksum the
+/// console does not define.
+const EXPANSION_STEP: usize = 0x8_0000;
 
 /// SHA-1 of the headerless No-Intro "Super Mario World (USA)" image.
 pub const VANILLA_USA_SHA1: [u8; 20] = [
@@ -48,11 +60,23 @@ pub enum RomError {
     InvalidSizeCode { kind: &'static str, code: u8 },
     #[error(transparent)]
     Map(#[from] MapError),
-    #[error("read of {len} bytes at {addr} ({pc}) runs past the end of the ROM")]
+    #[error("{len} bytes at {addr} ({pc}) run past the end of the ROM")]
     OutOfBounds {
         addr: SnesAddr,
         pc: PcAddr,
         len: usize,
+    },
+    #[error("cannot expand a {from}-byte ROM to {to} bytes: {why}")]
+    Expand {
+        from: usize,
+        to: usize,
+        why: &'static str,
+    },
+    #[error("failed to write {path}: {source}")]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
     },
 }
 
@@ -272,14 +296,21 @@ impl Rom {
         self.mapping.snes_to_pc(addr)
     }
 
-    /// Reads `len` bytes starting at a SNES address.
-    pub fn read(&self, addr: SnesAddr, len: usize) -> Result<&[u8], RomError> {
+    /// The file range of `len` bytes from a SNES address. They are
+    /// contiguous in the file, whether or not they cross a bank.
+    fn span(&self, addr: SnesAddr, len: usize) -> Result<Range<usize>, RomError> {
         let pc = self.pc(addr)?;
         let start = pc.as_usize();
         start
             .checked_add(len)
-            .and_then(|end| self.data.get(start..end))
+            .filter(|&end| end <= self.data.len())
+            .map(|end| start..end)
             .ok_or(RomError::OutOfBounds { addr, pc, len })
+    }
+
+    /// Reads `len` bytes starting at a SNES address.
+    pub fn read(&self, addr: SnesAddr, len: usize) -> Result<&[u8], RomError> {
+        Ok(&self.data[self.span(addr, len)?])
     }
 
     /// The remaining file bytes from a mapped address, checked against
@@ -309,6 +340,86 @@ impl Rom {
     /// Reads a 24-bit pointer and wraps it as an address.
     pub fn read_ptr(&self, addr: SnesAddr) -> Result<SnesAddr, RomError> {
         Ok(SnesAddr::new(self.read_u24(addr)?))
+    }
+
+    /// Writes bytes starting at a SNES address, contiguously in the file
+    /// as [`Rom::read`] reads them. Nothing is written if any of them
+    /// would land past the end of the image.
+    pub fn write(&mut self, addr: SnesAddr, bytes: &[u8]) -> Result<(), RomError> {
+        let span = self.span(addr, bytes.len())?;
+        self.data[span].copy_from_slice(bytes);
+        Ok(())
+    }
+
+    pub fn write_u8(&mut self, addr: SnesAddr, value: u8) -> Result<(), RomError> {
+        self.write(addr, &[value])
+    }
+
+    pub fn write_u16(&mut self, addr: SnesAddr, value: u16) -> Result<(), RomError> {
+        self.write(addr, &value.to_le_bytes())
+    }
+
+    /// Writes the low 24 bits of a value, little-endian.
+    pub fn write_u24(&mut self, addr: SnesAddr, value: u32) -> Result<(), RomError> {
+        self.write(addr, &value.to_le_bytes()[..3])
+    }
+
+    /// Writes a 24-bit pointer to an address.
+    pub fn write_ptr(&mut self, addr: SnesAddr, target: SnesAddr) -> Result<(), RomError> {
+        self.write_u24(addr, target.raw())
+    }
+
+    /// Expands the image to `len` bytes, as Asar does: the new space is
+    /// `$00`, which every tool takes for free space, and the size code at
+    /// `$00FFD7` declares the size rounded up to a power of two. The size
+    /// is a multiple of 512 KiB that is a power of two or the sum of two
+    /// (3 MiB, 6 MiB), the sizes whose checksum the console defines, and
+    /// within what the mapping addresses. An SA-1 image crosses 4 MiB
+    /// only through SA-1 Pack's 6 and 8 MiB patches, which set the
+    /// cartridge up for it. Expanding to the current size changes nothing.
+    pub fn expand(&mut self, len: usize) -> Result<(), RomError> {
+        let from = self.data.len();
+        let refuse = |why| Err(RomError::Expand { from, to: len, why });
+        if len < from {
+            return refuse("an image never shrinks");
+        }
+        if len == from {
+            return Ok(());
+        }
+        if !len.is_multiple_of(EXPANSION_STEP) || len.count_ones() > 2 {
+            return refuse(
+                "the size must be a multiple of 512 KiB made of at most two powers of two",
+            );
+        }
+        if self.mapping == Mapping::Sa1Rom && len > Mapping::Sa1Rom.max_rom_len() {
+            return refuse("SA-1 Pack's 6 or 8 MiB patch takes an SA-1 image past 4 MiB");
+        }
+        if len > self.mapping.max_rom_len() {
+            return refuse("the mapping does not address that much");
+        }
+        self.data.resize(len, 0x00);
+        let code = len.next_power_of_two().trailing_zeros() - 10;
+        self.write_u8(ROM_SIZE_CODE, code as u8)
+    }
+
+    /// Writes the checksum and its complement into the internal header.
+    /// The pair is reset to `$FFFF` and `$0000` first, as Asar does, so
+    /// the result does not depend on what it held before; the two always
+    /// add the same to the sum.
+    pub fn fix_checksum(&mut self) -> Result<(), RomError> {
+        self.write(CHECKSUM_COMPLEMENT, &[0xFF, 0xFF, 0x00, 0x00])?;
+        let checksum = self.compute_checksum();
+        self.write_u16(CHECKSUM_COMPLEMENT, !checksum)?;
+        self.write_u16(CHECKSUM_COMPLEMENT.add(2), checksum)
+    }
+
+    /// Writes the headerless image to disk.
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<(), RomError> {
+        let path = path.as_ref();
+        fs::write(path, &self.data).map_err(|source| RomError::Write {
+            path: path.to_path_buf(),
+            source,
+        })
     }
 }
 
@@ -408,6 +519,90 @@ mod tests {
             rom.read_u8(SnesAddr::new(0x000000)),
             Err(RomError::Map(_))
         ));
+    }
+
+    #[test]
+    fn writes_go_through_mapping() {
+        let mut data = fake_rom(0x20);
+        data.resize(4 * BANK_LEN, 0);
+        let mut rom = Rom::from_bytes(data).unwrap();
+        let addr = SnesAddr::new(0x81FFFE);
+        rom.write_u16(addr, 0xBEEF).unwrap();
+        assert_eq!(&rom.data()[0xFFFE..0x10000], &[0xEF, 0xBE]);
+        rom.write_ptr(SnesAddr::new(0x038000), SnesAddr::new(0x1C8123))
+            .unwrap();
+        assert_eq!(&rom.data()[0x18000..0x18003], &[0x23, 0x81, 0x1C]);
+        assert_eq!(
+            rom.read_ptr(SnesAddr::new(0x038000)).unwrap(),
+            SnesAddr::new(0x1C8123)
+        );
+        // A write that would run off the end leaves the image alone.
+        assert!(matches!(
+            rom.write(SnesAddr::new(0x03FFFF), &[1, 2]),
+            Err(RomError::OutOfBounds { len: 2, .. })
+        ));
+        assert_eq!(rom.data()[0x1FFFF], 0);
+        assert!(matches!(
+            rom.write_u8(SnesAddr::new(0x7E0000), 1),
+            Err(RomError::Map(_))
+        ));
+    }
+
+    #[test]
+    fn expansion_pads_with_zeros_and_declares_the_size() {
+        const MIB: usize = 0x10_0000;
+        let mut data = fake_rom(0x20);
+        data.resize(MIB / 2, 0xFF);
+        let mut rom = Rom::from_bytes(data).unwrap();
+        rom.expand(MIB / 2).unwrap();
+        assert_eq!(rom.internal_header().rom_size_code, 0x05);
+        for (len, code) in [(MIB, 0x0A), (3 * MIB, 0x0C), (4 * MIB, 0x0C)] {
+            rom.expand(len).unwrap();
+            assert_eq!(rom.len(), len);
+            assert_eq!(rom.internal_header().rom_size_code, code);
+        }
+        assert!(rom.data()[MIB / 2..].iter().all(|&b| b == 0));
+        assert_eq!(rom.data()[MIB / 2 - 1], 0xFF);
+        let refused = |rom: &mut Rom, len| matches!(rom.expand(len), Err(RomError::Expand { .. }));
+        assert!(refused(&mut rom, 2 * MIB));
+        assert!(refused(&mut rom, 6 * MIB));
+
+        let mut rom = Rom::from_bytes(fake_rom(0x20)).unwrap();
+        assert!(refused(&mut rom, MIB + BANK_LEN));
+        assert!(refused(&mut rom, 7 * MIB / 2));
+        rom.expand(3 * MIB / 2).unwrap();
+        assert_eq!(rom.internal_header().rom_size_code, 0x0B);
+    }
+
+    #[test]
+    fn sa1_expansion_stops_at_four_mib() {
+        const MIB: usize = 0x10_0000;
+        let mut rom = Rom::from_bytes(fake_rom(0x23)).unwrap();
+        rom.expand(4 * MIB).unwrap();
+        assert!(matches!(rom.expand(8 * MIB), Err(RomError::Expand { .. })));
+        // Past SA-1 Pack's 6 MiB patch, up to 8 MiB.
+        let mut data = fake_rom(0x23);
+        data.resize(6 * MIB, 0);
+        let mut rom = Rom::from_bytes(data).unwrap();
+        assert_eq!(rom.mapping(), Mapping::BigSa1Rom);
+        rom.expand(8 * MIB).unwrap();
+        assert_eq!(rom.internal_header().rom_size_code, 0x0D);
+    }
+
+    #[test]
+    fn fixed_checksum_is_valid_and_stable() {
+        let mut data = fake_rom(0x20);
+        data[0x100] = 0x5A;
+        data[0x7FDC..0x7FE0].copy_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+        let mut rom = Rom::from_bytes(data).unwrap();
+        rom.expand(0x18_0000).unwrap();
+        rom.fix_checksum().unwrap();
+        let h = rom.internal_header();
+        assert!(h.checksum_pair_valid());
+        assert_eq!(h.checksum, rom.compute_checksum());
+        let before = rom.data().to_vec();
+        rom.fix_checksum().unwrap();
+        assert_eq!(rom.data(), &before[..]);
     }
 
     #[test]
