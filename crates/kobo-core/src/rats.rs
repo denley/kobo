@@ -11,8 +11,11 @@
 //! Asar 1.91 can skip a valid tag when advancing to a bank boundary and
 //! overwrite zeros inside the protected block. Kobo preserves that block,
 //! including after a rescan. Tags alone therefore do not guarantee safety
-//! when a later tool runs Asar; `docs/toolchain.md` records the reproduction
-//! and the mitigation required before toolchain integration.
+//! when a later tool runs, so a [`Snapshot`] of the blocks taken before it
+//! runs finds any it damaged; `docs/toolchain.md` has the reproduction.
+
+use std::fmt;
+use std::ops::Range;
 
 use thiserror::Error;
 
@@ -69,6 +72,135 @@ pub fn blocks(rom: &Rom) -> Vec<RatsBlock> {
         pc += TAG_LEN + len;
     }
     found
+}
+
+/// The byte a block is erased to, and free space is made of.
+pub const FREE_BYTE: u8 = 0x00;
+
+/// Every tagged block of an image, tag and contents, as they were before
+/// a tool ran.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Snapshot {
+    blocks: Vec<Saved>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Saved {
+    block: RatsBlock,
+    /// The file offset of the tag.
+    tag: usize,
+    /// The tag and the contents.
+    bytes: Vec<u8>,
+}
+
+/// A block a tool changed without releasing it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Damage {
+    pub block: RatsBlock,
+    /// The first and last changed bytes.
+    pub changed: (SnesAddr, SnesAddr),
+    /// Whether the block's tag still stands. If not, the tool erased or
+    /// rewrote the tag but left part of the old contents behind.
+    pub tagged: bool,
+}
+
+impl fmt::Display for Damage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (first, last) = self.changed;
+        write!(
+            f,
+            "RATS block at {} (${:X} bytes) changed at {first}-{last}",
+            self.block.start, self.block.len
+        )?;
+        if self.tagged {
+            write!(f, " under its tag")
+        } else {
+            write!(f, ", its tag gone but its contents not erased")
+        }
+    }
+}
+
+impl Snapshot {
+    pub fn take(rom: &Rom) -> Self {
+        let blocks = blocks(rom)
+            .into_iter()
+            .map(|block| {
+                let tag = rom
+                    .pc(block.start)
+                    .expect("found blocks are mapped")
+                    .as_usize()
+                    - TAG_LEN;
+                let bytes = rom.data()[tag..tag + TAG_LEN + block.len].to_vec();
+                Saved { block, tag, bytes }
+            })
+            .collect();
+        Self { blocks }
+    }
+
+    /// The blocks, in file order.
+    pub fn blocks(&self) -> impl Iterator<Item = RatsBlock> + '_ {
+        self.blocks.iter().map(|saved| saved.block)
+    }
+
+    /// The blocks a tool damaged in producing `after`, in file order.
+    ///
+    /// A block is intact if its tag and contents are unchanged. It is
+    /// released if its tag is gone, or `written` (the file ranges the
+    /// tool reports writing) says the tool rewrote it, and each of its
+    /// bytes is now [`FREE_BYTE`] or inside a tagged block of `after`:
+    /// Asar's `autoclean` erases a block whole, and the same patch may put
+    /// new blocks in the space. Any other change is damage, such as the
+    /// write under a standing tag that Asar 1.91's bank-boundary search
+    /// makes. A tool that does not report its writes passes no ranges; a
+    /// block it rewrites in place under a tag of the same length then
+    /// counts as damaged.
+    pub fn check(&self, after: &Rom, written: &[Range<usize>]) -> Vec<Damage> {
+        let data = after.data();
+        let tagged: Vec<Range<usize>> = blocks(after)
+            .into_iter()
+            .filter_map(|block| {
+                let start = after.pc(block.start).ok()?.as_usize();
+                Some(start - TAG_LEN..start + block.len)
+            })
+            .collect();
+        let mut damage = Vec::new();
+        for saved in &self.blocks {
+            let span = saved.tag..saved.tag + saved.bytes.len();
+            let now = data.get(span.clone()).unwrap_or_default();
+            if now == saved.bytes {
+                continue;
+            }
+            let tag = saved.tag..saved.tag + TAG_LEN;
+            let tag_stands = now.get(..TAG_LEN) == Some(&saved.bytes[..TAG_LEN])
+                && !written
+                    .iter()
+                    .any(|w| w.start < tag.end && tag.start < w.end);
+            let released = !tag_stands
+                && now.len() == saved.bytes.len()
+                && now
+                    .iter()
+                    .zip(span.clone())
+                    .all(|(&byte, pc)| byte == FREE_BYTE || tagged.iter().any(|t| t.contains(&pc)));
+            if released {
+                continue;
+            }
+            let changed = |pc: &usize| data.get(*pc) != Some(&saved.bytes[pc - saved.tag]);
+            let first = span.clone().find(changed).expect("a byte changed");
+            let last = span.clone().rev().find(changed).expect("a byte changed");
+            let snes = |pc: usize| {
+                after
+                    .mapping()
+                    .pc_to_snes(PcAddr::new(pc as u32))
+                    .expect("the block was mapped")
+            };
+            damage.push(Damage {
+                block: saved.block,
+                changed: (snes(first), snes(last)),
+                tagged: tag_stands,
+            });
+        }
+        damage
+    }
 }
 
 /// What a block holds, which decides where it may go.
@@ -210,6 +342,8 @@ impl FreeSpace {
 }
 
 #[cfg(test)]
+// One range of written bytes is a list of one, not the range's contents.
+#[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
 
@@ -399,5 +533,122 @@ mod tests {
             space.alloc(&mut rom, MAX_BLOCK_LEN + 1, Contents::Data),
             Err(FreeSpaceError::BadLength(_))
         ));
+    }
+
+    /// Two blocks of `$11` at `$108008` and `$118008`, `$100` bytes each.
+    fn two_blocks() -> (Rom, Snapshot) {
+        let mut rom = image(0x20, MIB);
+        for tag_at in [0x108000, 0x118000] {
+            rom.write(SnesAddr::new(tag_at), &tag(0x100)).unwrap();
+            rom.write(SnesAddr::new(tag_at + 8), &[0x11; 0x100])
+                .unwrap();
+        }
+        let snapshot = Snapshot::take(&rom);
+        (rom, snapshot)
+    }
+
+    #[test]
+    fn a_snapshot_holds_every_block() {
+        let (rom, snapshot) = two_blocks();
+        assert_eq!(snapshot.blocks().collect::<Vec<_>>(), blocks(&rom));
+        assert_eq!(snapshot.blocks[1].tag, 0x88000);
+        assert_eq!(snapshot.blocks[1].bytes.len(), TAG_LEN + 0x100);
+        assert_eq!(snapshot.check(&rom, &[]), []);
+    }
+
+    #[test]
+    fn erasing_a_block_whole_is_not_damage() {
+        let (mut rom, snapshot) = two_blocks();
+        rom.write(SnesAddr::new(0x118000), &[FREE_BYTE; TAG_LEN + 0x100])
+            .unwrap();
+        // Writes outside the blocks are not the check's business.
+        rom.write(SnesAddr::new(0x128000), &[0x22; 0x10]).unwrap();
+        assert_eq!(snapshot.check(&rom, &[]), []);
+    }
+
+    #[test]
+    fn released_space_may_hold_new_blocks() {
+        // As Asar's autoclean then freecode leave it: erased, and a new,
+        // shorter block at the same place.
+        let (mut rom, snapshot) = two_blocks();
+        let at = SnesAddr::new(0x108000);
+        rom.write(at, &[FREE_BYTE; TAG_LEN + 0x100]).unwrap();
+        rom.write(at, &tag(0x80)).unwrap();
+        rom.write(at.add(8), &[0x22; 0x80]).unwrap();
+        assert_eq!(snapshot.check(&rom, &[]), []);
+
+        // A new block of the same length is only told apart from a write
+        // under the old tag by the tool's report of rewriting the tag.
+        let (mut rom, snapshot) = two_blocks();
+        rom.write(at.add(8), &[0x22; 0x100]).unwrap();
+        assert_eq!(snapshot.check(&rom, &[0x80000..0x80108]), []);
+        let damage = snapshot.check(&rom, &[0x80008..0x80108]);
+        assert_eq!(damage.len(), 1);
+        assert!(damage[0].tagged);
+    }
+
+    #[test]
+    fn a_write_under_a_standing_tag_is_damage() {
+        let (mut rom, snapshot) = two_blocks();
+        rom.write(SnesAddr::new(0x118010), &[0; 4]).unwrap();
+        rom.write(SnesAddr::new(0x118100), &[0x33]).unwrap();
+        let damage = snapshot.check(&rom, &[]);
+        assert_eq!(
+            damage,
+            [Damage {
+                block: RatsBlock {
+                    start: SnesAddr::new(0x118008),
+                    len: 0x100
+                },
+                changed: (SnesAddr::new(0x118010), SnesAddr::new(0x118100)),
+                tagged: true,
+            }]
+        );
+        assert_eq!(
+            damage[0].to_string(),
+            "RATS block at $118008 ($100 bytes) changed at $118010-$118100 under its tag"
+        );
+    }
+
+    #[test]
+    fn a_lost_tag_with_contents_left_is_damage() {
+        let (mut rom, snapshot) = two_blocks();
+        rom.write(SnesAddr::new(0x108000), &[FREE_BYTE; TAG_LEN])
+            .unwrap();
+        let damage = snapshot.check(&rom, &[]);
+        assert_eq!(damage.len(), 1);
+        assert!(!damage[0].tagged);
+        assert_eq!(
+            damage[0].changed,
+            (SnesAddr::new(0x108000), SnesAddr::new(0x108007))
+        );
+    }
+
+    #[test]
+    fn asar_bank_boundary_overwrite_is_damage() {
+        // The layout of docs/toolchain.md's reproduction, and the bytes
+        // Asar 1.91 writes into it: its third tag goes in the second
+        // block's last eight bytes.
+        let mut rom = image(0x20, MIB);
+        let mut space = FreeSpace::scan(&rom);
+        space.alloc(&mut rom, BANK, Contents::Code).unwrap();
+        space
+            .alloc(&mut rom, BANK - TAG_LEN, Contents::Code)
+            .unwrap();
+        let snapshot = Snapshot::take(&rom);
+        rom.write(SnesAddr::new(0x12FFF8), &tag(BANK)).unwrap();
+        rom.write(SnesAddr::new(0x138000), &[0; BANK]).unwrap();
+        let damage = snapshot.check(&rom, &[0x97FF8..0xA0000]);
+        assert_eq!(
+            damage,
+            [Damage {
+                block: RatsBlock {
+                    start: SnesAddr::new(0x128008),
+                    len: BANK - TAG_LEN
+                },
+                changed: (SnesAddr::new(0x12FFF8), SnesAddr::new(0x12FFFF)),
+                tagged: true,
+            }]
+        );
     }
 }

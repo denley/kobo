@@ -123,8 +123,10 @@ on the built ROM.
   file system but may differ on another. Decided 2026-09-25 that this is acceptable for
   now; identical output everywhere is a nice-to-have there, not a requirement.
 - Kobo allocates free space first-fit in a fixed order and tags every block with RATS for
-  interoperability. Tool stages must also address the Asar boundary limitation in
-  [toolchain.md](toolchain.md#asar-191-rats-boundary-limitation).
+  interoperability. A tag does not stop a later tool from writing into a block
+  ([toolchain.md](toolchain.md#asar-191-rats-boundary-limitation)), so every tool stage
+  checks the blocks that were there before it with a `rats::Snapshot` and fails the
+  build on damage, as Asar patches already do.
 
 ### Tools
 
@@ -182,10 +184,15 @@ on the built ROM.
    longest matches from a suffix array) with a fixed tie-break. It writes only what the
    game's routine and Kobo's decoder read alike ([smw.md](smw.md)); the vanilla GFX files
    come out 121,663 bytes against 130,317, and the game reads them back.
-8. Asar integration: `libasar` through FFI, on all three CI platforms.
-   Before enabling tool stages, guard against or detect Asar's RATS boundary corruption
-   and fail the build on it. A RATS tag alone does not guarantee that a later tool leaves
-   Kobo's blocks intact; mitigation is still outstanding.
+8. Asar integration. Done: `kobo_core::asar` loads `libasar` at run time (LGPL-3.0),
+   checks its API version, and applies a patch to a `Rom` in memory, from disk or from
+   in-memory files, with include paths and defines and the checksum left to Kobo; its
+   errors, warnings, prints, labels, and writes come back as values, one patch at a time
+   behind a process-wide lock. Every patch is guarded by a `rats::Snapshot`: a block
+   that was there before and is changed without being released fails the patch, which
+   catches the boundary corruption ([toolchain.md](toolchain.md#asar-191-rats-boundary-limitation)).
+   CI builds Asar 1.91 from source on Linux, Windows, and macOS and runs the tests
+   against it. `kobo asm` applies one patch.
 9. Name tables for objects, sprites, tilesets, and level modes, as data in the library.
 10. Build checks: import, rebuild, and compare `render_hashes`; for a hack whose ASM and
     custom sprites the rebuild lacks, compare `LevelTiles` and layers 1 and 2 without

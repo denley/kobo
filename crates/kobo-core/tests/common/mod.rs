@@ -86,3 +86,25 @@ pub fn synthetic_base() -> Rom {
     rom.fix_checksum().unwrap();
     rom
 }
+
+/// The configured Asar library, or `None` (after printing why) so the
+/// calling test can return early and pass. `KOBO_REQUIRE_ASAR` makes a
+/// missing library a failure.
+#[allow(dead_code)]
+pub fn asar() -> Option<kobo_core::asar::Asar> {
+    match config::asar_library_path() {
+        Ok(path) => Some(
+            kobo_core::asar::Asar::load(&path)
+                .unwrap_or_else(|e| panic!("configured Asar must load: {e}")),
+        ),
+        Err(config::ConfigError::NoAsar) => {
+            assert!(
+                std::env::var_os("KOBO_REQUIRE_ASAR").is_none(),
+                "strict validation requires Asar"
+            );
+            eprintln!("skipping: no Asar library configured");
+            None
+        }
+        Err(e) => panic!("invalid Asar configuration: {e}"),
+    }
+}

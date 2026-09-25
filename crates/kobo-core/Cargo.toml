@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 dirs.workspace = true
+libloading.workspace = true
 png.workspace = true
 serde.workspace = true
 sha1.workspace = true

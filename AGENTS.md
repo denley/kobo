@@ -146,6 +146,9 @@ Early stage: roadmap step 1 is complete; step 2 is next, planned in `docs/step-2
 - `kobo_core::rats::FreeSpace` is the one way Kobo takes free space: everything it writes
   outside fixed addresses goes in a RATS-tagged block placed there. Asar interoperability
   limits and required toolchain checks are in `docs/toolchain.md`.
+- `kobo_core::asar` is the one way Kobo runs Asar: `libasar` loaded at run time (never
+  linked; LGPL), one patch at a time behind a process-wide lock. A patch that damages a
+  RATS block it found fails (`rats::Snapshot`); every tool stage checks the same way.
 
 ## Commands
 
@@ -162,6 +165,7 @@ cargo run -- build [dir] [-o out.sfc]        # a project onto the clean ROM
 cargo run -- fmt [dir] [--check]             # rewrite a project's files in Kobo's format
 cargo run -- diff a.sfc b.sfc                # levels that differ, however each ROM stores them
 tools/lunar-magic/save-check built.sfc       # Lunar Magic saves a copy; every level must survive
+cargo run -- asm patch.asm out.sfc [-r rom] [-I dir] [-D name=value]  # an Asar patch on a copy, checksum fixed
 cargo run -- gfx list|export|png [-r rom]    # GFX files: table, LM-layout .bin export, tile sheet
 cargo run -- level info 105                  # primary header and data pointers
 cargo run -- palette png --level 105 out.png # 16x16 swatch of the palette the level loaded
@@ -194,6 +198,10 @@ Windows, and macOS. Keep all three green.
   `$XDG_CONFIG_HOME/kobo/config.toml`. They print `skipping: ...` and pass when no ROM is
   configured, so CI never needs ROM data; `KOBO_REQUIRE_ROM=1` makes that a failure. A
   configured ROM must be the vanilla reference. Run them locally before pushing.
+- **Asar-backed tests** (`tests/asar.rs`) load `libasar` through
+  `config::asar_library_path()`: `KOBO_ASAR_LIB`, else `tools.asar` in the same file. They
+  skip the same way; `KOBO_REQUIRE_ASAR=1` makes that a failure. CI builds Asar 1.91 from
+  source on all three platforms and requires it.
 - The vanilla reference is No-Intro "Super Mario World (USA)", headerless SHA-1
   `6b47bb75d16514b6a476aa0c73a683a2a4c18765`, checksum `$A0DA`.
 - **Oracle tiers** are opt-in by environment variable and compare against data that is never
@@ -212,7 +220,8 @@ Windows, and macOS. Keep all three green.
 - `~/.local/share/kobo/docs/smwdisx/`: the SMWDisX disassembly banks and `SMW_U.sym` (downloaded
   from GitHub, not committed). Use it to read how the game consumes a table; never build on it.
   SMW Central is behind a JavaScript challenge and cannot be fetched from tools.
-- Asar 1.91 built from source: `~/.local/bin/asar`, `libasar.so` in `~/.local/lib`.
+- Asar 1.91 built from source (`~/src/asar`, tag `v1.91`): `~/.local/bin/asar`, and
+  `libasar.so` in `~/.local/lib`, which `KOBO_ASAR_LIB` points the tests at.
 - Lunar Magic 3.70, the version step 2 targets: `~/.local/share/kobo/tools/lunar-magic-3.70/`
   (from `fusoya.eludevisibility.org/lm/`). Run `x64/Lunar Magic.exe`, which needs only
   64-bit Wine; set `WINEDLLOVERRIDES="mscoree,mshtml="` so a new Wine prefix does not stop
