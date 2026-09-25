@@ -197,6 +197,26 @@ call site of `$00F44D` whose return address the chain sees (the low byte GPS com
   scenarios, 2026-09-26); GPS 1.4.4 inserts into it unchanged. Yoshi's tongue (3.70) is
   neither probed nor implemented.
 
+### Kobo's set against Lunar Magic's, after a save
+
+The acceptance check for the whole set: Kobo's install, saved by Lunar Magic (which adds
+its restorable hooks), against vanilla saved by Lunar Magic, both with level `105`
+re-imported from its own export; `render_hashes` and `ramdiff.py --summary` over all 512
+levels. With `map16.asm` and `actslike.asm` (2026-09-26): every picture and every level's
+data the same; RAM after load differs at `$0B` in 492 levels (the background upload's
+scratch: the `$058DA4` hook is not implemented yet), at `$1693` in the 18 boss arenas, and
+in level `105`'s data pointers (each save put the level elsewhere). Found on the way:
+
+- A fresh install's page table pointers, before any page has data, are bank `$00`:
+  `$00F000` for pages 2-`F` and for page 2 per tileset, `$008000` for `10`-`1F`, `30`-`3F`,
+  `50`-`5F`, and `70`-`7F`, `$000000` for `20`-`2F`, `40`-`4F`, and `60`-`6F`. Kobo writes
+  the same, so Lunar Magic finds no tables where there are none.
+- For a tile on pages `40` and up with no table (`$06F63A` = `$FF8000`), Lunar Magic's
+  chain reads through the pointer anyway, which wraps into work RAM near the stack: tile
+  `$40EC` came out solid and `$FFEC` not. The game reads such high bytes in the boss
+  arenas. Kobo's chain treats a tile past its tables as cement instead; the boss arenas'
+  `$1693` is the only trace.
+
 ### Taller levels (3.00, "ExLevel")
 
 Vanilla finds a horizontal level's screens through fixed tables: `LoadBlkPtrs` (`$00BEA8`)
