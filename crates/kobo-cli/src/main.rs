@@ -83,6 +83,9 @@ enum Command {
         #[command(flatten)]
         rom: RomArg,
     },
+    /// Compare the levels of two ROMs as Kobo reads them, whatever their
+    /// layouts; exits nonzero if any differ.
+    Diff { a: PathBuf, b: PathBuf },
     /// Rewrite a project's level files in Kobo's format, keeping comments
     /// on lines of their own.
     Fmt {
@@ -437,6 +440,7 @@ fn main() -> Result<()> {
             rom,
         } => build(&dir, &out, no_cache, &rom.load()?),
         Command::Fmt { dir, check } => fmt(&dir, check),
+        Command::Diff { a, b } => diff(&a, &b),
     }
 }
 
@@ -871,6 +875,19 @@ fn build(dir: &Path, out: &Path, no_cache: bool, clean: &Rom) -> Result<()> {
         project.levels.len(),
         rom.sha1_hex()
     );
+    Ok(())
+}
+
+fn diff(a: &Path, b: &Path) -> Result<()> {
+    let load = |p: &Path| Rom::load(p).with_context(|| format!("loading {}", p.display()));
+    let diffs = kobo_core::import::diff_levels(&load(a)?, &load(b)?);
+    for d in &diffs {
+        println!("{:03X}: {}", d.level, d.parts.join(", "));
+    }
+    if !diffs.is_empty() {
+        bail!("{} levels differ", diffs.len());
+    }
+    println!("all 512 levels are the same");
     Ok(())
 }
 

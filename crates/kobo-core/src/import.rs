@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use crate::level::objects::Object;
 use crate::level::{self, LEVEL_COUNT, LevelError, LevelFormat};
 use crate::rom::Rom;
 use crate::source::level::{Comments, Layer2, Level, Sprites};
@@ -64,12 +65,7 @@ pub fn read_level(rom: &Rom, number: u16) -> Result<(Level, Vec<String>), Import
             Layer2::Objects(list) => list.as_slice(),
             _ => &[],
         })
-        .filter(|o| {
-            matches!(
-                o,
-                level::objects::Object::Lunar { .. } | level::objects::Object::Unplaced(_)
-            )
-        })
+        .filter(|o| matches!(o, Object::Lunar { .. } | Object::Unplaced(_)))
         .count();
     if lunar > 0 {
         notes.push(format!("{lunar} of Lunar Magic's objects, kept as bytes"));
@@ -127,4 +123,54 @@ pub fn import_rom(rom: &Rom, clean: &Rom, dir: &Path, all: bool) -> Result<Repor
     }
     write(&manifest_path, manifest.to_toml())?;
     Ok(report)
+}
+
+/// Which parts of a level differ between two ROMs.
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub struct LevelDiff {
+    pub level: u16,
+    /// `header`, `entrance`, `layer1`, `layer2`, `sprites`, or the error
+    /// reading the level from one of them.
+    pub parts: Vec<String>,
+}
+
+/// Compares every level of two ROMs as Kobo reads them, whatever their
+/// layouts: the same level moved or re-encoded is no difference, and nor
+/// is a screen exit in the game's format and in Lunar Magic's.
+pub fn diff_levels(a: &Rom, b: &Rom) -> Vec<LevelDiff> {
+    let mut diffs = Vec::new();
+    for level in 0..LEVEL_COUNT {
+        let read = |rom| {
+            read_level(rom, level).map(|(mut l, _)| {
+                for object in &mut l.layer1 {
+                    if let Object::ScreenExit(exit) = object {
+                        *exit = exit.in_lunar_magic_format(level);
+                    }
+                }
+                l
+            })
+        };
+        let parts: Vec<String> = match (read(a), read(b)) {
+            (Ok(x), Ok(y)) => [
+                ("header", x.header != y.header),
+                ("entrance", x.entrance != y.entrance),
+                ("layer1", x.layer1 != y.layer1),
+                ("layer2", x.layer2 != y.layer2),
+                ("sprites", x.sprites != y.sprites),
+            ]
+            .into_iter()
+            .filter(|(_, differs)| *differs)
+            .map(|(part, _)| part.to_owned())
+            .collect(),
+            (x, y) => [x.err(), y.err()]
+                .into_iter()
+                .flatten()
+                .map(|e| e.to_string())
+                .collect(),
+        };
+        if !parts.is_empty() {
+            diffs.push(LevelDiff { level, parts });
+        }
+    }
+    diffs
 }

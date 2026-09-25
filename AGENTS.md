@@ -160,6 +160,8 @@ cargo run -- rom rats [-r rom]               # RATS blocks from $108000 on, and 
 cargo run -- import hack.smc dir [--all]     # a ROM's changed (or all) levels as a new project
 cargo run -- build [dir] [-o out.sfc]        # a project onto the clean ROM
 cargo run -- fmt [dir] [--check]             # rewrite a project's files in Kobo's format
+cargo run -- diff a.sfc b.sfc                # levels that differ, however each ROM stores them
+tools/lunar-magic/save-check built.sfc       # Lunar Magic saves a copy; every level must survive
 cargo run -- gfx list|export|png [-r rom]    # GFX files: table, LM-layout .bin export, tile sheet
 cargo run -- level info 105                  # primary header and data pointers
 cargo run -- palette png --level 105 out.png # 16x16 swatch of the palette the level loaded

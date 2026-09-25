@@ -128,6 +128,20 @@ executable. Vanilla behaviour is in [smw.md](smw.md).
   own, one LC_RLE1 stream of 2048 bytes (32 rows to a half, low bytes then high bytes),
   in a RATS block; `C` without `F` decodes to 864 bytes. Lunar Magic 3.51 rewrites every
   vanilla background pointer to a full one with `V`; older versions leave bank `$FF`.
+- Lunar Magic opens and saves a step 2a build without loss (`tools/lunar-magic/save-check`,
+  2026-09-25): on the first save it installs itself (the gate, the 3.x hooks, the sprite
+  bank table), and every level reads back as Kobo wrote it. The level it saves is
+  re-encoded, and its screen exits rewritten in its own format: `u` set, and `h` from the
+  level number, which is the destination's bit 8 the game's format leaves implicit
+  (`ScreenExit::in_lunar_magic_format`). Its restore system will not change a ROM it
+  does not recognise unless `sysLMRestore/smwOrig.smc` beside the ROM holds the original
+  game with a copier header; the script puts one there.
+- An MWL export records where the level's data was in the ROM (three bytes of the layer 1
+  section's header, and the layer 2 pointer in its section's), so exports of the same
+  level from two ROMs differ there. Exporting a vanilla ROM, Lunar Magic records a
+  different background than the level's pointer for some levels (level `019`: `$FFDE54`,
+  where the pointer is `$FFD900`) and its export of the background differs from a
+  build's with the same pointer; not yet understood.
 - ROMs locked by their authors (see below) add objects past the level's last screen:
   Baby Kaizo World 3's level `014` has 8 screens and 779 objects, running to screen 48 and
   back, which no screen jump can express. `tests/level_data.rs` skips them.

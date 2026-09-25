@@ -165,6 +165,26 @@ impl Settings {
     }
 }
 
+impl ScreenExit {
+    /// Lunar Magic's format (`u`), where `h` is bit 8 of the destination.
+    pub const LUNAR_MAGIC: u8 = 0x04;
+    pub const HIGH: u8 = 0x01;
+
+    /// The exit in Lunar Magic's format, which says the destination's bit
+    /// 8 itself: in the game's, it is the current level's. Lunar Magic
+    /// rewrites a level's exits so when it saves the level.
+    pub fn in_lunar_magic_format(self, level: u16) -> Self {
+        if self.flags & Self::LUNAR_MAGIC != 0 {
+            return self;
+        }
+        let high = if level & 0x100 != 0 { Self::HIGH } else { 0 };
+        Self {
+            flags: (self.flags & !Self::HIGH) | Self::LUNAR_MAGIC | high,
+            ..self
+        }
+    }
+}
+
 /// Decoded object data.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ObjectData {
@@ -537,6 +557,22 @@ mod tests {
             }
         );
         round_trip(&decoded.objects, Layout::Horizontal, Jumps::Vanilla);
+    }
+
+    #[test]
+    fn exits_in_lunar_magic_format() {
+        let exit = ScreenExit {
+            screen: 7,
+            flags: 0x02,
+            destination: 0xCB,
+        };
+        assert_eq!(exit.in_lunar_magic_format(0x105).flags, 0x07);
+        assert_eq!(exit.in_lunar_magic_format(0x005).flags, 0x06);
+        let lunar = ScreenExit {
+            flags: 0x04,
+            ..exit
+        };
+        assert_eq!(lunar.in_lunar_magic_format(0x105), lunar);
     }
 
     #[test]
