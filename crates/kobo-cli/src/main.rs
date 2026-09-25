@@ -12,6 +12,7 @@ use kobo_core::level::{self, Layer2Data};
 use kobo_core::map16::{self, Map16Tile};
 use kobo_core::palette::{self, LevelPaletteSelect};
 use kobo_core::ram::RamAddr;
+use kobo_core::rats::{self, FreeSpace};
 use kobo_core::render::{self, LayerTiles, RenderOptions, Sprites};
 use kobo_core::sprites;
 use kobo_core::{Mapping, PcAddr, Rom, SnesAddr, config};
@@ -29,7 +30,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Inspect ROM images.
+    /// Inspect and expand ROM images.
     Rom {
         #[command(subcommand)]
         command: RomCommand,
@@ -69,6 +70,21 @@ enum Command {
 enum RomCommand {
     /// Print header and identification details.
     Info {
+        #[command(flatten)]
+        rom: RomArg,
+    },
+    /// Write a copy expanded to a larger size, with the new space free and
+    /// the checksum fixed.
+    Expand {
+        #[command(flatten)]
+        rom: RomArg,
+        /// New size: `1M`, `3M`, `1536K`, or a byte count.
+        size: String,
+        /// Output path. The image is written without a copier header.
+        out: PathBuf,
+    },
+    /// List the RATS-tagged blocks from `$108000` on, and the free space.
+    Rats {
         #[command(flatten)]
         rom: RomArg,
     },
@@ -304,9 +320,11 @@ fn main() -> Result<()> {
     }
     let cli = Cli::parse();
     match cli.command {
-        Command::Rom {
-            command: RomCommand::Info { rom },
-        } => rom_info(&rom.load()?),
+        Command::Rom { command } => match command {
+            RomCommand::Info { rom } => rom_info(&rom.load()?),
+            RomCommand::Expand { rom, size, out } => rom_expand(rom.load()?, &size, &out),
+            RomCommand::Rats { rom } => rom_rats(&rom.load()?),
+        },
         Command::Gfx { command } => match command {
             GfxCommand::List { rom } => gfx_list(&rom.load()?),
             GfxCommand::Export { rom, dir } => gfx_export(&rom.load()?, &dir),
@@ -734,6 +752,48 @@ fn rom_info(rom: &Rom) -> Result<()> {
     if let Some(v) = rom.lunar_magic_version() {
         println!("lunar magic:     {v}");
     }
+    Ok(())
+}
+
+fn rom_expand(mut rom: Rom, size: &str, out: &PathBuf) -> Result<()> {
+    let len = parse_size(size)?;
+    rom.expand(len)?;
+    rom.fix_checksum()?;
+    rom.save(out)?;
+    println!(
+        "{}: {} KiB, checksum ${:04X}",
+        out.display(),
+        rom.len() / 1024,
+        rom.internal_header().checksum
+    );
+    Ok(())
+}
+
+fn parse_size(text: &str) -> Result<usize> {
+    let (digits, unit) = match text.char_indices().last() {
+        Some((i, 'K' | 'k')) => (&text[..i], 1024),
+        Some((i, 'M' | 'm')) => (&text[..i], 1024 * 1024),
+        _ => (text, 1),
+    };
+    digits
+        .parse::<usize>()
+        .ok()
+        .and_then(|n| n.checked_mul(unit))
+        .with_context(|| format!("size must be like 1M, 1536K, or a byte count, not {text:?}"))
+}
+
+fn rom_rats(rom: &Rom) -> Result<()> {
+    let blocks = rats::blocks(rom);
+    for block in &blocks {
+        let pc = rom.pc(block.start)?;
+        println!("{}  {pc}  {:5} bytes", block.start, block.len);
+    }
+    let tagged: usize = blocks.iter().map(|b| b.len + rats::TAG_LEN).sum();
+    println!(
+        "{} blocks, {tagged} bytes tagged; {} bytes free",
+        blocks.len(),
+        FreeSpace::scan(rom).free_bytes()
+    );
     Ok(())
 }
 

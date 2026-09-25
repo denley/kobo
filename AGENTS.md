@@ -133,8 +133,11 @@ Early stage: roadmap step 1 is complete; step 2 is next, planned in `docs/step-2
 - `kobo_core::level::LevelMode` is the only place that says what a level mode means to the
   library (`layer2()`: background, horizontal or vertical objects, or none). Do not match on
   mode numbers anywhere else; what the ROM's own per-mode tables decide is read from RAM.
-- `kobo_core::rom::Rom` strips and remembers the 512-byte copier header; `data()` is always
-  headerless. Identity is by SHA-1 of the headerless image.
+- `kobo_core::rom::Rom` strips the 512-byte copier header and never writes one; `data()` is
+  always headerless. Identity is by SHA-1 of the headerless image. Writes go through
+  `SnesAddr` like reads; `expand` and `fix_checksum` keep the internal header true.
+- `kobo_core::rats::FreeSpace` is the one way Kobo takes free space: everything it writes
+  outside fixed addresses goes in a RATS-tagged block placed there, as Asar would place it.
 
 ## Commands
 
@@ -144,6 +147,8 @@ cargo test --workspace                       # ROM-backed tests skip if no ROM i
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 cargo run -- rom info [-r rom]               # header, checksum, hash, identity
+cargo run -- rom expand 2M out.sfc [-r rom]  # a copy expanded, with the checksum fixed
+cargo run -- rom rats [-r rom]               # RATS blocks from $108000 on, and free space
 cargo run -- gfx list|export|png [-r rom]    # GFX files: table, LM-layout .bin export, tile sheet
 cargo run -- level info 105                  # primary header and data pointers
 cargo run -- palette png --level 105 out.png # 16x16 swatch of the palette the level loaded

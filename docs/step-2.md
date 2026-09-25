@@ -162,8 +162,11 @@ on the built ROM.
 3. Write-side research. The tools are done ([toolchain.md](toolchain.md)). For Lunar
    Magic, [lunar-magic.md](lunar-magic.md) has the footprint and the hook sites; what each
    table and one-time hook does, and how older versions differ, is still to find.
-4. ROM writing: writes through `SnesAddr` and `Mapping`, expansion, header and checksum,
-   and a deterministic RATS allocator, tested against synthetic SA-1 images.
+4. ROM writing. Done: writes through `SnesAddr` and `Mapping`, expansion, header and
+   checksum (`Rom`), and `rats::FreeSpace`, tested on synthetic LoROM and SA-1 images.
+   Its placement follows Asar's, down to a tag in the last eight bytes of a bank when the
+   contents would cross it, and on LoROM images it matched Asar 1.91 byte for byte for
+   every sequence of `freecode` and `freedata` requests tried.
 5. A level reader and writer for layer 1 and 2 objects, background tilemaps, headers, and
    sprite lists, checked by round trip on every level of vanilla and the corpus and by
    extending `fuzz_inputs`.

@@ -43,6 +43,14 @@ impl SnesAddr {
     pub const fn add(self, n: u32) -> Self {
         Self::new(self.0.wrapping_add(n))
     }
+
+    /// Whether the address is in banks `$00`-`$3F` or `$80`-`$BF`, whose
+    /// lower halves hold work RAM and the hardware registers. Code in any
+    /// other bank cannot reach them with absolute addressing, which is why
+    /// Asar keeps code out of LoROM banks `$40` and up.
+    pub const fn in_system_bank(self) -> bool {
+        self.0 & 0x40_0000 == 0
+    }
 }
 
 impl fmt::Debug for SnesAddr {
@@ -192,6 +200,22 @@ impl Mapping {
             Self::Sa1Rom => Some(SuperMmc::RESET),
             Self::BigSa1Rom => Some(SuperMmc([4, 5, 6, 7])),
         }
+    }
+
+    /// The largest image the mapping can address.
+    pub const fn max_rom_len(self) -> usize {
+        match self {
+            Self::LoRom | Self::Sa1Rom => 0x40_0000,
+            Self::BigSa1Rom => 0x80_0000,
+        }
+    }
+
+    /// The file offset where the bank holding `pc` ends: the byte there,
+    /// if any, is at an address in another bank. A block of the file
+    /// that stays below it is one contiguous run of addresses.
+    pub fn bank_end(self, pc: PcAddr) -> Result<PcAddr, MapError> {
+        let offset = self.pc_to_snes(pc)?.offset() as u32;
+        Ok(PcAddr(pc.0 + (0x1_0000 - offset)))
     }
 
     /// Converts a SNES address to a ROM file offset.
@@ -430,5 +454,30 @@ mod tests {
         assert_eq!(m.pc_to_snes(pc(0x7FFFFF)), Ok(s(0xFFFFFF)));
         assert!(m.pc_to_snes(pc(0x800000)).is_err());
         assert!(Mapping::Sa1Rom.pc_to_snes(pc(0x400000)).is_err());
+    }
+
+    #[test]
+    fn banks_end_where_the_addresses_jump() {
+        for m in [Mapping::LoRom, Mapping::Sa1Rom, Mapping::BigSa1Rom] {
+            assert_eq!(m.bank_end(pc(0x000000)), Ok(pc(0x008000)), "{m:?}");
+            assert_eq!(m.bank_end(pc(0x087FFF)), Ok(pc(0x088000)), "{m:?}");
+            assert_eq!(m.bank_end(pc(0x3F1234)), Ok(pc(0x3F8000)), "{m:?}");
+        }
+        // The HiROM view past 4 MiB has whole 64 KiB banks.
+        let m = Mapping::BigSa1Rom;
+        assert_eq!(m.bank_end(pc(0x400000)), Ok(pc(0x410000)));
+        assert_eq!(m.bank_end(pc(0x7FFFFF)), Ok(pc(0x800000)));
+        assert!(Mapping::LoRom.bank_end(pc(0x400000)).is_err());
+    }
+
+    #[test]
+    fn system_banks() {
+        let lorom = |p| Mapping::LoRom.pc_to_snes(pc(p)).unwrap();
+        assert!(lorom(0x1FFFFF).in_system_bank());
+        assert!(!lorom(0x200000).in_system_bank());
+        // SA-1 puts its first 4 MiB in system banks throughout.
+        let sa1 = |p| Mapping::BigSa1Rom.pc_to_snes(pc(p)).unwrap();
+        assert!(sa1(0x3FFFFF).in_system_bank());
+        assert!(!sa1(0x400000).in_system_bank());
     }
 }
