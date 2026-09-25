@@ -150,7 +150,14 @@ how each oracle is produced, where its data lives, and what is known not to matc
 - **Lunar Magic hacks**: `tests/layer2_background.rs` runs on every ROM listed in `KOBO_LM_ROMS`
   (`:`-separated paths) as well as the vanilla ROM. It rebuilds the layer 2 tilemap the game
   uploaded to VRAM from the captured background buffer and BG Map16 table, which catches a
-  clobbered buffer or a table read from the wrong place without external data. Hacks whose
+  clobbered buffer or a table read from the wrong place without external data. The corpus
+  is `~/.local/share/kobo/roms`: loose `.smc` hacks (Lunar Magic 1.62 to 3.33), QLDC 2021
+  and 2022 as BPS patches, and `corpus_more/`, later downloads distributed as BPS (3.21 to
+  3.51, among them the corpus's first 3.40 and 3.51 saves). `apply_bps.py` in that
+  directory writes each patch's ROM next to it, headered, after checking every CRC the patch
+  carries; `~/.config/kobo/env.sh` puts the loose ROMs and `corpus_more`'s in
+  `KOBO_LM_ROMS`. All 512 levels of each `corpus_more` hack render without a fatal error
+  (2026-09-25); none has Lunar Magic export hashes in the fixtures yet. Hacks whose
   headerless SHA-1 is in `fixtures/lunar_magic_map16_bg_export.txt` also have their BG table
   hashed against Lunar Magic's `-ExportAllMap16` output (file tile index `8000`-`81FF`).
   The rows checked are the 16 the game uploads from the layer 2 position, or from a
@@ -179,8 +186,8 @@ how each oracle is produced, where its data lives, and what is known not to matc
   `sa1-video/` match at 94.9-99.7%. `render_hashes` against the vanilla ROM is the other
   check: the marker column must match on every level but the three boss arenas, and the
   differences in the drawn column are SA-1 Pack's own ([sa1.md](sa1.md)). The corpus has
-  39 SA-1 hacks: `Super Diagonal Mario 2` and 38 QLDC 2021 and 2022 entries, which are BPS
-  patches and have to be applied first. `render_hashes` on each says whether the code ran,
+  40 SA-1 hacks: `Super Diagonal Mario 2`, `corpus_more`'s `Extended Interactions`, and 38
+  QLDC 2021 and 2022 entries, which are BPS patches and have to be applied first. `render_hashes` on each says whether the code ran,
   not whether the pictures are right; what fails is in [known-gaps.md](known-gaps.md).
 - **Picture hashes**: `cargo run --release --example render_hashes -- rom.smc` prints a SHA-1
   of every level's picture, with sprites drawn and again as markers without the player. A
