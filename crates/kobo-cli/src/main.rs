@@ -76,6 +76,9 @@ enum Command {
         /// Output ROM path.
         #[arg(long, short = 'o', default_value = "build.sfc")]
         out: PathBuf,
+        /// Run every stage, without reading or keeping snapshots.
+        #[arg(long)]
+        no_cache: bool,
         /// The clean ROM. Defaults to the configured vanilla ROM.
         #[command(flatten)]
         rom: RomArg,
@@ -427,7 +430,12 @@ fn main() -> Result<()> {
             all,
             rom,
         } => import(&from, &dir, all, &rom.load()?),
-        Command::Build { dir, out, rom } => build(&dir, &out, &rom.load()?),
+        Command::Build {
+            dir,
+            out,
+            no_cache,
+            rom,
+        } => build(&dir, &out, no_cache, &rom.load()?),
         Command::Fmt { dir, check } => fmt(&dir, check),
     }
 }
@@ -850,9 +858,11 @@ fn import(from: &Path, dir: &Path, all: bool, clean: &Rom) -> Result<()> {
     Ok(())
 }
 
-fn build(dir: &Path, out: &Path, clean: &Rom) -> Result<()> {
-    let project = kobo_core::build::Project::load(dir)?;
-    let rom = kobo_core::build::build(clean, &project)?;
+fn build(dir: &Path, out: &Path, no_cache: bool, clean: &Rom) -> Result<()> {
+    use kobo_core::build::{self, Cache, Project};
+    let project = Project::load(dir)?;
+    let cache = if no_cache { None } else { Cache::user() };
+    let rom = build::build_cached(clean, &project, cache.as_ref())?;
     rom.save(out)?;
     println!(
         "{}: {} KiB, {} levels, sha1 {}",

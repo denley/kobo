@@ -189,7 +189,11 @@ how each oracle is produced, where its data lives, and what is known not to matc
   project, requires Kobo's formatting to be a fixed point on every file, builds it (twice,
   for byte-identical output), and requires every level to read back as vanilla's, its
   layer 1 data in the expanded ROM, and seven levels of different kinds to render the
-  same picture. The check of all 512 pictures is by hand, as for any change that should
+  same picture. A build through the stage cache must equal one without, cold, warm, and
+  after an edit. `a_synthetic_build_is_the_same_everywhere` needs no ROM: it builds
+  `fixtures/synthetic_level.toml` onto `common::synthetic_base()` and pins the output's
+  SHA-1, so CI shows whether all three platforms build the same bytes; a change to what a
+  build writes changes the hash on purpose. The check of all 512 pictures is by hand, as for any change that should
   not change a picture:
 
   ```sh

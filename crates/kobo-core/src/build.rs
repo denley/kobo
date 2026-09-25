@@ -5,6 +5,12 @@
 //! data. The output depends on the clean ROM, the project files, and the
 //! Kobo version alone.
 //!
+//! A build runs fixed [`Stage`]s in order, each on the image the one
+//! before it left, and can keep a snapshot of the image after each in a
+//! [`Cache`], keyed by a hash chained through the stages: the previous
+//! key, the stage and its version, Kobo's version, and the stage's inputs.
+//! A build starts again from the last stage whose key has a snapshot.
+//!
 //! This is the build of step 2a, in the game's own formats, so it writes
 //! nothing in Lunar Magic's layout: layer data goes in RATS blocks in the
 //! expanded ROM, and sprite lists, which the game reads from bank `$07`
@@ -25,6 +31,7 @@ use crate::source::SourceError;
 use crate::source::level::{Layer2, Level};
 use crate::source::project::{MANIFEST, Manifest};
 use crate::sprites::{self, SpriteEncodeError};
+use sha1::{Digest, Sha1};
 
 /// The size a project that writes levels and sets none is expanded to.
 pub const DEFAULT_ROM_SIZE: usize = 0x10_0000;
@@ -63,6 +70,12 @@ pub enum BuildError {
     ReadLevel(#[from] LevelError),
     #[error(transparent)]
     FreeSpace(#[from] FreeSpaceError),
+    #[error("the build cache at {path}: {source}")]
+    Cache {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 fn level_error(level: u16, message: impl std::fmt::Display) -> BuildError {
@@ -102,25 +115,178 @@ impl Project {
     }
 }
 
-/// Builds a project onto a copy of the clean ROM.
-pub fn build(clean: &Rom, project: &Project) -> Result<Rom, BuildError> {
-    if clean.identify() != RomIdentity::VanillaUsa {
-        return Err(BuildError::NotClean(clean.sha1_hex()));
+/// The build's stages, in the order they run (docs/step-2.md). The later
+/// ones of the plan take their places between these as they arrive.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Stage {
+    /// The clean ROM, expanded to the project's size.
+    Base,
+    /// The levels the project defines.
+    Levels,
+}
+
+impl Stage {
+    pub const ALL: [Stage; 2] = [Stage::Base, Stage::Levels];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Stage::Base => "base",
+            Stage::Levels => "levels",
+        }
     }
-    let mut rom = Rom::from_bytes(clean.data().to_vec())?;
-    let size = project
+
+    /// Changes whenever what the stage writes for the same inputs does, so
+    /// no snapshot of an older version is reused.
+    fn version(self) -> u32 {
+        1
+    }
+
+    /// The stage's inputs, as bytes that differ whenever its output would.
+    fn inputs(self, clean: &Rom, project: &Project) -> Vec<u8> {
+        match self {
+            Stage::Base => {
+                let mut bytes = clean.sha1().to_vec();
+                bytes.extend((rom_size(clean, project) as u64).to_le_bytes());
+                bytes
+            }
+            Stage::Levels => {
+                let mut bytes = Vec::new();
+                for (number, level) in &project.levels {
+                    bytes.extend(number.to_le_bytes());
+                    let text = level.to_toml(&Default::default());
+                    bytes.extend((text.len() as u64).to_le_bytes());
+                    bytes.extend(text.as_bytes());
+                }
+                bytes
+            }
+        }
+    }
+
+    fn run(self, rom: &mut Rom, clean: &Rom, project: &Project) -> Result<(), BuildError> {
+        match self {
+            Stage::Base => rom.expand(rom_size(clean, project))?,
+            Stage::Levels => {
+                let mut space = FreeSpace::scan(rom);
+                let mut bank07 = Bank07::new(clean);
+                for (number, level) in &project.levels {
+                    write_level(rom, clean, &mut space, &mut bank07, *number, level)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The size the project expands the ROM to.
+fn rom_size(clean: &Rom, project: &Project) -> usize {
+    project
         .manifest
         .rom_size
         .unwrap_or(if project.levels.is_empty() {
             clean.len()
         } else {
             DEFAULT_ROM_SIZE
-        });
-    rom.expand(size)?;
-    let mut space = FreeSpace::scan(&rom);
-    let mut bank07 = Bank07::new(clean);
-    for (number, level) in &project.levels {
-        write_level(&mut rom, clean, &mut space, &mut bank07, *number, level)?;
+        })
+}
+
+/// Each stage's key, chained from the one before.
+pub fn stage_keys(clean: &Rom, project: &Project) -> Vec<[u8; 20]> {
+    let mut key = [0u8; 20];
+    Stage::ALL
+        .iter()
+        .map(|&stage| {
+            let mut hash = Sha1::new();
+            hash.update(key);
+            hash.update(stage.name());
+            hash.update(stage.version().to_le_bytes());
+            hash.update(env!("CARGO_PKG_VERSION"));
+            hash.update(stage.inputs(clean, project));
+            key = hash.finalize().into();
+            key
+        })
+        .collect()
+}
+
+/// Snapshots of the image after each stage, one file per key.
+#[derive(Clone, Debug)]
+pub struct Cache {
+    dir: PathBuf,
+}
+
+impl Cache {
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self { dir: dir.into() }
+    }
+
+    /// `KOBO_CACHE_DIR`, or `kobo/stages` in the user's cache directory.
+    pub fn user() -> Option<Self> {
+        match std::env::var_os("KOBO_CACHE_DIR").filter(|d| !d.is_empty()) {
+            Some(dir) => Some(Self::new(dir)),
+            None => dirs::cache_dir().map(|d| Self::new(d.join("kobo").join("stages"))),
+        }
+    }
+
+    fn path(&self, key: &[u8; 20]) -> PathBuf {
+        let name: String = key.iter().map(|b| format!("{b:02x}")).collect();
+        self.dir.join(format!("{name}.bin"))
+    }
+
+    fn get(&self, key: &[u8; 20]) -> Option<Vec<u8>> {
+        fs::read(self.path(key)).ok()
+    }
+
+    fn put(&self, key: &[u8; 20], data: &[u8]) -> Result<(), BuildError> {
+        let path = self.path(key);
+        let fail = |source| BuildError::Cache {
+            path: path.clone(),
+            source,
+        };
+        fs::create_dir_all(&self.dir).map_err(fail)?;
+        // Written whole under another name first, so a reader never sees
+        // half a snapshot.
+        let partial = path.with_extension(format!("{}.part", std::process::id()));
+        fs::write(&partial, data).map_err(fail)?;
+        fs::rename(&partial, &path).map_err(fail)
+    }
+}
+
+/// Builds a project onto a copy of the clean ROM, which must be the
+/// vanilla image.
+pub fn build(clean: &Rom, project: &Project) -> Result<Rom, BuildError> {
+    build_cached(clean, project, None)
+}
+
+/// [`build`], reusing and keeping snapshots in `cache`.
+pub fn build_cached(
+    clean: &Rom,
+    project: &Project,
+    cache: Option<&Cache>,
+) -> Result<Rom, BuildError> {
+    if clean.identify() != RomIdentity::VanillaUsa {
+        return Err(BuildError::NotClean(clean.sha1_hex()));
+    }
+    build_on(clean, project, cache)
+}
+
+/// [`build_cached`] on any base image laid out as the vanilla ROM is, for
+/// synthetic images in tests.
+pub fn build_on(base: &Rom, project: &Project, cache: Option<&Cache>) -> Result<Rom, BuildError> {
+    let keys = stage_keys(base, project);
+    // The last stage with a snapshot, and the image it holds.
+    let resumed = cache.and_then(|cache| {
+        (0..keys.len())
+            .rev()
+            .find_map(|i| Some((i + 1, cache.get(&keys[i])?)))
+    });
+    let (first, mut rom) = match resumed {
+        Some((next, data)) => (next, Rom::from_bytes(data)?),
+        None => (0, Rom::from_bytes(base.data().to_vec())?),
+    };
+    for (i, stage) in Stage::ALL.iter().enumerate().skip(first) {
+        stage.run(&mut rom, base, project)?;
+        if let Some(cache) = cache {
+            cache.put(&keys[i], rom.data())?;
+        }
     }
     rom.fix_checksum()?;
     Ok(rom)

@@ -164,3 +164,57 @@ fn lunar_magic_objects_are_refused_for_now() {
     let error = build::build(&clean, &project).unwrap_err().to_string();
     assert!(error.contains("Lunar Magic"), "{error}");
 }
+
+#[test]
+fn cached_builds_equal_clean_ones() {
+    let Some(clean) = common::vanilla() else {
+        return;
+    };
+    let cache_dir = temp_dir("cache");
+    let cache = build::Cache::new(&cache_dir);
+    let (level, _) = import::read_level(&clean, 0x105).unwrap();
+    let mut project = Project {
+        manifest: Default::default(),
+        levels: vec![(0x105, level)],
+    };
+    let uncached = build::build(&clean, &project).unwrap();
+    let cold = build::build_cached(&clean, &project, Some(&cache)).unwrap();
+    let warm = build::build_cached(&clean, &project, Some(&cache)).unwrap();
+    assert_eq!(cold.data(), uncached.data());
+    assert_eq!(warm.data(), uncached.data());
+    assert_eq!(fs::read_dir(&cache_dir).unwrap().count(), 2);
+
+    // An edit reruns the level stage from the cached base.
+    project.levels[0].1.layer1.pop();
+    let edited = build::build_cached(&clean, &project, Some(&cache)).unwrap();
+    assert_eq!(
+        edited.data(),
+        build::build(&clean, &project).unwrap().data()
+    );
+    assert_eq!(fs::read_dir(&cache_dir).unwrap().count(), 3);
+    let _ = fs::remove_dir_all(&cache_dir);
+}
+
+/// A build needs no ROM data to check that its output is the same on every
+/// platform: this one runs on a synthetic base in CI.
+#[test]
+fn a_synthetic_build_is_the_same_everywhere() {
+    let base = common::synthetic_base();
+    let text = include_str!("fixtures/synthetic_level.toml");
+    let (level, comments) = Level::from_toml(text).unwrap();
+    assert_eq!(level.to_toml(&comments), text);
+    let project = Project {
+        manifest: Default::default(),
+        levels: vec![(0x105, level.clone()), (0x0C7, level)],
+    };
+    let built = build::build_on(&base, &project, None).unwrap();
+    assert_eq!(
+        import::read_level(&built, 0x105).unwrap().0,
+        project.levels[0].1
+    );
+    assert_eq!(
+        built.sha1_hex(),
+        "5f308245ae892ca5e8b2778540c220a03cf6b847",
+        "the synthetic build's output changed"
+    );
+}
