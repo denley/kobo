@@ -41,6 +41,7 @@ use super::{SourceError, hex, hex_bytes, invalid, own_line_comments, parse_hex_b
 use crate::addr::SnesAddr;
 use crate::level::objects::{Object, ScreenExit, Settings};
 use crate::level::{LevelMode, PrimaryHeader, SecondaryHeader};
+use crate::names;
 use crate::sprites::{SpriteEntry, SpriteHeader};
 
 /// A level as its source file has it.
@@ -168,10 +169,18 @@ impl Level {
         let h = &self.header;
         out += "[header]\n";
         out += &format!("screens = {}\n", h.screens);
-        out += &format!("mode = {}\n", hex(h.level_mode.0 as u32, 2));
-        out += &format!("tileset = {}\n", hex(h.object_tileset as u32, 1));
-        out += &format!("sprite_tileset = {}\n", hex(h.sprite_tileset as u32, 1));
-        out += &format!("music = {}\n", h.music);
+        out += &named("mode", hex(h.level_mode.0 as u32, 2), h.level_mode.name());
+        out += &named(
+            "tileset",
+            hex(h.object_tileset as u32, 1),
+            names::object_tileset(h.object_tileset),
+        );
+        out += &named(
+            "sprite_tileset",
+            hex(h.sprite_tileset as u32, 1),
+            names::sprite_tileset(h.sprite_tileset),
+        );
+        out += &named("music", h.music.to_string(), names::music(h.music));
         out += &format!("time = {}\n", h.time);
         out += &format!("bg_palette = {}\n", h.bg_palette);
         out += &format!("fg_palette = {}\n", h.fg_palette);
@@ -335,7 +344,7 @@ fn list<T>(
     out
 }
 
-fn object_line(object: &Object, _tileset: u8) -> (String, Option<String>) {
+fn object_line(object: &Object, tileset: u8) -> (String, Option<String>) {
     let text = match object {
         Object::Standard {
             number,
@@ -389,7 +398,7 @@ fn object_line(object: &Object, _tileset: u8) -> (String, Option<String>) {
         ),
         Object::Unplaced(bytes) => format!("{{ raw = {} }}", hex_bytes(bytes)),
     };
-    (text, None)
+    (text, names::object(object, tileset).map(str::to_owned))
 }
 
 fn sprite_line(sprite: &Sprite) -> (String, Option<String>) {
@@ -405,7 +414,15 @@ fn sprite_line(sprite: &Sprite) -> (String, Option<String>) {
     if !sprite.extension.is_empty() {
         text += &format!(", data = {}", hex_bytes(&sprite.extension));
     }
-    (text + " }", None)
+    (text + " }", Some(names::sprite(sprite.id).to_owned()))
+}
+
+/// `key = value`, and Kobo's name for the value after it if it has one.
+fn named(key: &str, value: String, name: Option<&str>) -> String {
+    match name {
+        Some(name) => format!("{key} = {value}  # {name}\n"),
+        None => format!("{key} = {value}\n"),
+    }
 }
 
 fn table<'a>(doc: &'a DocumentMut, key: &str) -> Result<&'a Table, SourceError> {
@@ -767,10 +784,10 @@ mod tests {
 
 [header]
 screens = 2
-mode = 0x00
-tileset = 0x7
-sprite_tileset = 0x8
-music = 0
+mode = 0x00  # Horizontal, background
+tileset = 0x7  # Normal 2
+sprite_tileset = 0x8  # Banzai Bill
+music = 0  # Overworld
 time = 2
 bg_palette = 1
 fg_palette = 0
@@ -795,13 +812,13 @@ vertical_position = false
 
 [layer1]
 objects = [
-    { obj = 0x21, x = 0, y = 24, length = 192 },
+    { obj = 0x21, x = 0, y = 24, length = 192 },  # Long ground ledge
     # The first pipe.
-    { obj = 0x0F, x = 113, y = 21, height = 3, type = 0 },
-    { ext = 0x41, x = 17, y = 16 },
-    { exit = 1, dest = 0x13, water = true, secondary = true },
-    { lm = 0x22, x = 1, y = 2, data = \"11 55\" },
-    { raw = \"45 60 21\" },
+    { obj = 0x0F, x = 113, y = 21, height = 3, type = 0 },  # Vertical pipe
+    { ext = 0x41, x = 17, y = 16 },  # Dragon coin
+    { exit = 1, dest = 0x13, water = true, secondary = true },  # Screen exit
+    { lm = 0x22, x = 1, y = 2, data = \"11 55\" },  # Direct Map16, page 0
+    { raw = \"45 60 21\" },  # Music bypass
     # Last.
 ]
 
@@ -811,8 +828,8 @@ background = 0x0CD900
 [sprites]
 memory = 0
 list = [
-    { id = 0x0F, x = 20, y = 10 },
-    { id = 0x35, x = 21, y = 10, extra = 2, data = \"01 02\" },
+    { id = 0x0F, x = 20, y = 10 },  # Goomba
+    { id = 0x35, x = 21, y = 10, extra = 2, data = \"01 02\" },  # Yoshi
 ]
 ";
 
@@ -849,10 +866,8 @@ list = [
 
     #[test]
     fn kobo_comments_are_its_own() {
-        let text = TEXT.replace(
-            "{ ext = 0x41, x = 17, y = 16 },",
-            "{ ext = 0x41, x = 17, y = 16 },  # a stale name",
-        );
+        let text = TEXT.replace("  # Dragon coin", "  # a stale name");
+        assert_ne!(text, TEXT);
         let (level, comments) = Level::from_toml(&text).unwrap();
         assert_eq!(level.to_toml(&comments), TEXT);
     }

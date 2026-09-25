@@ -166,6 +166,7 @@ cargo run -- rom info [-r rom]               # header, checksum, hash, identity
 cargo run -- rom expand 2M out.sfc [-r rom]  # a copy expanded, with the checksum fixed
 cargo run -- rom rats [-r rom]               # RATS blocks from $108000 on, and free space
 cargo run -- import hack.smc dir [--all]     # a ROM's changed (or all) levels as a new project
+cargo run -- import level.mwl dir [--level 105]  # an MWL file's level into a project
 cargo run -- build [dir] [-o out.sfc]        # a project onto the clean ROM
 cargo run -- fmt [dir] [--check]             # rewrite a project's files in Kobo's format
 cargo run -- diff a.sfc b.sfc                # levels that differ, however each ROM stores them

@@ -215,8 +215,11 @@ on the built ROM.
   output is the same on every platform. An import reports the ROM's changes it did not
   carry over: ranges of the clean ROM's space that differ outside every level's data and
   the tables it reads, and tagged blocks past the clean ROM that no level uses (Kaizo
-  Mario: 148 ranges, 137 KB, Lunar Magic's install among them). Still to do in 2a: BPS
-  output, Asar for Kobo's own patches, and import from MWL.
+  Mario: 148 ranges, 137 KB, Lunar Magic's install among them). `kobo import` takes an
+  MWL file too, adding the level to a project: all 512 vanilla exports imported and built
+  differ from vanilla only where Lunar Magic changed them on export. Level files carry
+  Kobo's names (`kobo_core::names`) as trailing comments. Still to do in 2a: BPS output,
+  and Asar for Kobo's own patches, which have none until 2b.
 - 2a: the pipeline with vanilla formats. Its builds leave `$06F600` at `$FF` and write
   nothing in Lunar Magic's layout, so Lunar Magic's first save installs itself and keeps
   Kobo's data, as the spike showed for a relocated level. Manifest and level table, the

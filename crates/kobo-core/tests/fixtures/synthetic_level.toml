@@ -1,9 +1,9 @@
 [header]
 screens = 3
-mode = 0x00
-tileset = 0x7
-sprite_tileset = 0x8
-music = 0
+mode = 0x00  # Horizontal, background
+tileset = 0x7  # Normal 2
+sprite_tileset = 0x8  # Banzai Bill
+music = 0  # Overworld
 time = 2
 bg_palette = 1
 fg_palette = 0
@@ -28,13 +28,13 @@ vertical_position = false
 
 [layer1]
 objects = [
-    { obj = 0x21, x = 0, y = 24, length = 48 },
+    { obj = 0x21, x = 0, y = 24, length = 48 },  # Long ground ledge
     # A pipe on the second screen, then back to the first.
-    { obj = 0x0F, x = 20, y = 20, height = 4, type = 0 },
-    { ext = 0x2D, x = 5, y = 10 },
-    { obj = 0x05, x = 40, y = 31, height = 2, width = 3 },
-    { exit = 1, dest = 0x06 },
-    { exit = 2, dest = 0x1C, secondary = true },
+    { obj = 0x0F, x = 20, y = 20, height = 4, type = 0 },  # Vertical pipe
+    { ext = 0x2D, x = 5, y = 10 },  # Turn block, coin
+    { obj = 0x05, x = 40, y = 31, height = 2, width = 3 },  # Coin
+    { exit = 1, dest = 0x06 },  # Screen exit
+    { exit = 2, dest = 0x1C, secondary = true },  # Screen exit
 ]
 
 [layer2]
@@ -43,6 +43,6 @@ background = 0x0CE8FE
 [sprites]
 memory = 0
 list = [
-    { id = 0x0F, x = 10, y = 22 },
-    { id = 0x35, x = 30, y = 20, extra = 2 },
+    { id = 0x0F, x = 10, y = 22 },  # Goomba
+    { id = 0x35, x = 30, y = 20, extra = 2 },  # Yoshi
 ]

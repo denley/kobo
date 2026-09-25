@@ -13,6 +13,7 @@ use thiserror::Error;
 use crate::addr::{PcAddr, SnesAddr};
 use crate::level::objects::Object;
 use crate::level::{self, LEVEL_COUNT, LevelError, LevelFormat, tables};
+use crate::mwl::{self, Mwl, MwlFile};
 use crate::rats::{self, RatsBlock};
 use crate::rom::Rom;
 use crate::source::level::{Comments, Layer2, Level, Sprites};
@@ -36,6 +37,14 @@ pub enum ImportError {
     },
     #[error("{0} already has a {MANIFEST}")]
     Exists(PathBuf),
+    #[error(transparent)]
+    Mwl(#[from] crate::mwl::MwlError),
+    #[error("{path}: {source}")]
+    Manifest {
+        path: PathBuf,
+        #[source]
+        source: crate::source::SourceError,
+    },
 }
 
 /// A level read from a ROM, with notes on what it holds that a build
@@ -270,4 +279,110 @@ pub fn diff_levels(a: &Rom, b: &Rom) -> Vec<LevelDiff> {
         }
     }
     diffs
+}
+
+/// A level from an MWL file, with notes on what it holds that a build
+/// cannot write yet. A background comes through as the clean ROM's when
+/// the file says it came from there and its tiles are that background's.
+pub fn level_from_mwl(mwl: &Mwl, clean: &Rom) -> Result<(Level, Vec<String>), ImportError> {
+    let mut notes = Vec::new();
+    let header = mwl.layer1.primary_header();
+    let mode = header.level_mode;
+    let layer2 = match (&mwl.layer2.data, mode.layer2()) {
+        (mwl::Layer2Data::Objects(data), level::Layer2Kind::HorizontalObjects)
+        | (mwl::Layer2Data::Objects(data), level::Layer2Kind::VerticalObjects) => {
+            Layer2::Objects(data.objects.clone())
+        }
+        (mwl::Layer2Data::Background(tiles), level::Layer2Kind::Background) => {
+            let vanilla = mwl.layer2.header.source().and_then(|at| {
+                let at = match at.bank() {
+                    0xFF => SnesAddr::from_bank_offset(0x0C, at.offset()),
+                    _ => at,
+                };
+                let pointer = level::Layer2Data::Tilemap(at);
+                let bg = level::read_background_at(clean, mwl.info.level, pointer).ok()?;
+                (at.bank() == 0x0C && bg.tiles() == *tiles).then_some(at)
+            });
+            match vanilla {
+                Some(at) => Layer2::VanillaBackground(at),
+                None => {
+                    notes.push(
+                        "its background is not one of the clean ROM's, and is not imported yet"
+                            .into(),
+                    );
+                    Layer2::None
+                }
+            }
+        }
+        _ => Layer2::None,
+    };
+    if mwl.layer1.custom_palette() {
+        notes.push("its custom palette is not imported yet".into());
+    }
+    if !mwl.entrances.entries.is_empty() {
+        notes.push(format!(
+            "{} secondary entrances are not imported yet",
+            mwl.entrances.entries.len()
+        ));
+    }
+    let list = &mwl.sprites.list;
+    let level = Level {
+        header,
+        entrance: mwl.info.secondary,
+        layer1: mwl.layer1.data.objects.clone(),
+        layer2,
+        sprites: Sprites::from_entries(list.header, &list.sprites, mode.layer1_vertical()),
+    };
+    Ok((level, notes))
+}
+
+/// Imports an MWL file into the project in `dir`, as `level` or the level
+/// it was saved from, creating the project if there is none. The level's
+/// file is `levels/NNN.toml`; the manifest is written again.
+pub fn import_mwl(
+    bytes: &[u8],
+    clean: &Rom,
+    dir: &Path,
+    level: Option<u16>,
+) -> Result<Report, ImportError> {
+    let mwl = MwlFile::parse(bytes)?.decode(None)?;
+    let number = level.unwrap_or(mwl.info.level);
+    let (source, notes) = level_from_mwl(&mwl, clean)?;
+    let manifest_path = dir.join(MANIFEST);
+    let mut manifest = match fs::read_to_string(&manifest_path) {
+        Ok(text) => Manifest::from_toml(&text).map_err(|source| ImportError::Manifest {
+            path: manifest_path.clone(),
+            source,
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Manifest::default(),
+        Err(source) => {
+            return Err(ImportError::Io {
+                path: manifest_path,
+                source,
+            });
+        }
+    };
+    let file = PathBuf::from("levels").join(format!("{number:03X}.toml"));
+    let path = dir.join(&file);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| ImportError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    fs::write(&path, source.to_toml(&Comments::default()))
+        .map_err(|source| ImportError::Io { path, source })?;
+    manifest.levels.insert(number, file);
+    fs::write(&manifest_path, manifest.to_toml()).map_err(|source| ImportError::Io {
+        path: manifest_path,
+        source,
+    })?;
+    Ok(Report {
+        levels: vec![number],
+        notes: notes
+            .into_iter()
+            .map(|n| format!("level {number:03X}: {n}"))
+            .collect(),
+        ..Report::default()
+    })
 }
