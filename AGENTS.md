@@ -232,6 +232,8 @@ describes that module's code rather than the game). Do not grow this file with t
 - `docs/testing.md`: the emulator oracle and its capture modes, the video oracle, the CPU
   suite, the Lunar Magic hack corpus checks and their known exceptions.
 - `docs/known-gaps.md`: what a rendered level does not reproduce.
+- `docs/toolchain.md`: what Asar, PIXI, GPS, UberASM Tool, AddmusicK, and SA-1 Pack require of a
+  ROM, where they put things, what makes their output vary, their licences.
 - `docs/step-2.md`: the step 2 plan: decisions and their reasons, prework, work order, risks.
 
 ## Decisions
@@ -255,8 +257,8 @@ describes that module's code rather than the game). Do not grow this file with t
 - **Builds run fixed stages**, rarely changed first and levels last, with a snapshot per
   stage keyed by a chained input hash. Output is identical on all three platforms.
 - **Tools come from pinned builds**: a companion repository builds the licensed tools per
-  platform and Kobo fetches them by hash; a `[tools]` path overrides one. AddmusicK and
-  SA-1 Pack have no licence and are never bundled.
+  platform and Kobo fetches them by hash; a `[tools]` path overrides one. AddmusicK,
+  SA-1 Pack, and GPS have no licence and are never bundled.
 
 ## Open decisions
 

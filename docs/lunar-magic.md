@@ -75,8 +75,10 @@ executable. Vanilla behaviour is in [smw.md](smw.md).
 - Lunar Magic can store a ROM's GFX and ExGFX as LC_LZ3 instead of LC_LZ2, all files at
   once. It then puts `JSL` to its own routine, in a RATS block, at `$00B8E3` inside the
   game's decompression routine, which it does for its faster LC_LZ2 routine as well (and
-  SA-1 Pack for its own), so the hijack does not say which format; nor does anything else
-  in the ROM. `gfx::Compression::detect` decodes the 50 table files both ways and takes the
+  SA-1 Pack for its own), so the hijack does not say which format. Lunar Magic 3.70
+  records it at `$0FFFEB` (`$00` LC_LZ2, `$01` its faster LC_LZ2, `$02` LC_LZ3; vanilla
+  `$FF`), which SA-1 Pack reads; whether older versions do is unchecked, so detection
+  stays. `gfx::Compression::detect` decodes the 50 table files both ways and takes the
   format more of them come out whole in: 46-50 for the right one, at most 18 for the other
   (a file of copies and fills alone reads the same in both). LC_LZ3 is `compress::lz3`:
   command 3 is a zero fill with no operand, 4-6 copy from the output (as is, bits

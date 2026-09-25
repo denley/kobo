@@ -95,16 +95,24 @@ on the built ROM.
 ### The build
 
 - Stages run in a fixed order, from rarely changed and slow to often changed and fast, so
-  that editing a level never reruns AddmusicK or moves a tool's code. Provisional until the
-  tool survey confirms the constraints:
-  1. Check the clean ROM's hash; expand to the manifest's size and mapping.
-  2. Kobo's ROM-side patches.
+  that editing a level never reruns AddmusicK or moves a tool's code. The tool survey
+  ([toolchain.md](toolchain.md)) fixed the constraints; open to revision if more turn up:
+  1. Check the clean ROM's hash. For SA-1, apply SA-1 Pack (with `$0FFFEB` set first for
+     LC_LZ3), then its 6 or 8 MiB patch. Expand to the manifest's size, filled with `$00`.
+  2. Kobo's ROM-side patches, none of it in AddmusicK's ranges (`$0E8000`-`$0EF0FF`,
+     `$0F8000`-`$0FF050`).
   3. User Asar patches, early group.
-  4. AddmusicK.
-  5. Graphics and ExGFX, palettes, Map16.
-  6. PIXI, GPS, UberASM Tool.
+  4. AddmusicK: it needs `$0E8000` untouched and everything before it RATS-tagged.
+  5. Graphics and ExGFX, palettes, Map16 and the acts-like table: GPS rewrites that table,
+     and PIXI and GPS refuse a ROM without its pointer at `$06F624`.
+  6. PIXI (with `-meimei-off`), GPS, UberASM Tool, in that order: UberASM Tool reads the
+     flag PIXI sets at `$0FFFE0`.
   7. User Asar patches, late group (patches that hook the tools' code).
-  8. Levels.
+  8. Levels, after PIXI, whose size table sets the length of each sprite entry.
+- Every stage runs on the previous stage's snapshot. PIXI, GPS, and SA-1 Pack do not
+  repeat their output when run over it.
+- Every table a tool repoints and every hook site a tool takes over leads to a RATS block
+  of its own, since Asar's `autoclean` erases the whole block behind the old target.
 - A ROM snapshot is kept after each stage, keyed by the hash of the previous key, the
   stage's inputs, and its tool version, in the user's cache directory. A build reruns from
   the first stage whose key changed. That a cached build equals a clean one is tested.
@@ -118,20 +126,25 @@ on the built ROM.
 | Tool | Licence | Source | Notes |
 |---|---|---|---|
 | Asar 1.91 | LGPL-3.0+ | C++ | Dynamic linking is fine; PIXI and UberASM Tool use 1.91 too |
-| PIXI 1.43 | GPL-3.0 | C++, CMake | Builds natively on all three platforms |
-| UberASM Tool 2.1 (Fernap) | GPL-3.0 | C# | Whether it runs on .NET on Linux and macOS is unverified |
-| AddmusicK 1.0.11 (AddMusicKFF) | none | C++, Makefile | Ships samples taken from SMW (`samples/default`) |
-| SA-1 Pack 1.40 | none | Asar patch | |
-| GPS | unknown | | No public repository found; SMWCentral is not reachable from tools |
+| PIXI 1.43 | GPL-3.0 | C++, CMake | Builds on Linux; its CFG editor's resources are Nintendo data |
+| UberASM Tool 2.1 (Fernap) | GPL-3.0 | C# | Built for x86 .NET 8, which Linux and macOS lack; needs an x64 rebuild |
+| AddmusicK 1.0.11 (AddMusicKFF) | none | C++, Makefile | Builds on Linux; holds SMW samples and music |
+| SA-1 Pack 1.40 | none | Asar patch | Holds code attributed to Lunar Magic |
+| GPS 1.4.4 | none | C++ | No repository; release on the Wayback Machine; builds on Linux |
 
 - A companion repository builds each licensed tool from a pinned upstream commit on CI for
-  all three platforms and publishes the builds with their sources. Kobo downloads the one
+  all three platforms and publishes the builds with their sources, leaving out PIXI's CFG
+  editor and its Nintendo resources. Its builds sort what PIXI and UberASM Tool read by
+  directory listing, and UberASM Tool is rebuilt for x64 with a native `libasar`. Kobo downloads the one
   for its platform on first use, checks its SHA-256, and caches it per user.
 - A `[tools]` path overrides a tool, for people developing it; the build is then marked as
   not reproducible.
-- AddmusicK and SA-1 Pack have no licence and AddmusicK contains Nintendo data: never
-  bundled. Kobo fetches them from upstream by hash, or the user supplies them. Asking their
-  maintainers, and GPS's, to add a licence is an early action item.
+- AddmusicK, SA-1 Pack, and GPS have no licence, and AddmusicK contains Nintendo data:
+  never bundled. Kobo fetches them from upstream by hash, or the user supplies them.
+  Asking their maintainers to add a licence is an early action item. GPS orders its
+  routines by directory listing and cannot be patched to sort without one, so Kobo hands
+  it its routines one at a time, or builds that use GPS routines are reproducible only per
+  file system.
 - Each Kobo release pins one set of tool versions. Per-project pins can come later.
 
 ## Prework
@@ -142,9 +155,9 @@ on the built ROM.
    and how it decides. Lunar Magic keeps Kobo's code behind any hook site that jumps to
    it, but its one-time install is gated by `$06F600` alone and wipes its tables when it
    runs, and a save never adds the 15 one-time hooks to a ROM whose gate is set.
-3. Write-side research, into [lunar-magic.md](lunar-magic.md): every table and block Lunar
-   Magic writes, how they differ by version, the hook sites, and what PIXI, GPS, UberASM
-   Tool, and AddmusicK check before accepting a ROM (from their sources).
+3. Write-side research. The tools are done ([toolchain.md](toolchain.md)). For Lunar
+   Magic, [lunar-magic.md](lunar-magic.md) has the footprint and the hook sites; what each
+   table and one-time hook does, and how older versions differ, is still to find.
 4. ROM writing: writes through `SnesAddr` and `Mapping`, expansion, header and checksum,
    and a deterministic RATS allocator, tested against synthetic SA-1 images.
 5. A level reader and writer for layer 1 and 2 objects, background tilemaps, headers, and
@@ -162,15 +175,18 @@ on the built ROM.
 
 - 2a: the pipeline with vanilla formats. Its builds leave `$06F600` at `$FF` and write
   nothing in Lunar Magic's layout, so Lunar Magic's first save installs itself and keeps
-  Kobo's data, as the spike showed for a relocated level. Manifest and level table, the level reader and
-  writer, ROM writing and the allocator, the staged build and its cache, BPS output, Asar
+  Kobo's data, as the spike showed for a relocated level. Manifest and level table, the
+  level reader and writer, ROM writing and the allocator, the staged build and its cache, BPS output, Asar
   for Kobo's own patches, and import from MWL files and ROMs. Milestone: every vanilla
   level imported as text, rebuilt into expanded space, and rendering as vanilla does.
 - 2b starts with the one-time set. The first Lunar Magic-layout table Kobo writes needs the
   gate set, or Lunar Magic's install wipes it, and with the gate set Lunar Magic never
   installs the 15 one-time hooks and 95 one-time ranges itself. So Kobo provides all of
   them, clean-room, before any feature: the Map16 routine at `$06F540` and its four call
-  sites, the BG Map16 and per-level flag hooks, and the rest of that list. This is the
+  sites, the BG Map16 and per-level flag hooks, and the rest of that list. The acts-like
+  table pointer at `$06F624` is part of it, and GPS also patches the code around it (the
+  entry slots from `$06F690`, the compare chain at `$06F67B` and `$06F717`, the exit at
+  `$06F602`), so Kobo's code there has to have the shape GPS expects. This is the
   largest piece of 2b. The 32 hooks a save reinstalls need Kobo's own code only for the
   features Kobo supports.
 - 2b then takes Lunar Magic-layout features one at a time, each through its source format,
@@ -179,7 +195,8 @@ on the built ROM.
   palettes, ExGFX, expanded level sizes, the sprite data formats (new sprite system, 255
   sprites, PIXI extension bytes), secondary entrances and exits.
 - 2c: running the tools (user Asar patches, PIXI, GPS, UberASM Tool, AddmusicK), the
-  companion build repository, and SA-1 builds with SA-1 Pack.
+  companion build repository, and SA-1 builds with SA-1 Pack. PIXI and GPS need the
+  one-time set, and PIXI Lunar Magic's VRAM patch at `$00F6E4`, so 2c follows 2b's start.
 
 ## Risks
 
@@ -196,8 +213,13 @@ on the built ROM.
 - Import losing data silently. The import report and raw fields cover it.
 - What a render does not show: exits, entrances, midway points, and secondary headers need
   the Lunar Magic check or emulator entry tests.
-- The tools: whether each builds and behaves identically on all three platforms, and
-  their licences.
+- The code GPS patches has to have a shape GPS's source describes, which pulls Kobo's
+  bank `$06` code towards Lunar Magic's. It is written from GPS's source, the vanilla
+  disassembly, and observed behaviour only, and reviewed with that in mind.
+- AddmusicK overwrites `$0FF035`-`$0FF050`, which Lunar Magic's install fills. What Lunar
+  Magic keeps there, and whether its save repairs it, is unknown.
+- The tools: licences (three have none), directory-order dependence, and UberASM Tool on
+  .NET outside Windows.
 - The corpus is ROMs, not projects; every test project is made by exporting from Lunar
   Magic under Wine, and only hashes are committed.
 - Drifting towards Lunar Magic parity.
