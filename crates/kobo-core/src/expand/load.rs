@@ -170,6 +170,31 @@ pub fn decompress_gfx_file(rom: &Rom, index: u8, len: usize) -> Result<Vec<u8>, 
     Ok(machine.bus.ram.bytes(ram::GFX_BUFFER, len))
 }
 
+/// Plays `level`: loads and prepares it as [`expand_level`] does, then
+/// runs `frames` level frames (game mode `$14`, each with its NMI), calling
+/// `each` with the frame number and the RAM before every one, to put the
+/// player somewhere or hold a value. Returns the RAM after the last. For
+/// checking what the game's code does in play, which a level load does
+/// not run: block contact, tile changes, scrolling.
+pub fn play_level(
+    rom: &Rom,
+    level: u16,
+    frames: u32,
+    mut each: impl FnMut(u32, &mut ram::Ram),
+) -> Result<ram::Ram, ExpandError> {
+    let mut machine = Machine::new(rom, level);
+    boot(&mut machine)?;
+    load_level(&mut machine)?;
+    prepare_level(&mut machine)?;
+    machine.bus.ram.set_u8(ram::GAME_MODE, 0x14);
+    for frame in 0..frames {
+        each(frame, &mut machine.bus.ram);
+        super::oam::draw_frame(&mut machine)
+            .map_err(|source| ExpandError::Cpu { level, source })?;
+    }
+    Ok(machine.bus.ram)
+}
+
 /// The definitions of Map16 tiles as the ROM's own code finds them once
 /// `level` has loaded: through the Map16 routine where the uploads call it
 /// (Lunar Magic's layout), else from the game's pointer table, which holds
