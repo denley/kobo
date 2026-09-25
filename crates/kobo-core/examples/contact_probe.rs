@@ -131,6 +131,48 @@ fn run(path: &str, tile_x: i32, tile_y: i32) {
         .unwrap();
         println!("sprite {name:22} {}", log(&ram).join(" "));
     }
+    // The cape, spinning beside the block, and a fireball thrown into it
+    // (extended sprite 5, in one of the player's two slots).
+    for (name, side) in [
+        ("cape spin, left of it", -12i32),
+        ("cape spin, right of it", 12),
+    ] {
+        let ram = expand::play_level(&rom, 0x105, 12, |frame, ram| {
+            if frame == 0 {
+                place(ram);
+                ram.set_u8(ram::RamAddr::new(0x7E_0019), 2);
+                ram.set_u16(ram::PLAYER_X, (bx + side) as u16);
+                ram.set_u16(ram::PLAYER_Y, (by - 16) as u16);
+                ram.set_u8(ram::RamAddr::new(LOG), 0);
+            }
+            ram.set_u8(ram::RamAddr::new(0x7E_14A6), 0x12);
+        })
+        .unwrap();
+        println!("cape   {name:22} {}", log(&ram).join(" "));
+    }
+    for (name, x, y, speed, fall) in [
+        ("fireball from the left", bx - 24, by + 4, 0x30i8, 0i8),
+        ("fireball from the right", bx + 24, by + 4, -0x30, 0),
+        ("fireball in it", bx + 4, by + 4, 0x30, 0),
+        ("fireball onto it", bx + 4, by - 12, 0x10, 0x30),
+    ] {
+        let ram = expand::play_level(&rom, 0x105, 12, |frame, ram| {
+            if frame == 0 {
+                place(ram);
+                ram.set_u16(ram::PLAYER_X, (bx + 0x80) as u16);
+                ram.set_u8(ram::RamAddr::new(0x7E_170B + 8), 5);
+                ram.set_u8(ram::RamAddr::new(0x7E_171F + 8), x as u8);
+                ram.set_u8(ram::RamAddr::new(0x7E_1733 + 8), (x >> 8) as u8);
+                ram.set_u8(ram::RamAddr::new(0x7E_1715 + 8), y as u8);
+                ram.set_u8(ram::RamAddr::new(0x7E_1729 + 8), (y >> 8) as u8);
+                ram.set_u8(ram::RamAddr::new(0x7E_1747 + 8), speed as u8);
+                ram.set_u8(ram::RamAddr::new(0x7E_173D + 8), fall as u8);
+                ram.set_u8(ram::RamAddr::new(LOG), 0);
+            }
+        })
+        .unwrap();
+        println!("fire   {name:22} {}", log(&ram).join(" "));
+    }
 }
 
 /// The probe block's log: each action once, with where the game sampled

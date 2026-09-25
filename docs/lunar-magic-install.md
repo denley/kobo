@@ -192,9 +192,10 @@ call site of `$00F44D` whose return address the chain sees (the low byte GPS com
   `3F` as `$130` (cement); `$06F63A`-`$06F63C` is `$FF8000`, none. Solid matters: the
   boss arenas' floors are sampled with high bytes past 1.
 - Kobo's implementation (`asm/lunar-magic/actslike.asm`) gives the same actions, at the
-  same points, with the same `Y`, `$1693`, and `$03`, in every probe scenario, player and
-  sprite (2026-09-26); GPS 1.4.4 inserts into it unchanged. The cape, fireballs, and
-  Yoshi's tongue are not yet probed; Yoshi's (3.70) is not implemented.
+  same points, with the same `Y`, `$1693`, and `$03`, in every probe scenario: the
+  player's, sprites', the cape's spin on both sides, and a fireball in the block (34
+  scenarios, 2026-09-26); GPS 1.4.4 inserts into it unchanged. Yoshi's tongue (3.70) is
+  neither probed nor implemented.
 
 ### Taller levels (3.00, "ExLevel")
 
