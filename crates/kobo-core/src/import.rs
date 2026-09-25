@@ -16,7 +16,7 @@ use crate::level::{self, LEVEL_COUNT, LevelError, LevelFormat, tables};
 use crate::mwl::{self, Mwl, MwlFile};
 use crate::rats::{self, RatsBlock};
 use crate::rom::Rom;
-use crate::source::level::{Comments, Layer2, Level, Sprites};
+use crate::source::level::{Comments, Entrance, Layer2, Level, Sprites};
 use crate::source::project::{MANIFEST, Manifest};
 use crate::sprites::{self, SpriteError};
 
@@ -66,12 +66,23 @@ pub fn read_level(rom: &Rom, number: u16) -> Result<(Level, Vec<String>), Import
     };
     let list = sprites::read_sprites_at(rom, level::sprite_ptr(rom, number)?)?;
     let vertical = header.level_mode.layer1_vertical();
+    let format = LevelFormat::of(rom);
+    let entrances = level::read_entrances(rom)?
+        .into_iter()
+        .zip(0..)
+        .filter(|(bytes, id)| bytes.in_use(format) && bytes.destination(*id, format) == number)
+        .map(|(bytes, id)| {
+            let [_, fa, fc, fe] = bytes.0;
+            Entrance::from_bytes(id, [fa, fc, fe])
+        })
+        .collect();
     let level = Level {
         header,
         entrance: level::read_secondary_header(rom, number)?,
         layer1: data.layer1.objects,
         layer2,
         sprites: Sprites::from_entries(list.header, &list.sprites, vertical),
+        entrances,
     };
     let lunar = level
         .layer1
@@ -174,6 +185,9 @@ fn read_spans(rom: &Rom) -> Result<Vec<Range<usize>>, ImportError> {
     for table in tables::SECONDARY_HEADERS {
         add(table, count);
     }
+    for table in tables::ENTRANCES {
+        add(table, tables::ENTRANCE_COUNT as usize);
+    }
     if LevelFormat::of(rom).lunar_magic {
         add(tables::SPRITE_BANKS, count);
         add(tables::LEVEL_FLAGS, count);
@@ -235,7 +249,7 @@ fn unmodelled(rom: &Rom, clean: &Rom, read: &[Range<usize>]) -> Vec<(SnesAddr, u
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct LevelDiff {
     pub level: u16,
-    /// `header`, `entrance`, `layer1`, `layer2`, `sprites`, or the error
+    /// `header`, `entrance`, `layer1`, `layer2`, `sprites`, `entrances`, or the error
     /// reading the level from one of them.
     pub parts: Vec<String>,
 }
@@ -263,6 +277,7 @@ pub fn diff_levels(a: &Rom, b: &Rom) -> Vec<LevelDiff> {
                 ("layer1", x.layer1 != y.layer1),
                 ("layer2", x.layer2 != y.layer2),
                 ("sprites", x.sprites != y.sprites),
+                ("entrances", x.entrances != y.entrances),
             ]
             .into_iter()
             .filter(|(_, differs)| *differs)
@@ -319,10 +334,15 @@ pub fn level_from_mwl(mwl: &Mwl, clean: &Rom) -> Result<(Level, Vec<String>), Im
     if mwl.layer1.custom_palette() {
         notes.push("its custom palette is not imported yet".into());
     }
-    if !mwl.entrances.entries.is_empty() {
+    let lunar = mwl
+        .entrances
+        .entries
+        .iter()
+        .filter(|e| e.lm != [0, 0])
+        .count();
+    if lunar > 0 {
         notes.push(format!(
-            "{} secondary entrances are not imported yet",
-            mwl.entrances.entries.len()
+            "{lunar} secondary entrances use Lunar Magic 3's settings, which are not imported yet"
         ));
     }
     let list = &mwl.sprites.list;
@@ -332,6 +352,12 @@ pub fn level_from_mwl(mwl: &Mwl, clean: &Rom) -> Result<(Level, Vec<String>), Im
         layer1: mwl.layer1.data.objects.clone(),
         layer2,
         sprites: Sprites::from_entries(list.header, &list.sprites, mode.layer1_vertical()),
+        entrances: mwl
+            .entrances
+            .entries
+            .iter()
+            .map(|e| Entrance::from_bytes(e.id, e.tables))
+            .collect(),
     };
     Ok((level, notes))
 }

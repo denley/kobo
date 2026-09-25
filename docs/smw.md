@@ -190,6 +190,12 @@ are SMWDisX's.
   always read and no chunk can begin with them. `CODE_05801E` takes the Map16 page for all
   of it from the data's address: 1 at or past `$0CE8FE`, else 0. Some of the 17 vanilla
   backgrounds decode one byte past their 864. Nintendo's encoding is not the shortest.
+- Secondary entrances are one byte from each of the tables at `$05F800` (destination
+  level, low byte), `$05FA00` (`bbffyyyy`), `$05FC00` (`xxxSSSSS`), and `$05FE00`, of
+  which the game reads bits 0-2, the entrance action (`CODE_05D796`, taking a screen exit
+  that uses a secondary exit). It indexes them with the destination's high byte, so an
+  entrance's number gives its destination's bit 8. Unused entrances are zero, except
+  some pointing at level `000` with other bytes set, which nothing leads to.
 - The secondary header is one byte from each of the tables at `$05F000`, `$05F200`,
   `$05F400`, `$05F600`: `hhhhyyyy 33AAAxxx MMMMffbb NUVEEEEE` (`level::SecondaryHeader`).
 

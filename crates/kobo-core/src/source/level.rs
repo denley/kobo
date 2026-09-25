@@ -52,6 +52,57 @@ pub struct Level {
     pub layer1: Vec<Object>,
     pub layer2: Layer2,
     pub sprites: Sprites,
+    /// The secondary entrances that lead here.
+    pub entrances: Vec<Entrance>,
+}
+
+/// A secondary entrance, in the level it leads to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Entrance {
+    /// Its number, which screen exits name.
+    pub id: u16,
+    /// Screen, 0 to 31.
+    pub screen: u8,
+    /// X position setting, 0 to 7.
+    pub x: u8,
+    /// Y position setting, 0 to 15.
+    pub y: u8,
+    /// Entrance action, 0 to 7.
+    pub action: u8,
+    /// Foreground and background initial positions, 0 to 3 each.
+    pub fg_position: u8,
+    pub bg_position: u8,
+    /// Bits 4-7 of its `$05FE00` byte, which the game does not read and
+    /// Lunar Magic uses. Bit 3, Lunar Magic's copy of the destination's
+    /// bit 8, is the level's and is not kept; it is written clear, as the
+    /// game's tables have it, and Lunar Magic sets it when it saves.
+    pub flags: u8,
+}
+
+impl Entrance {
+    /// From its bytes in the tables (the first, the destination, aside).
+    pub fn from_bytes(id: u16, bytes: [u8; 3]) -> Self {
+        let [fa, fc, fe] = bytes;
+        Self {
+            id,
+            screen: fc & 0x1F,
+            x: fc >> 5,
+            y: fa & 0x0F,
+            action: fe & 0x07,
+            fg_position: (fa >> 4) & 0x03,
+            bg_position: fa >> 6,
+            flags: fe >> 4,
+        }
+    }
+
+    /// Its bytes in the tables at `$05FA00`, `$05FC00`, and `$05FE00`.
+    pub fn to_bytes(self) -> [u8; 3] {
+        [
+            self.bg_position << 6 | (self.fg_position & 0x03) << 4 | (self.y & 0x0F),
+            self.x << 5 | (self.screen & 0x1F),
+            self.flags << 4 | (self.action & 0x07),
+        ]
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -236,6 +287,16 @@ impl Level {
             out += "buoyancy_no_layer2 = true\n";
         }
         out += &list("list", "sprites", &s.list, comments, sprite_line);
+        if !self.entrances.is_empty() {
+            out += "\n[entrances]\n";
+            out += &list(
+                "list",
+                "entrances",
+                &self.entrances,
+                comments,
+                entrance_line,
+            );
+        }
         out
     }
 
@@ -257,7 +318,14 @@ impl Level {
         check_keys(
             doc.as_table(),
             "file",
-            &["header", "entrance", "layer1", "layer2", "sprites"],
+            &[
+                "header",
+                "entrance",
+                "layer1",
+                "layer2",
+                "sprites",
+                "entrances",
+            ],
         )?;
 
         let header = read_header(table(&doc, "header")?)?;
@@ -300,6 +368,16 @@ impl Level {
             buoyancy_no_layer2: flag(sprites, "sprites", "buoyancy_no_layer2")?,
             list: read_list(sprites, "list", "sprites", &mut comments, read_sprite)?,
         };
+        let entrances = match doc.get("entrances") {
+            None => Vec::new(),
+            Some(item) => {
+                let t = item
+                    .as_table()
+                    .ok_or_else(|| invalid("entrances", "must be a table"))?;
+                check_keys(t, "entrances", &["list"])?;
+                read_list(t, "list", "entrances", &mut comments, read_entrance_entry)?
+            }
+        };
         Ok((
             Self {
                 header,
@@ -307,6 +385,7 @@ impl Level {
                 layer1,
                 layer2,
                 sprites,
+                entrances,
             },
             comments,
         ))
@@ -399,6 +478,23 @@ fn object_line(object: &Object, tileset: u8) -> (String, Option<String>) {
         Object::Unplaced(bytes) => format!("{{ raw = {} }}", hex_bytes(bytes)),
     };
     (text, names::object(object, tileset).map(str::to_owned))
+}
+
+fn entrance_line(e: &Entrance) -> (String, Option<String>) {
+    let mut text = format!(
+        "{{ id = {}, screen = {}, x = {}, y = {}, action = {}, fg_position = {}, bg_position = {}",
+        hex(e.id as u32, 3),
+        e.screen,
+        e.x,
+        e.y,
+        e.action,
+        e.fg_position,
+        e.bg_position
+    );
+    if e.flags != 0 {
+        text += &format!(", flags = {}", hex(e.flags as u32, 1));
+    }
+    (text + " }", None)
 }
 
 fn sprite_line(sprite: &Sprite) -> (String, Option<String>) {
@@ -760,6 +856,33 @@ fn read_object(t: &InlineTable, at: &str) -> Result<Object, SourceError> {
     })
 }
 
+fn read_entrance_entry(t: &InlineTable, at: &str) -> Result<Entrance, SourceError> {
+    keys_of(
+        t,
+        at,
+        &[
+            "id",
+            "screen",
+            "x",
+            "y",
+            "action",
+            "fg_position",
+            "bg_position",
+            "flags",
+        ],
+    )?;
+    Ok(Entrance {
+        id: req(t, at, "id", 0x1FF)? as u16,
+        screen: req(t, at, "screen", 0x1F)? as u8,
+        x: req(t, at, "x", 7)? as u8,
+        y: req(t, at, "y", 15)? as u8,
+        action: req(t, at, "action", 7)? as u8,
+        fg_position: req(t, at, "fg_position", 3)? as u8,
+        bg_position: req(t, at, "bg_position", 3)? as u8,
+        flags: opt(t, at, "flags", 0x0F)?.unwrap_or(0) as u8,
+    })
+}
+
 fn read_sprite(t: &InlineTable, at: &str) -> Result<Sprite, SourceError> {
     keys_of(t, at, &["id", "x", "y", "extra", "data"])?;
     Ok(Sprite {
@@ -870,6 +993,26 @@ list = [
         assert_ne!(text, TEXT);
         let (level, comments) = Level::from_toml(&text).unwrap();
         assert_eq!(level.to_toml(&comments), TEXT);
+    }
+
+    #[test]
+    fn entrance_bytes() {
+        let e = Entrance::from_bytes(0x1BC, [0xAA, 0x24, 0xDB]);
+        assert_eq!(
+            (
+                e.y,
+                e.fg_position,
+                e.bg_position,
+                e.screen,
+                e.x,
+                e.action,
+                e.flags
+            ),
+            (10, 2, 2, 4, 1, 3, 0x0D)
+        );
+        // Bit 3 of the last byte, Lunar Magic's copy of the destination's
+        // bit 8, is not kept.
+        assert_eq!(e.to_bytes(), [0xAA, 0x24, 0xD3]);
     }
 
     #[test]

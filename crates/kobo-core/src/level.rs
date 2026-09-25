@@ -30,6 +30,18 @@ pub mod tables {
         SnesAddr::new(0x05F400),
         SnesAddr::new(0x05F600),
     ];
+    /// The secondary entrance tables, one byte per entrance each:
+    /// `$05F800` the destination level's low byte, `$05FA00` `bbffyyyy`,
+    /// `$05FC00` `xxxSSSSS`, `$05FE00` the entrance action in bits 0-2
+    /// and Lunar Magic's flags above (bit 3 the destination's bit 8).
+    pub const ENTRANCES: [SnesAddr; 4] = [
+        SnesAddr::new(0x05F800),
+        SnesAddr::new(0x05FA00),
+        SnesAddr::new(0x05FC00),
+        SnesAddr::new(0x05FE00),
+    ];
+    /// Secondary entrances in the game's tables.
+    pub const ENTRANCE_COUNT: u16 = 0x200;
     /// Lunar Magic's bank bytes for the sprite pointers, one per level.
     pub const SPRITE_BANKS: SnesAddr = SnesAddr::new(0x0EF100);
     /// Lunar Magic's one-time install gate: `$FF` in the game, anything
@@ -535,6 +547,49 @@ pub fn read_secondary_header(rom: &Rom, level: u16) -> Result<SecondaryHeader, L
         *byte = rom.read_u8(table.add(level as u32))?;
     }
     Ok(SecondaryHeader::from_bytes(bytes))
+}
+
+/// A secondary entrance's four bytes, one from each of
+/// [`tables::ENTRANCES`].
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct EntranceBytes(pub [u8; 4]);
+
+impl EntranceBytes {
+    /// The level it leads to: the low byte from `$05F800`, and bit 8 from
+    /// the entrance's own number in the game (`CODE_05D796` indexes the
+    /// tables with the destination's high byte), or from bit 3 of
+    /// `$05FE00` where Lunar Magic keeps it.
+    pub fn destination(self, id: u16, format: LevelFormat) -> u16 {
+        let high = if format.lunar_magic {
+            (self.0[3] >> 3) as u16 & 1
+        } else {
+            id >> 8 & 1
+        };
+        high << 8 | self.0[0] as u16
+    }
+
+    /// Whether the entrance holds anything: the game's tables leave the
+    /// unused ones zero. Lunar Magic sets bit 3 of `$05FE00` in every
+    /// entrance from `100` on, used or not, so that bit does not count.
+    pub fn in_use(self, format: LevelFormat) -> bool {
+        let mut bytes = self.0;
+        if format.lunar_magic {
+            bytes[3] &= !0x08;
+        }
+        bytes != [0; 4]
+    }
+}
+
+/// Every secondary entrance's bytes, by entrance number.
+pub fn read_entrances(rom: &Rom) -> Result<Vec<EntranceBytes>, LevelError> {
+    let mut entrances = vec![EntranceBytes::default(); tables::ENTRANCE_COUNT as usize];
+    for (i, table) in tables::ENTRANCES.iter().enumerate() {
+        let bytes = rom.read(*table, tables::ENTRANCE_COUNT as usize)?;
+        for (entrance, &byte) in entrances.iter_mut().zip(bytes) {
+            entrance.0[i] = byte;
+        }
+    }
+    Ok(entrances)
 }
 
 pub fn read_primary_header(rom: &Rom, level: u16) -> Result<PrimaryHeader, LevelError> {

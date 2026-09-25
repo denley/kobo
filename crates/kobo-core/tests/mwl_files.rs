@@ -444,8 +444,8 @@ fn exported_levels_match_their_rom() {
 /// Every vanilla level imported from its MWL export into one project and
 /// built reads back as vanilla's, but for what Lunar Magic changes on
 /// export (docs/lunar-magic.md): the background of levels sharing the
-/// empty level, level `0C5`'s vertical scroll, and the tileset 4 objects
-/// and exits of eleven levels.
+/// empty level, level `0C5`'s vertical scroll, the tileset 4 objects
+/// and exits of eleven levels, and the entrances of levels `000` and `100`.
 #[test]
 fn vanilla_exports_import_and_build() {
     let Some(dirs) = export_dirs() else { return };
@@ -475,6 +475,9 @@ fn vanilla_exports_import_and_build() {
         let expected = match parts[..] {
             ["layer2"] => kobo_core::level::layer1_ptr(&clean, n).unwrap() == empty,
             ["header"] => n == 0x0C5,
+            // Which never-used entrances Lunar Magic exports with levels
+            // 000 and 100 is not known (docs/lunar-magic.md).
+            [.., "entrances"] if n & 0xFF == 0 => true,
             ["layer1"] => [
                 0x000, 0x0BD, 0x0DA, 0x0E6, 0x0F4, 0x0FD, 0x100, 0x1BB, 0x1BC, 0x1E4, 0x1F7,
             ]
