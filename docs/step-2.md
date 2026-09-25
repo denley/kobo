@@ -202,8 +202,11 @@ on the built ROM.
   (4.5 KiB), until 2b's Lunar Magic layout lifts that. The build runs `build::Stage`s
   with snapshots keyed by a chained hash (`build::Cache`, in the user's cache directory);
   a cached build equals an uncached one, and a synthetic base image lets CI check the
-  output is the same on every platform. Still to do in 2a: BPS output, Asar for Kobo's
-  own patches, and import from MWL.
+  output is the same on every platform. An import reports the ROM's changes it did not
+  carry over: ranges of the clean ROM's space that differ outside every level's data and
+  the tables it reads, and tagged blocks past the clean ROM that no level uses (Kaizo
+  Mario: 148 ranges, 137 KB, Lunar Magic's install among them). Still to do in 2a: BPS
+  output, Asar for Kobo's own patches, and import from MWL.
 - 2a: the pipeline with vanilla formats. Its builds leave `$06F600` at `$FF` and write
   nothing in Lunar Magic's layout, so Lunar Magic's first save installs itself and keeps
   Kobo's data, as the spike showed for a relocated level. Manifest and level table, the

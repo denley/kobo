@@ -858,6 +858,26 @@ fn import(from: &Path, dir: &Path, all: bool, clean: &Rom) -> Result<()> {
     for note in &report.notes {
         println!("note: {note}");
     }
+    let bytes: usize = report.unmodelled.iter().map(|(_, len)| len).sum();
+    if bytes > 0 {
+        println!(
+            "not imported: {} ranges ({bytes} bytes) of the clean ROM's space that the ROM changed outside its levels:",
+            report.unmodelled.len()
+        );
+        for (at, len) in report.unmodelled.iter().take(20) {
+            println!("  {at} +{len}");
+        }
+        if report.unmodelled.len() > 20 {
+            println!("  ...");
+        }
+    }
+    if !report.unread_blocks.is_empty() {
+        let bytes: usize = report.unread_blocks.iter().map(|b| b.len).sum();
+        println!(
+            "not imported: {} tagged blocks ({bytes} bytes) in the expanded ROM that no level uses",
+            report.unread_blocks.len()
+        );
+    }
     println!("{}: {} levels imported", dir.display(), report.levels.len());
     Ok(())
 }

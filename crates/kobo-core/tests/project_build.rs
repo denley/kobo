@@ -40,6 +40,7 @@ fn vanilla_imports_and_builds_back() {
     let report = import::import_rom(&clean, &clean, &dir, true).unwrap();
     assert_eq!(report.levels.len(), 512);
     assert!(report.notes.is_empty(), "{:?}", report.notes);
+    assert!(report.unmodelled.is_empty() && report.unread_blocks.is_empty());
 
     // Kobo's formatting is a fixed point.
     for file in level_files(&dir) {
@@ -70,12 +71,12 @@ fn vanilla_imports_and_builds_back() {
     let built_path = again.with_extension("sfc");
     built.save(&built_path).unwrap();
     let rebuilt = Rom::load(&built_path).unwrap();
-    assert!(
-        import::import_rom(&rebuilt, &clean, &again, false)
-            .unwrap()
-            .levels
-            .is_empty()
-    );
+    let report = import::import_rom(&rebuilt, &clean, &again, false).unwrap();
+    assert!(report.levels.is_empty());
+    // What the build changed is all level data and tables the import
+    // reads, so nothing is left unaccounted for.
+    assert_eq!(report.unmodelled, []);
+    assert_eq!(report.unread_blocks, []);
 
     // Level kinds: horizontal with a background, vertical, layer 2
     // objects (horizontal and vertical), a boss arena, the title screen.

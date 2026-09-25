@@ -5,16 +5,22 @@
 //! change. What cannot be carried over is reported, not dropped silently.
 
 use std::fs;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use crate::addr::{PcAddr, SnesAddr};
 use crate::level::objects::Object;
-use crate::level::{self, LEVEL_COUNT, LevelError, LevelFormat};
+use crate::level::{self, LEVEL_COUNT, LevelError, LevelFormat, tables};
+use crate::rats::{self, RatsBlock};
 use crate::rom::Rom;
 use crate::source::level::{Comments, Layer2, Level, Sprites};
 use crate::source::project::{MANIFEST, Manifest};
 use crate::sprites::{self, SpriteError};
+
+/// Lunar Magic's version string (see [`Rom::lunar_magic_version`]).
+const LUNAR_MAGIC_MARKER: SnesAddr = SnesAddr::new(0x0FF0A0);
 
 #[derive(Debug, Error)]
 pub enum ImportError {
@@ -83,6 +89,12 @@ pub struct Report {
     pub levels: Vec<u16>,
     /// Notes, each naming its level.
     pub notes: Vec<String>,
+    /// Ranges of the clean ROM's space the imported ROM changed, outside
+    /// everything the import read: the ROM's changes Kobo does not model.
+    pub unmodelled: Vec<(SnesAddr, usize)>,
+    /// Tagged blocks past the clean ROM's end that nothing the import read
+    /// lies in.
+    pub unread_blocks: Vec<RatsBlock>,
 }
 
 /// Imports a ROM's levels into a new project in `dir`: every level that
@@ -122,7 +134,92 @@ pub fn import_rom(rom: &Rom, clean: &Rom, dir: &Path, all: bool) -> Result<Repor
         );
     }
     write(&manifest_path, manifest.to_toml())?;
+    let read = read_spans(rom)?;
+    report.unmodelled = unmodelled(rom, clean, &read);
+    report.unread_blocks = rats::blocks(rom)
+        .into_iter()
+        .filter(|block| {
+            let start = rom.pc(block.start).map_or(0, |pc| pc.as_usize());
+            start >= clean.len()
+                && !read
+                    .iter()
+                    .any(|r| r.start < start + block.len && start < r.end)
+        })
+        .collect();
     Ok(report)
+}
+
+/// The file ranges of everything [`read_level`] reads for every level,
+/// the tables included, and the header bytes a build rewrites.
+fn read_spans(rom: &Rom) -> Result<Vec<Range<usize>>, ImportError> {
+    let mut spans = Vec::new();
+    let mut add = |addr: SnesAddr, len: usize| {
+        if let Ok(pc) = rom.pc(addr) {
+            spans.push(pc.as_usize()..pc.as_usize() + len);
+        }
+    };
+    let count = LEVEL_COUNT as usize;
+    add(tables::LAYER1_PTRS, 3 * count);
+    add(tables::LAYER2_PTRS, 3 * count);
+    add(tables::SPRITE_PTRS, 2 * count);
+    for table in tables::SECONDARY_HEADERS {
+        add(table, count);
+    }
+    if LevelFormat::of(rom).lunar_magic {
+        add(tables::SPRITE_BANKS, count);
+        add(tables::LEVEL_FLAGS, count);
+        add(LUNAR_MAGIC_MARKER, 64);
+    }
+    // The ROM size code, and the checksum and its complement.
+    add(SnesAddr::new(0x00FFD7), 1);
+    add(SnesAddr::new(0x00FFDC), 4);
+    for number in 0..LEVEL_COUNT {
+        let data = level::read_objects(rom, number)?;
+        add(level::layer1_ptr(rom, number)?, data.layer1.len);
+        if let (level::Layer2::Objects(list), level::Layer2Data::Objects(addr)) =
+            (&data.layer2, level::layer2_ptr(rom, number)?)
+        {
+            add(addr, list.len);
+        }
+        if let Some(bg) = level::read_background(rom, number)? {
+            add(bg.address, bg.stream_len);
+        }
+        let at = level::sprite_ptr(rom, number)?;
+        add(at, sprites::read_sprites_at(rom, at)?.len);
+    }
+    spans.sort_by_key(|r| r.start);
+    Ok(spans)
+}
+
+/// Bytes that differ from the clean ROM within its length and fall in no
+/// span, gathered into ranges; differences fewer than 16 bytes apart are
+/// one range.
+fn unmodelled(rom: &Rom, clean: &Rom, read: &[Range<usize>]) -> Vec<(SnesAddr, usize)> {
+    let mut covered = vec![false; clean.len()];
+    for span in read {
+        for flag in covered
+            .iter_mut()
+            .take(span.end.min(clean.len()))
+            .skip(span.start)
+        {
+            *flag = true;
+        }
+    }
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    let (a, b) = (rom.data(), clean.data());
+    for i in (0..clean.len().min(a.len())).filter(|&i| a[i] != b[i] && !covered[i]) {
+        match ranges.last_mut() {
+            Some(last) if i - last.end < 16 => last.end = i + 1,
+            _ => ranges.push(i..i + 1),
+        }
+    }
+    ranges
+        .into_iter()
+        .filter_map(|r| {
+            let at = rom.mapping().pc_to_snes(PcAddr::new(r.start as u32)).ok()?;
+            Some((at, r.len()))
+        })
+        .collect()
 }
 
 /// Which parts of a level differ between two ROMs.
