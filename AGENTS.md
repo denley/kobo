@@ -255,10 +255,12 @@ describes that module's code rather than the game). Do not grow this file with t
   central level table (`0x105 = "file.toml"`), `#RRGGBB` palettes (channels x8), indexed PNG
   graphics. Round-trip fidelity is semantic, not byte-exact.
 - **Builds run fixed stages**, rarely changed first and levels last, with a snapshot per
-  stage keyed by a chained input hash. Output is identical on all three platforms.
+  stage keyed by a chained input hash. Output is identical on all three platforms, except
+  where a tool orders files by directory listing, which may vary by file system.
 - **Tools come from pinned builds**: a companion repository builds the licensed tools per
   platform and Kobo fetches them by hash; a `[tools]` path overrides one. AddmusicK,
-  SA-1 Pack, and GPS have no licence and are never bundled.
+  SA-1 Pack, and GPS have no licence and are never bundled; GPS runs unmodified, so
+  Kobo's bank `$06` code has the shape it patches.
 
 ## Open decisions
 

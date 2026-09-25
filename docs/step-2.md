@@ -117,7 +117,11 @@ on the built ROM.
   stage's inputs, and its tool version, in the user's cache directory. A build reruns from
   the first stage whose key changed. That a cached build equals a clean one is tested.
 - The output is a function of the clean ROM's hash, the project files, the Kobo version, and
-  the tool versions alone, and is the same on Windows, Linux, and macOS. CI checks it.
+  the tool versions alone, and is the same on Windows, Linux, and macOS; CI checks it.
+  The exception is what a tool orders by directory listing (PIXI's shared routines, GPS's
+  routines, UberASM Tool's library files): a build that uses those is repeatable on one
+  file system but may differ on another. Decided 2026-09-25 that this is acceptable for
+  now; identical output everywhere is a nice-to-have there, not a requirement.
 - Kobo allocates free space first-fit in a fixed order and tags every block with RATS, so
   the tools' free-space searches skip it.
 
@@ -134,17 +138,17 @@ on the built ROM.
 
 - A companion repository builds each licensed tool from a pinned upstream commit on CI for
   all three platforms and publishes the builds with their sources, leaving out PIXI's CFG
-  editor and its Nintendo resources. Its builds sort what PIXI and UberASM Tool read by
-  directory listing, and UberASM Tool is rebuilt for x64 with a native `libasar`. Kobo downloads the one
-  for its platform on first use, checks its SHA-256, and caches it per user.
+  editor and its Nintendo resources, and with UberASM Tool rebuilt for x64 with a native
+  `libasar`. Kobo downloads the one for its platform on first use, checks its SHA-256, and
+  caches it per user.
 - A `[tools]` path overrides a tool, for people developing it; the build is then marked as
   not reproducible.
 - AddmusicK, SA-1 Pack, and GPS have no licence, and AddmusicK contains Nintendo data:
   never bundled. Kobo fetches them from upstream by hash, or the user supplies them.
-  Asking their maintainers to add a licence is an early action item. GPS orders its
-  routines by directory listing and cannot be patched to sort without one, so Kobo hands
-  it its routines one at a time, or builds that use GPS routines are reproducible only per
-  file system.
+  Asking their maintainers to add a licence would help, but nothing waits on it.
+- GPS runs unmodified, as the user supplies it, and Kobo's bank `$06` code has the shape
+  GPS patches (decided 2026-09-25). A licence would let the companion repository patch GPS
+  to use the documented `JSL` slots instead.
 - Each Kobo release pins one set of tool versions. Per-project pins can come later.
 
 ## Prework

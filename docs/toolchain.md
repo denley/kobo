@@ -112,5 +112,6 @@ address, "PC" an offset in the headerless file.
   was not run). A build therefore always runs a tool on the previous stage's snapshot,
   never on its own output.
 - PIXI, GPS, and UberASM Tool order shared routines or library files by directory listing,
-  which differs between operating systems and file systems. Byte-identical builds need
-  that order fixed, by patching the tools to sort or by handing them one file at a time.
+  which differs between operating systems and file systems. Fixing it takes patching the
+  tools to sort, or handing them one file at a time; [step-2.md](step-2.md) accepts the
+  variation for now.
