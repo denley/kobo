@@ -372,7 +372,7 @@ fn object_line(object: &Object, _tileset: u8) -> (String, Option<String>) {
             let secondary = exit.flags & 0x02 != 0;
             for (bit, name) in [
                 (0x08, if secondary { "water" } else { "midway" }),
-                (0x04, "lm"),
+                (0x04, "lm_format"),
                 (0x02, "secondary"),
                 (0x01, "high"),
             ] {
@@ -690,7 +690,15 @@ fn read_object(t: &InlineTable, at: &str) -> Result<Object, SourceError> {
             keys_of(
                 t,
                 at,
-                &["exit", "dest", "midway", "water", "lm", "secondary", "high"],
+                &[
+                    "exit",
+                    "dest",
+                    "midway",
+                    "water",
+                    "lm_format",
+                    "secondary",
+                    "high",
+                ],
             )?;
             let secondary = inline_flag(t, at, "secondary")?;
             let (w, wrong) = if secondary {
@@ -708,7 +716,7 @@ fn read_object(t: &InlineTable, at: &str) -> Result<Object, SourceError> {
                 ));
             }
             let flags = (inline_flag(t, at, w)? as u8) << 3
-                | (inline_flag(t, at, "lm")? as u8) << 2
+                | (inline_flag(t, at, "lm_format")? as u8) << 2
                 | (secondary as u8) << 1
                 | inline_flag(t, at, "high")? as u8;
             Object::ScreenExit(ScreenExit {

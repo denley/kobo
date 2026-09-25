@@ -8,8 +8,10 @@
 mod common;
 
 use kobo_core::compress::rle1;
+use kobo_core::import;
 use kobo_core::level::objects::{self, Layout, ObjectData};
 use kobo_core::level::{self, Layer2, LevelFormat};
+use kobo_core::source::level::{Comments, Level};
 use kobo_core::{Rom, SnesAddr, gfx, rats, sprites};
 
 #[derive(Default, Debug)]
@@ -103,6 +105,14 @@ fn check_rom(name: &str, rom: &Rom) -> Counts {
             );
             counts.backgrounds += 1;
         }
+
+        // And through the text format, as an import writes and a build
+        // reads it.
+        let (source, _) = import::read_level(rom, n).unwrap();
+        let text = source.to_toml(&Comments::default());
+        let (again, _) =
+            Level::from_toml(&text).unwrap_or_else(|e| panic!("{name} {} as text: {e}", what("")));
+        assert_eq!(again, source, "{name} {} as text", what(""));
 
         let addr = level::sprite_ptr(rom, n).unwrap();
         let list = sprites::read_sprites_at(rom, addr)
