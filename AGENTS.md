@@ -136,6 +136,10 @@ Early stage: roadmap step 1 is complete; step 2 is next, planned in `docs/step-2
 - `kobo_core::rom::Rom` strips the 512-byte copier header and never writes one; `data()` is
   always headerless. Identity is by SHA-1 of the headerless image. Writes go through
   `SnesAddr` like reads; `expand` and `fix_checksum` keep the internal header true.
+- `kobo_core::level::objects` is the one codec for object data: `decode` gives absolute tile
+  positions and drops screen jumps, `encode` chooses its own. `level::read_objects`,
+  `read_background`, and `sprite_ptr` find a level's data from the ROM's tables, vanilla or
+  Lunar Magic (`LevelFormat`); do not run the loader to find it.
 - `kobo_core::rats::FreeSpace` is the one way Kobo takes free space: everything it writes
   outside fixed addresses goes in a RATS-tagged block placed there. Asar interoperability
   limits and required toolchain checks are in `docs/toolchain.md`.

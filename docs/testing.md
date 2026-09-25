@@ -139,6 +139,13 @@ how each oracle is produced, where its data lives, and what is known not to matc
   Lunar Magic asks before it touches a headerless ROM, which a headless run never gets
   past: a patched BPS comes out headerless, so export from a copy with 512 zero bytes in
   front.
+- **Compression**: `tests/lz2_compression.rs` recompresses the 52 vanilla GFX files with
+  `compress::lz2::compress`, writes them over the originals in a copy of the ROM, and
+  checks that the native decoder and the game's routine (the 50 table files through
+  `decompress_gfx_file`, `GFX32` and `GFX33` through a load of level `105`) read them back,
+  and that none is larger than Nintendo's (121,663 bytes against 130,317 in all). The unit
+  tests check the parse against a brute-force search of every command, length, and source
+  on small inputs.
 - **CPU suite**: `tests/cpu_single_step.rs` runs the 65816 core against SingleStepTests
   (10,000 native-mode tests per opcode, about a second in release) when `KOBO_65816_TESTS`
   points at the suite's `v1` directory. The native files are in
@@ -178,6 +185,13 @@ how each oracle is produced, where its data lives, and what is known not to matc
   added. `Super Hark Bros 2` level `00A` used to fail with 896 of 2048 words: its
   level-init code leaves layer 2 at `$5D` and the game had uploaded for `$C0`, which the
   camera update `expand` now runs after preparation restores.
+- **Level data**: `tests/level_data.rs` decodes and encodes every level's object data,
+  sprite list, and distinct background of the vanilla ROM and of every `KOBO_LM_ROMS` ROM
+  but the locked ones, and requires the same objects, sprites, and tiles back, an encoding
+  no longer than the stored one, and a stored length within the RATS block holding it. On
+  vanilla all 538 object lists and 512 sprite lists but 18 object lists come out byte for
+  byte ([smw.md](smw.md)). In the corpus, 70% to 100% of each ROM's lists do; the rest are
+  Lunar Magic's encoding choices (every run on 2026-09-25 passed).
 - **SA-1**: the oracle script reads SA-1 Pack's RAM map (`ram()` in `dump_levels.lua` is
   `RamMap::Sa1Pack` for what it touches, and the full-WRAM dump is laid out as vanilla's)
   and hooks the pointer lookup on the SA-1 too, where the level loader runs. With
@@ -246,8 +260,10 @@ anything.
 ## Parser mutation checks
 
 `tests/input_robustness.rs` runs 512 repeatable synthetic mutation cases in CI, covering
-header size codes, mapped pointers, overflowing reads, truncated LC_LZ2 and LC_LZ3
-streams, and sprite lists. The same generator runs for longer as an example:
+header size codes, mapped pointers, overflowing reads, truncated LC_LZ2, LC_LZ3, and
+LC_RLE1 streams, sprite lists, and object data, which must also encode back to the same
+objects, and round-trips noise and generated runs and repeats through the LC_LZ2
+compressor. The same generator runs for longer as an example:
 
 ```sh
 cargo run --release --example fuzz_inputs -- 10000
