@@ -171,7 +171,11 @@ on the built ROM.
    [toolchain.md](toolchain.md#asar-191-rats-boundary-limitation) has the reproduction.
 5. A level reader and writer for layer 1 and 2 objects, background tilemaps, headers, and
    sprite lists, checked by round trip on every level of vanilla and the corpus and by
-   extending `fuzz_inputs`.
+   extending `fuzz_inputs`. Done for the binary formats: `level::objects`,
+   `sprites::encode`, `compress::rle1`, `level::SecondaryHeader`, and `level::read_objects`
+   and `read_background` find a level's data from the ROM's tables alone, vanilla or Lunar
+   Magic ([lunar-magic.md](lunar-magic.md)). Locked ROMs are out of scope. Interpreting
+   Lunar Magic's Map16 objects and custom backgrounds as tiles comes with their 2b features.
 6. BPS reading and writing. It also brings the QLDC entries into `KOBO_LM_ROMS`.
 7. An LC_LZ2 compressor that always produces the same output.
 8. Asar integration: `libasar` through FFI, on all three CI platforms.

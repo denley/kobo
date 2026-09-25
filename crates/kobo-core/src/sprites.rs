@@ -62,6 +62,17 @@ pub struct SpriteHeader {
 }
 
 impl SpriteHeader {
+    pub fn to_byte(self) -> u8 {
+        (self.buoyancy as u8) << 7
+            | (self.buoyancy_no_layer2 as u8) << 6
+            | if self.new_sprite_system {
+                HEADER_NEW_SPRITE_SYSTEM
+            } else {
+                0
+            }
+            | (self.memory & 0x1F)
+    }
+
     pub fn from_byte(h: u8) -> Self {
         SpriteHeader {
             memory: h & 0x1F,
@@ -111,9 +122,97 @@ pub struct SpriteList {
     pub len: usize,
 }
 
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum SpriteEncodeError {
+    #[error("sprite {index} has {field} {value}, more than its field holds")]
+    OutOfRange {
+        index: usize,
+        field: &'static str,
+        value: u16,
+    },
+    #[error("sprite {index} starts with $FF, which ends a list in the original format")]
+    EndsList { index: usize },
+    #[error("sprite {index} ({id:02X}) has {len} extension bytes; the size table says {expected}")]
+    Extension {
+        index: usize,
+        id: u8,
+        len: usize,
+        expected: usize,
+    },
+}
+
+/// Encodes a sprite list, the inverse of the parser. In the original
+/// format a sprite's Y must fit in five bits and its first byte must not
+/// be `$FF`. With the header's new sprite system flag, a Y jump goes
+/// before each sprite whose Y bits 5 and up differ from the last one's,
+/// a first byte of `$FF` is written `$FF $FF`, and `$FF $FE` ends the
+/// list. `sizes` is PIXI's size table, which extension bytes must match.
+pub fn encode(
+    header: SpriteHeader,
+    sprites: &[SpriteEntry],
+    sizes: Option<&[u8]>,
+) -> Result<Vec<u8>, SpriteEncodeError> {
+    let mut out = vec![header.to_byte()];
+    let mut y_high = 0;
+    for (index, sprite) in sprites.iter().enumerate() {
+        let max_y = if header.new_sprite_system {
+            0x7F << 5 | 0x1F
+        } else {
+            0x1F
+        };
+        for (field, value, max) in [
+            ("screen", sprite.screen as u16, 0x1F),
+            ("X", sprite.x as u16, 0x0F),
+            ("extra bits", sprite.extra_bits as u16, 0x03),
+            ("Y", sprite.y, max_y),
+        ] {
+            if value > max {
+                return Err(SpriteEncodeError::OutOfRange {
+                    index,
+                    field,
+                    value,
+                });
+            }
+        }
+        let expected = sizes
+            .map(|t| t[(sprite.extra_bits as usize) << 8 | sprite.id as usize] as usize)
+            .unwrap_or(3)
+            .max(3)
+            - 3;
+        if sprite.extension.len() != expected {
+            return Err(SpriteEncodeError::Extension {
+                index,
+                id: sprite.id,
+                len: sprite.extension.len(),
+                expected,
+            });
+        }
+        if header.new_sprite_system && sprite.y >> 5 != y_high {
+            y_high = sprite.y >> 5;
+            out.extend([0xFF, y_high as u8]);
+        }
+        let y = sprite.y as u8 & 0x1F;
+        let b0 = (y & 0x0F) << 4 | sprite.extra_bits << 2 | (sprite.screen & 0x10) >> 3 | y >> 4;
+        if b0 == 0xFF {
+            if !header.new_sprite_system {
+                return Err(SpriteEncodeError::EndsList { index });
+            }
+            out.push(CMD_LITERAL);
+        }
+        out.extend([b0, sprite.x << 4 | (sprite.screen & 0x0F), sprite.id]);
+        out.extend_from_slice(&sprite.extension);
+    }
+    if header.new_sprite_system {
+        out.extend([0xFF, CMD_END]);
+    } else {
+        out.push(0xFF);
+    }
+    Ok(out)
+}
+
 /// PIXI's data-size table, if installed: one byte per (extra bits, sprite
 /// number), giving the total entry size.
-fn pixi_size_table(rom: &Rom) -> Result<Option<&[u8]>, RomError> {
+pub fn pixi_size_table(rom: &Rom) -> Result<Option<&[u8]>, RomError> {
     // The marker need not exist in a small vanilla image. Once present,
     // a broken pointer is corrupt input, not a ROM without PIXI.
     if rom.read_u8(PIXI_SIZE_TABLE_MARKER).ok() != Some(PIXI_MARKER_VALUE) {
@@ -123,9 +222,8 @@ fn pixi_size_table(rom: &Rom) -> Result<Option<&[u8]>, RomError> {
     rom.read(ptr, 0x400).map(Some)
 }
 
-/// Parses a level's sprite list from the vanilla pointer table. Lunar
-/// Magic ROMs relocate sprite data; prefer [`read_sprites_at`] with the
-/// pointer the game resolved (see `LevelTiles::sprite_data_ptr`).
+/// Parses a level's sprite list from the pointer tables, Lunar Magic's
+/// bank bytes included (see [`level::sprite_ptr`]).
 pub fn read_sprites(rom: &Rom, level: u16) -> Result<SpriteList, SpriteError> {
     read_sprites_at(rom, level::sprite_ptr(rom, level)?)
 }
@@ -355,6 +453,54 @@ mod tests {
         assert_eq!(list.sprites[1].id, 1);
         assert!(list.sprites[1].extension.is_empty());
         assert_eq!(list.len, data.len());
+    }
+
+    #[test]
+    fn encoding_is_the_inverse() {
+        let old = [0x80, 0x31, 0x61, 0x35, 0x08, 0x00, 0x2A, 0xFF];
+        let list = parse(&old);
+        assert_eq!(encode(list.header, &list.sprites, None).unwrap(), old);
+        let new = [
+            0x20, 0xF1, 0x21, 0x72, 0xFF, 0x01, 0x40, 0x81, 0x99, 0xFF, 0x00, 0xFF, 0xFF, 0x45,
+            0x0A, 0xFF, 0xFE,
+        ];
+        let list = parse(&new);
+        assert_eq!(encode(list.header, &list.sprites, None).unwrap(), new);
+
+        let mut sizes = vec![0u8; 0x400];
+        sizes[2 << 8 | 0x2A] = 5;
+        let data = [0x00, 0x08, 0x00, 0x2A, 0xAA, 0xBB, 0xFF];
+        let list = parse_sprites(&data, Some(&sizes)).ok().unwrap();
+        assert_eq!(
+            encode(list.header, &list.sprites, Some(&sizes)).unwrap(),
+            data
+        );
+        assert!(matches!(
+            encode(list.header, &list.sprites, None),
+            Err(SpriteEncodeError::Extension { expected: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn the_original_format_has_limits() {
+        let header = SpriteHeader::from_byte(0);
+        let sprite = SpriteEntry {
+            id: 1,
+            extra_bits: 3,
+            screen: 0x1F,
+            x: 0,
+            y: 0x1F,
+            extension: vec![],
+        };
+        assert_eq!(
+            encode(header, std::slice::from_ref(&sprite), None),
+            Err(SpriteEncodeError::EndsList { index: 0 })
+        );
+        let tall = SpriteEntry { y: 0x20, ..sprite };
+        assert!(matches!(
+            encode(header, &[tall], None),
+            Err(SpriteEncodeError::OutOfRange { field: "Y", .. })
+        ));
     }
 
     #[test]

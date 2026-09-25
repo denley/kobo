@@ -2,9 +2,14 @@
 
 use thiserror::Error;
 
+pub mod objects;
+
 use crate::addr::SnesAddr;
+use crate::compress::{LzError, rle1};
 use crate::palette::LevelPaletteSelect;
 use crate::rom::{Rom, RomError};
+
+use objects::{Jumps, Layout, ObjectData, ObjectError};
 
 pub const LEVEL_COUNT: u16 = 0x200;
 
@@ -18,6 +23,48 @@ pub mod tables {
     pub const LAYER2_PTRS: SnesAddr = SnesAddr::new(0x05E600);
     /// 2-byte sprite pointers into bank `$07`, one per level.
     pub const SPRITE_PTRS: SnesAddr = SnesAddr::new(0x05EC00);
+    /// The four secondary header tables, one byte per level each.
+    pub const SECONDARY_HEADERS: [SnesAddr; 4] = [
+        SnesAddr::new(0x05F000),
+        SnesAddr::new(0x05F200),
+        SnesAddr::new(0x05F400),
+        SnesAddr::new(0x05F600),
+    ];
+    /// Lunar Magic's bank bytes for the sprite pointers, one per level.
+    pub const SPRITE_BANKS: SnesAddr = SnesAddr::new(0x0EF100);
+    /// Lunar Magic's one-time install gate: `$FF` in the game, anything
+    /// else once installed (see docs/lunar-magic.md).
+    pub const LUNAR_MAGIC_GATE: SnesAddr = SnesAddr::new(0x06F600);
+    /// Lunar Magic's per-level flags, `bbBBVFCT`: `V` a background in the
+    /// game's format, `C` Lunar Magic's own, `F` with high bytes.
+    pub const LEVEL_FLAGS: SnesAddr = SnesAddr::new(0x0EF310);
+    /// Where Lunar Magic 3 puts `JSL` to its expanded level loader.
+    pub const TALL_LEVEL_HOOK: SnesAddr = SnesAddr::new(0x05D9A1);
+}
+
+/// Which level format a ROM's own code reads.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LevelFormat {
+    /// Lunar Magic's tables are installed, among them the bank bytes of
+    /// the sprite pointers.
+    pub lunar_magic: bool,
+    /// Whether screen jumps carry a vertical part: only the loader
+    /// Lunar Magic 3 installs reads one.
+    pub jumps: Jumps,
+}
+
+impl LevelFormat {
+    /// Read from the ROM: every Lunar Magic ROM of the corpus, from 1.62
+    /// on, has its gate set, and exactly the 3.x ones have the hook.
+    pub fn of(rom: &Rom) -> Self {
+        let byte = |addr| rom.read_u8(addr).ok();
+        let lunar_magic = byte(tables::LUNAR_MAGIC_GATE).is_some_and(|b| b != 0xFF);
+        let tall = lunar_magic && byte(tables::TALL_LEVEL_HOOK) == Some(0x22);
+        Self {
+            lunar_magic,
+            jumps: if tall { Jumps::Tall } else { Jumps::Vanilla },
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -26,6 +73,19 @@ pub enum LevelError {
     BadLevel(u16),
     #[error(transparent)]
     Rom(#[from] RomError),
+    #[error("level {level:03X} background: {source}")]
+    Background {
+        level: u16,
+        #[source]
+        source: LzError,
+    },
+    #[error("level {level:03X} layer {layer}: {source}")]
+    Objects {
+        level: u16,
+        layer: u8,
+        #[source]
+        source: ObjectError,
+    },
 }
 
 fn check(level: u16) -> Result<(), LevelError> {
@@ -62,11 +122,17 @@ pub fn layer2_ptr(rom: &Rom, level: u16) -> Result<Layer2Data, LevelError> {
     })
 }
 
-/// Where a level's sprite data (header plus sprites) starts.
+/// Where a level's sprite data (header plus sprites) starts: in bank
+/// `$07`, or in the bank Lunar Magic's table gives.
 pub fn sprite_ptr(rom: &Rom, level: u16) -> Result<SnesAddr, LevelError> {
     check(level)?;
     let offset = rom.read_u16(tables::SPRITE_PTRS.add(2 * level as u32))?;
-    Ok(SnesAddr::from_bank_offset(0x07, offset))
+    let bank = if LevelFormat::of(rom).lunar_magic {
+        rom.read_u8(tables::SPRITE_BANKS.add(level as u32))?
+    } else {
+        0x07
+    };
+    Ok(SnesAddr::from_bank_offset(bank, offset))
 }
 
 /// What a level mode puts on layer 2.
@@ -107,6 +173,12 @@ impl LevelMode {
             0x05..=0x08 => Layer2Kind::VerticalObjects,
             _ => Layer2Kind::None,
         }
+    }
+
+    /// Whether layer 1 is vertical: bit 0 of the game's per-mode table
+    /// at `$058417` (`VerticalTable`), which `CODE_0584E3` stores to `$5B`.
+    pub fn layer1_vertical(self) -> bool {
+        matches!(self.0, 0x03 | 0x04 | 0x07 | 0x08 | 0x0A | 0x0D)
     }
 }
 
@@ -184,6 +256,177 @@ impl PrimaryHeader {
     }
 }
 
+/// A level's layer 2, as its level mode has it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Layer2 {
+    Objects(ObjectData),
+    /// A background tilemap at this address.
+    Background(SnesAddr),
+    /// The level mode loads nothing there.
+    None,
+}
+
+/// A level's object data, read from the ROM.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct LevelObjects {
+    /// The layer 1 data, whose header is the primary header.
+    pub layer1: ObjectData,
+    pub layer2: Layer2,
+}
+
+impl LevelObjects {
+    pub fn header(&self) -> PrimaryHeader {
+        PrimaryHeader::from_bytes(self.layer1.header)
+    }
+}
+
+/// Reads a level's layer 1 and layer 2 object data. The level mode says
+/// what layer 2 is, as it does for the game's loader.
+pub fn read_objects(rom: &Rom, level: u16) -> Result<LevelObjects, LevelError> {
+    let jumps = LevelFormat::of(rom).jumps;
+    let decode = |addr, layout, layer| {
+        objects::decode(rom.read_tail(addr)?, layout, jumps).map_err(|source| LevelError::Objects {
+            level,
+            layer,
+            source,
+        })
+    };
+    let layer1 = decode(layer1_ptr(rom, level)?, Layout::Horizontal, 1)?;
+    let mode = PrimaryHeader::from_bytes(layer1.header).level_mode;
+    let layer1 = if mode.layer1_vertical() {
+        decode(layer1_ptr(rom, level)?, Layout::Vertical, 1)?
+    } else {
+        layer1
+    };
+    let layer2 = match (mode.layer2(), layer2_ptr(rom, level)?) {
+        (Layer2Kind::HorizontalObjects, Layer2Data::Objects(addr)) => {
+            Layer2::Objects(decode(addr, Layout::Horizontal, 2)?)
+        }
+        (Layer2Kind::VerticalObjects, Layer2Data::Objects(addr)) => {
+            Layer2::Objects(decode(addr, Layout::Vertical, 2)?)
+        }
+        (Layer2Kind::Background, Layer2Data::Objects(addr) | Layer2Data::Tilemap(addr)) => {
+            Layer2::Background(addr)
+        }
+        _ => Layer2::None,
+    };
+    Ok(LevelObjects { layer1, layer2 })
+}
+
+/// A level's background tilemap, decompressed.
+///
+/// In the game's format the stream holds the low bytes of the left half
+/// (16 columns by 27 rows) and then of the right, and the Map16 page is 1
+/// if the data is at or past `$0CE8FE`, else 0 (`CODE_05801E`); the
+/// decompressor may write a byte past the 864 it needs. Lunar Magic
+/// keeps that for vanilla backgrounds (flag `V`) and has its own: 32 rows
+/// to a half, with the high bytes in a second block of the same size in
+/// the same stream when flag `F` is set, and the flags' top nibble for a
+/// high byte otherwise.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Background {
+    /// Where the stream starts.
+    pub address: SnesAddr,
+    /// Lunar Magic's flags for the level, where it has them.
+    pub flags: Option<u8>,
+    /// The decompressed stream.
+    pub data: Vec<u8>,
+    /// The stream's length, terminator included.
+    pub stream_len: usize,
+}
+
+/// Reads and decompresses a level's background tilemap, if its level
+/// mode has one.
+pub fn read_background(rom: &Rom, level: u16) -> Result<Option<Background>, LevelError> {
+    let Layer2::Background(address) = read_objects(rom, level)?.layer2 else {
+        return Ok(None);
+    };
+    let unpacked = rle1::decompress(rom.read_tail(address)?)
+        .map_err(|source| LevelError::Background { level, source })?;
+    let flags = LevelFormat::of(rom)
+        .lunar_magic
+        .then(|| rom.read_u8(tables::LEVEL_FLAGS.add(level as u32)))
+        .transpose()?;
+    Ok(Some(Background {
+        address,
+        flags,
+        data: unpacked.data,
+        stream_len: unpacked.consumed,
+    }))
+}
+
+/// A level's secondary header: one byte from each table in
+/// [`tables::SECONDARY_HEADERS`], `hhhhyyyy 33AAAxxx MMMMffbb NUVEEEEE`.
+/// Lunar Magic adds bits to the positions from other tables of its own.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct SecondaryHeader {
+    /// Layer 2 scroll setting, 0 to 15.
+    pub layer2_scroll: u8,
+    /// Main entrance Y, 0 to 15.
+    pub entrance_y: u8,
+    /// Layer 3 setting, 0 to 3.
+    pub layer3: u8,
+    /// Main entrance action, 0 to 7.
+    pub entrance_action: u8,
+    /// Main entrance X, 0 to 7.
+    pub entrance_x: u8,
+    /// Midway entrance screen, 0 to 15.
+    pub midway_screen: u8,
+    /// Foreground and background initial positions, 0 to 3 each.
+    pub fg_position: u8,
+    pub bg_position: u8,
+    /// Skip the No-Yoshi intro room.
+    pub no_yoshi_intro: bool,
+    /// Bit 6 of the fourth byte, whose use is unknown.
+    pub unknown: bool,
+    /// Vertical positioning flag.
+    pub vertical_position: bool,
+    /// Main entrance screen, 0 to 31.
+    pub entrance_screen: u8,
+}
+
+impl SecondaryHeader {
+    pub fn from_bytes(b: [u8; 4]) -> Self {
+        Self {
+            layer2_scroll: b[0] >> 4,
+            entrance_y: b[0] & 0x0F,
+            layer3: b[1] >> 6,
+            entrance_action: (b[1] >> 3) & 0x07,
+            entrance_x: b[1] & 0x07,
+            midway_screen: b[2] >> 4,
+            fg_position: (b[2] >> 2) & 0x03,
+            bg_position: b[2] & 0x03,
+            no_yoshi_intro: b[3] & 0x80 != 0,
+            unknown: b[3] & 0x40 != 0,
+            vertical_position: b[3] & 0x20 != 0,
+            entrance_screen: b[3] & 0x1F,
+        }
+    }
+
+    pub fn to_bytes(self) -> [u8; 4] {
+        [
+            (self.layer2_scroll << 4) | (self.entrance_y & 0x0F),
+            (self.layer3 << 6) | ((self.entrance_action & 0x07) << 3) | (self.entrance_x & 0x07),
+            (self.midway_screen << 4)
+                | ((self.fg_position & 0x03) << 2)
+                | (self.bg_position & 0x03),
+            (self.no_yoshi_intro as u8) << 7
+                | (self.unknown as u8) << 6
+                | (self.vertical_position as u8) << 5
+                | (self.entrance_screen & 0x1F),
+        ]
+    }
+}
+
+pub fn read_secondary_header(rom: &Rom, level: u16) -> Result<SecondaryHeader, LevelError> {
+    check(level)?;
+    let mut bytes = [0; 4];
+    for (byte, table) in bytes.iter_mut().zip(tables::SECONDARY_HEADERS) {
+        *byte = rom.read_u8(table.add(level as u32))?;
+    }
+    Ok(SecondaryHeader::from_bytes(bytes))
+}
+
 pub fn read_primary_header(rom: &Rom, level: u16) -> Result<PrimaryHeader, LevelError> {
     let ptr = layer1_ptr(rom, level)?;
     let b = rom.read(ptr, 5)?;
@@ -218,6 +461,19 @@ mod tests {
         assert_eq!(b[3], 0b10_111_001);
         assert_eq!(b[4], 0b1101_1110);
         assert_eq!(PrimaryHeader::from_bytes(b), h);
+    }
+
+    #[test]
+    fn secondary_header_round_trip() {
+        for bytes in [[0x00; 4], [0xFF; 4], [0x5A, 0xC3, 0x96, 0x3C]] {
+            assert_eq!(SecondaryHeader::from_bytes(bytes).to_bytes(), bytes);
+        }
+        let h = SecondaryHeader::from_bytes([0x21, 0b10_011_101, 0x96, 0xA5]);
+        assert_eq!((h.layer2_scroll, h.entrance_y), (2, 1));
+        assert_eq!((h.layer3, h.entrance_action, h.entrance_x), (2, 3, 5));
+        assert_eq!((h.midway_screen, h.fg_position, h.bg_position), (9, 1, 2));
+        assert!(h.no_yoshi_intro && !h.unknown && h.vertical_position);
+        assert_eq!(h.entrance_screen, 5);
     }
 
     #[test]

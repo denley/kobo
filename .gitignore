@@ -3,3 +3,5 @@
 *.smc
 *.sfc
 *.srm
+# Agent worktrees.
+/.claude/worktrees/

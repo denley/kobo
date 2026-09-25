@@ -125,6 +125,34 @@ are SMWDisX's.
   then and there, as the console gives it, up to 16 times in one run (`Cpu::run`,
   `Bus::vblank`); a wait the handler does not end is given up as one nothing will.
 
+## Level data
+
+- Object data (`kobo_core::level::objects`): a five-byte header (layer 1's is the primary
+  header; `LoadLevel` skips layer 2's), then objects in drawing order until a first byte
+  of `$FF`. `NBBYYYYY bbbbXXXX` plus a settings byte: `BBbbbb` is the object, `N` moves
+  the current screen (`$1928`) on by one before the object is placed. Object `00` is an
+  extended object numbered by its third byte: `00` a screen exit, four bytes, `000ppppp
+  0000wush 00000000 dddddddd` (the exit's own screen, flags, destination low byte;
+  `ExtOBJScreenExit`), and `01` a screen jump, which sets the screen to the first byte's
+  low five bits (`ExtOBJScreenJump`). Extended objects `02`-`0F` have null handler
+  pointers.
+- On a vertical layer (`VerticalTable` at `$058417`: bit 0 layer 1, bit 1 layer 2; layer 1
+  is vertical in modes `03`, `04`, `07`, `08`, `0A`, `0D`) `CODE_0585D8` swaps the two
+  place nibbles of every object but extended `00` and `01`: the first byte's low five bits
+  are the column across the 32-tile screen, the second byte's low nibble the row.
+- Nintendo's data has redundant screen jumps: a jump to the screen already current, or to
+  one a new-screen bit would reach. Eighteen of the 538 object lists have one, so Kobo's
+  encoder, which uses the bit where it can, writes those shorter; the other 520 come out
+  byte for byte.
+- Background tilemaps are LC_RLE1 (`compress::rle1`), decompressed by `CODE_058126` into
+  `$7EB900`: the left half's 16 columns by 27 rows, then the right half's, as low bytes.
+  The routine stops when the two bytes after a chunk are `$FF $FF`, so a first chunk is
+  always read and no chunk can begin with them. `CODE_05801E` takes the Map16 page for all
+  of it from the data's address: 1 at or past `$0CE8FE`, else 0. Some of the 17 vanilla
+  backgrounds decode one byte past their 864. Nintendo's encoding is not the shortest.
+- The secondary header is one byte from each of the tables at `$05F000`, `$05F200`,
+  `$05F400`, `$05F600`: `hhhhyyyy 33AAAxxx MMMMffbb NUVEEEEE` (`level::SecondaryHeader`).
+
 ## The tile grid and Map16
 
 - Tile grid layout: horizontal levels are 16x27 per screen, screen after screen. Vertical

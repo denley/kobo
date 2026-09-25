@@ -108,6 +108,30 @@ executable. Vanilla behaviour is in [smw.md](smw.md).
 - SA-1 hacks run on a second CPU; see [sa1.md](sa1.md). On one, SA-1 Pack's own loader hook is
   at `$02A856`, not Lunar Magic's, and the flags are wherever the RAM map puts `$1938`.
 
+- Level data it adds (layouts from the community's documentation of the format, checked by
+  round trip on every level of the corpus, `tests/level_data.rs`): objects `22`/`23`
+  (direct Map16, 4 bytes), `27`/`29` (Map16 objects, 5 to 8 bytes: 5 when the fourth
+  byte's top two bits are `00` or `01`, 6 for `10`, 7 or 8 for `11` by bit 7 of the third
+  byte), `2D` (user objects, 5 bytes), `24`-`26` and `28` (settings with no place),
+  extended `02` (a 5-byte screen exit with a 13-bit destination), and extended `03`, a
+  screen jump for level heights past 16 units. From 3.00 a screen jump's second byte
+  carries a vertical part in units of 32 rows. Exactly the 3.x ROMs of the corpus have
+  `JSL` at `$05D9A1` (`level::LevelFormat`).
+- Every Lunar Magic ROM of the corpus, 1.62 to 3.51, has its install gate `$06F600` set
+  (`$EA`, or `$68` in the 1.62 and 2.41 ROMs). All of them have the sprite pointer bank
+  table at `$0EF100`: every level's sprite list parses from `$0EF100`'s bank and the
+  low word at `$05EC00`, in bank `$07` for untouched levels and in a RATS block for the
+  rest.
+- Background layouts by the flags at `$0EF310` (`bbBBVFCT`), as the corpus has them: a
+  layer 2 pointer with bank `$FF` is the game's format in bank `$0C`, flags aside; `V` is
+  a vanilla background behind a full pointer, 864 bytes; `C` with `F` is Lunar Magic's
+  own, one LC_RLE1 stream of 2048 bytes (32 rows to a half, low bytes then high bytes),
+  in a RATS block; `C` without `F` decodes to 864 bytes. Lunar Magic 3.51 rewrites every
+  vanilla background pointer to a full one with `V`; older versions leave bank `$FF`.
+- ROMs locked by their authors (see below) add objects past the level's last screen:
+  Baby Kaizo World 3's level `014` has 8 screens and 779 objects, running to screen 48 and
+  back, which no screen jump can express. `tests/level_data.rs` skips them.
+
 ## What Lunar Magic installs, and how it decides
 
 Found with Lunar Magic 3.70's command line under Wine, by byte diffs of ROMs before and

@@ -8,11 +8,14 @@
 //! bits 2 to 4 and the length becomes ten bits spanning the low two bits
 //! and the following byte. A header byte of `$FF` ends the stream. The
 //! formats differ in what commands 3 and up do.
+//!
+//! LC_RLE1, the simpler format of background tilemaps, is [`rle1`].
 
 use thiserror::Error;
 
 pub mod lz2;
 pub mod lz3;
+pub mod rle1;
 
 /// Output offsets are 16-bit, so no stream can address more than this.
 pub const MAX_OUTPUT: usize = 0x1_0000;

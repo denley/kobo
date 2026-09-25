@@ -178,6 +178,13 @@ how each oracle is produced, where its data lives, and what is known not to matc
   added. `Super Hark Bros 2` level `00A` used to fail with 896 of 2048 words: its
   level-init code leaves layer 2 at `$5D` and the game had uploaded for `$C0`, which the
   camera update `expand` now runs after preparation restores.
+- **Level data**: `tests/level_data.rs` decodes and encodes every level's object data,
+  sprite list, and distinct background of the vanilla ROM and of every `KOBO_LM_ROMS` ROM
+  but the locked ones, and requires the same objects, sprites, and tiles back, an encoding
+  no longer than the stored one, and a stored length within the RATS block holding it. On
+  vanilla all 538 object lists and 512 sprite lists but 18 object lists come out byte for
+  byte ([smw.md](smw.md)). In the corpus, 70% to 100% of each ROM's lists do; the rest are
+  Lunar Magic's encoding choices (every run on 2026-09-25 passed).
 - **SA-1**: the oracle script reads SA-1 Pack's RAM map (`ram()` in `dump_levels.lua` is
   `RamMap::Sa1Pack` for what it touches, and the full-WRAM dump is laid out as vanilla's)
   and hooks the pointer lookup on the SA-1 too, where the level loader runs. With
@@ -246,8 +253,9 @@ anything.
 ## Parser mutation checks
 
 `tests/input_robustness.rs` runs 512 repeatable synthetic mutation cases in CI, covering
-header size codes, mapped pointers, overflowing reads, truncated LC_LZ2 and LC_LZ3
-streams, and sprite lists. The same generator runs for longer as an example:
+header size codes, mapped pointers, overflowing reads, truncated LC_LZ2, LC_LZ3, and
+LC_RLE1 streams, sprite lists, and object data, which must also encode back to the same
+objects. The same generator runs for longer as an example:
 
 ```sh
 cargo run --release --example fuzz_inputs -- 10000

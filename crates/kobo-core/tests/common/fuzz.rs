@@ -1,6 +1,7 @@
 //! Dependency-free mutation smoke fuzzing shared by CI and the longer driver.
 //! Reproduce a case with its seed; this is not coverage-guided fuzzing.
 
+use kobo_core::level::objects::{self, Jumps, Layout};
 use kobo_core::{Rom, SnesAddr, compress, gfx, sprites};
 
 pub fn case(mut seed: u64) {
@@ -12,13 +13,38 @@ pub fn case(mut seed: u64) {
     };
     let len = next() as usize % 2048;
     let input: Vec<u8> = (0..len).map(|_| next() as u8).collect();
-    for decode in [compress::lz2::decompress, compress::lz3::decompress] {
+    for decode in [
+        compress::lz2::decompress,
+        compress::lz3::decompress,
+        compress::rle1::decompress,
+    ] {
         for n in [0, input.len() / 2, input.len()] {
             if let Ok(result) = decode(&input[..n]) {
                 assert!(result.consumed <= n);
                 assert!(result.data.len() <= compress::MAX_OUTPUT);
             }
         }
+    }
+    // What decodes encodes again to the same thing, where it can be placed.
+    for layout in [Layout::Horizontal, Layout::Vertical] {
+        for jumps in [Jumps::Vanilla, Jumps::Tall] {
+            if let Ok(data) = objects::decode(&input, layout, jumps) {
+                assert!(data.len <= input.len());
+                if let Ok(bytes) = objects::encode(data.header, &data.objects, layout, jumps) {
+                    let again = objects::decode(&bytes, layout, jumps).unwrap();
+                    assert_eq!(again.objects, data.objects);
+                }
+            }
+        }
+    }
+    if let Ok(result) = compress::rle1::decompress(&input)
+        && (1..=4096).contains(&result.data.len())
+    {
+        let packed = compress::rle1::compress(&result.data).unwrap();
+        assert_eq!(
+            compress::rle1::decompress(&packed).unwrap().data,
+            result.data
+        );
     }
     // Valid container shape, arbitrary headers and pointer operands. Without
     // a structured seed, almost every ROM mutation is rejected at BadSize.
