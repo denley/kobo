@@ -208,6 +208,11 @@ how each oracle is produced, where its data lives, and what is known not to matc
   build. With `KOBO_ADDMUSICK` (an AddmusicK folder; `~/src/addmusick` here) and the
   vanilla ROM, a project with an empty music folder gets AddmusicK's default music
   (`@AMK` at `$0E8000`), the same bytes twice.
+- **SA-1 builds**: with `KOBO_SA1PACK` (`~/src/sa1pack` here), `tool_stages.rs` imports
+  every level of the SA-1 base and builds it back as an SA-1 project, which must read back
+  the same and render four levels the same. All 512 pictures, by hand: make the reference
+  ROM as [sa1.md](sa1.md) says (`~/.local/share/kobo/roms/sa1/smw-sa1.sfc` here), `kobo
+  import` it `--all`, `kobo build`, and compare `render_hashes` of the two.
 - **Lunar Magic check**: `tools/lunar-magic/save-check built.sfc [level [project]]` has Lunar Magic
   3.70 save a copy of a ROM (exporting a level and importing it back) and runs `kobo diff`
   on the two: every level must read the same. A build of the whole vanilla import passes

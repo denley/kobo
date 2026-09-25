@@ -1079,7 +1079,18 @@ fn import(from: &Path, dir: &Path, all: bool, level: Option<&str>, clean: &Rom) 
         kobo_core::import::import_mwl(&bytes, clean, dir, level)?
     } else {
         let rom = Rom::load(from).with_context(|| format!("loading {}", from.display()))?;
-        kobo_core::import::import_rom(&rom, clean, dir, all)?
+        // An SA-1 ROM's project builds onto the clean ROM with SA-1 Pack.
+        let manifest = kobo_core::source::project::Manifest {
+            sa1: rom.mapping().is_sa1(),
+            ..Default::default()
+        };
+        let base = if manifest.sa1 {
+            kobo_core::build::base_image(clean, &manifest)
+                .context("making the SA-1 base (SA-1 Pack must be configured)")?
+        } else {
+            Rom::from_bytes(clean.data().to_vec())?
+        };
+        kobo_core::import::import_rom(&rom, &base, dir, all)?
     };
     for note in &report.notes {
         println!("note: {note}");

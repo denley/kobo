@@ -24,7 +24,8 @@ are the ones to read.
   does: copy the headerless vanilla ROM and run `asar sa1.asm rom.sfc` in the source's `asm/`
   (Asar 1.91 works). It lives in `~/.local/share/kobo/roms/sa1/` and, like any ROM, is never
   committed. SA-1 Pack's guide says to save a level in Lunar Magic afterwards; the reference
-  ROM has not had that done.
+  ROM has not had that done. A Kobo project with `[rom] sa1 = true` and nothing else builds
+  the same bytes.
 
 ## The two processors
 

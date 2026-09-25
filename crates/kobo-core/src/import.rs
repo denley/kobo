@@ -118,8 +118,11 @@ pub struct Report {
 }
 
 /// Imports a ROM's levels into a new project in `dir`: every level that
-/// differs from the clean ROM, or every level with `all`.
-pub fn import_rom(rom: &Rom, clean: &Rom, dir: &Path, all: bool) -> Result<Report, ImportError> {
+/// differs from `base`, or every level with `all`. `base` is what the
+/// project will build onto: the clean ROM, or for an SA-1 ROM the clean
+/// ROM with SA-1 Pack ([`crate::build::base_image`]); what differs from it
+/// outside the levels is reported.
+pub fn import_rom(rom: &Rom, base: &Rom, dir: &Path, all: bool) -> Result<Report, ImportError> {
     let manifest_path = dir.join(MANIFEST);
     if manifest_path.exists() {
         return Err(ImportError::Exists(dir.to_path_buf()));
@@ -137,10 +140,13 @@ pub fn import_rom(rom: &Rom, clean: &Rom, dir: &Path, all: bool) -> Result<Repor
         })
     };
     let mut report = Report::default();
-    let mut manifest = Manifest::default();
+    let mut manifest = Manifest {
+        sa1: rom.mapping().is_sa1(),
+        ..Manifest::default()
+    };
     for number in 0..LEVEL_COUNT {
         let (level, notes) = read_level(rom, number)?;
-        if !all && read_level(clean, number)?.0 == level {
+        if !all && read_level(base, number)?.0 == level {
             continue;
         }
         let file = PathBuf::from("levels").join(format!("{number:03X}.toml"));
@@ -155,12 +161,12 @@ pub fn import_rom(rom: &Rom, clean: &Rom, dir: &Path, all: bool) -> Result<Repor
     }
     write(&manifest_path, manifest.to_toml())?;
     let read = read_spans(rom)?;
-    report.unmodelled = unmodelled(rom, clean, &read);
+    report.unmodelled = unmodelled(rom, base, &read);
     report.unread_blocks = rats::blocks(rom)
         .into_iter()
         .filter(|block| {
             let start = rom.pc(block.start).map_or(0, |pc| pc.as_usize());
-            start >= clean.len()
+            start >= base.len()
                 && !read
                     .iter()
                     .any(|r| r.start < start + block.len && start < r.end)
