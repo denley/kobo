@@ -136,12 +136,11 @@ executable. Vanilla behaviour is in [smw.md](smw.md).
   (`ScreenExit::in_lunar_magic_format`). Its restore system will not change a ROM it
   does not recognise unless `sysLMRestore/smwOrig.smc` beside the ROM holds the original
   game with a copier header; the script puts one there.
-- An MWL export records where the level's data was in the ROM (three bytes of the layer 1
-  section's header, and the layer 2 pointer in its section's), so exports of the same
-  level from two ROMs differ there. Exporting a vanilla ROM, Lunar Magic records a
-  different background than the level's pointer for some levels (level `019`: `$FFDE54`,
-  where the pointer is `$FFD900`) and its export of the background differs from a
-  build's with the same pointer; not yet understood.
+- An MWL export records where the level's data was in the ROM, so exports of the same
+  level from two ROMs differ there (see "MWL files" below). A level whose layer 1 is the
+  shared empty level at `$068000` exports with the background at `$FFDE54`, so exports of
+  such a level from a vanilla ROM and from a build that moved its layer 1 differ in the
+  background too.
 - ROMs locked by their authors (see below) add objects past the level's last screen:
   Baby Kaizo World 3's level `014` has 8 screens and 779 objects, running to screen 48 and
   back, which no screen jump can express. `tests/level_data.rs` skips them.
