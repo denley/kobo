@@ -187,7 +187,12 @@ on the built ROM.
    and `read_background` find a level's data from the ROM's tables alone, vanilla or Lunar
    Magic ([lunar-magic.md](lunar-magic.md)). Locked ROMs are out of scope. Interpreting
    Lunar Magic's Map16 objects and custom backgrounds as tiles comes with their 2b features.
-6. BPS reading and writing. It also brings the QLDC entries into `KOBO_LM_ROMS`.
+6. BPS reading and writing. Done: `kobo_core::bps` applies a patch with every CRC and
+   bound checked (`apply_to_rom` takes one made against the headerless or the
+   copier-headered image and returns the headerless target) and creates one
+   deterministically, smaller than the distributed patch for every corpus hack it was
+   tried on; `kobo bps apply|create` on the CLI. `KOBO_LM_ROMS` takes `.bps` entries, so
+   the QLDC entries are listed as they are distributed ([testing.md](testing.md)).
 7. An LC_LZ2 compressor that always produces the same output. Done:
    `compress::lz2::compress`, an optimal parse over commands 0-4 (dynamic programming,
    longest matches from a suffix array) with a fixed tie-break. It writes only what the

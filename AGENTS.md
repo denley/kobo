@@ -187,6 +187,8 @@ cargo run -- level tiles|dump 105 [dir]      # the expanded Map16 grid as hex, o
 cargo run -- level sprites|map16|wram|reads  # sprite list, resolved Map16, RAM dump, read trace
 cargo run -- mwl info level.mwl [-r rom]     # an MWL file's sections (-r: its ROM's PIXI sprite sizes)
 cargo run -- addr '$05E000' [--sa1]          # SNES <-> file offset
+cargo run -- bps apply hack.bps out.sfc [-r rom]   # patch the clean ROM, headered or not; output headerless
+cargo run -- bps create hack.sfc out.bps [-r rom]  # patch from the clean ROM to a modified one
 cargo run --release --example sprite_census -- rom.smc  # sprite numbers that draw nothing, by level
 cargo run --release --example render_hashes -- rom.smc  # a hash per level picture, to diff across a change
 cargo run --release --example sprite_oracle -- rom.smc dumpdir...  # per-sprite scores against emulator frames
@@ -219,7 +221,8 @@ Windows, and macOS. Keep all three green.
   committed: `KOBO_ORACLE_DIR` (Mesen 2 dumps of every vanilla level, `tools/oracle/`; of
   another ROM, the SA-1 reference ROM say, with `KOBO_ORACLE_ROM`),
   `KOBO_BOSS_ORACLE_DIR`, `KOBO_VIDEO_ORACLE_DIRS` (whole pictures), `KOBO_65816_TESTS`
-  (SingleStepTests), `KOBO_LM_ROMS` (`:`-separated Lunar Magic hacks), and `KOBO_MWL_DIR`
+  (SingleStepTests), `KOBO_LM_ROMS` (`:`-separated Lunar Magic hacks, ROMs or `.bps`
+  patches of the vanilla ROM), and `KOBO_MWL_DIR`
   (MWL exports, `tools/lunar-magic/export-mwl`). Lunar Magic exports (hashes in
   `tests/fixtures/`) are the oracle for GFX, palette, Map16, and MWL files.
   `docs/testing.md` has how each is produced, where the data lives, and the known exceptions.

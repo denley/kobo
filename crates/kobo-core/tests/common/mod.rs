@@ -1,6 +1,6 @@
 //! Shared helpers for ROM-backed integration tests.
 
-use kobo_core::{Rom, RomIdentity, SnesAddr, config};
+use kobo_core::{Rom, RomIdentity, SnesAddr, bps, config};
 
 /// The configured vanilla ROM, or `None` (after printing why) so the
 /// calling test can return early and pass.
@@ -40,20 +40,37 @@ pub fn oracle_rom() -> Option<Rom> {
 }
 
 /// Lunar Magic hack ROMs to exercise, from the `:`-separated paths in
-/// `KOBO_LM_ROMS`. Empty (after printing why) when the variable is unset.
+/// `KOBO_LM_ROMS`, loaded one at a time. Empty (after printing why) when the
+/// variable is unset. A `.bps` entry is a patch, applied to the configured
+/// vanilla ROM.
 #[allow(dead_code)]
-pub fn lunar_magic_roms() -> Vec<(std::path::PathBuf, Rom)> {
-    let Some(list) = std::env::var_os("KOBO_LM_ROMS") else {
-        eprintln!("skipping Lunar Magic ROMs: KOBO_LM_ROMS is not set");
-        return Vec::new();
+pub fn lunar_magic_roms() -> impl Iterator<Item = (std::path::PathBuf, Rom)> {
+    let paths: Vec<_> = match std::env::var_os("KOBO_LM_ROMS") {
+        None => {
+            eprintln!("skipping Lunar Magic ROMs: KOBO_LM_ROMS is not set");
+            Vec::new()
+        }
+        Some(list) => {
+            assert!(!list.is_empty(), "KOBO_LM_ROMS is set but empty");
+            std::env::split_paths(&list).collect()
+        }
     };
-    assert!(!list.is_empty(), "KOBO_LM_ROMS is set but empty");
-    std::env::split_paths(&list)
-        .map(|p| {
-            let rom = Rom::load(&p).expect("listed Lunar Magic ROM must load");
-            (p, rom)
-        })
-        .collect()
+    let mut clean = None;
+    paths.into_iter().map(move |p| {
+        let is_patch = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("bps"));
+        let rom = if is_patch {
+            let clean = clean.get_or_insert_with(|| {
+                vanilla().expect("a .bps entry in KOBO_LM_ROMS needs the vanilla ROM")
+            });
+            let patch = std::fs::read(&p).expect("listed BPS patch must be readable");
+            let patched =
+                bps::apply_to_rom(&patch, clean).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+            Rom::from_bytes(patched.data).expect("patched Lunar Magic ROM must load")
+        } else {
+            Rom::load(&p).expect("listed Lunar Magic ROM must load")
+        };
+        (p, rom)
+    })
 }
 
 /// A 512 KiB LoROM image laid out as the vanilla ROM is where a build

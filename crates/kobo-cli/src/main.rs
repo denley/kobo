@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use kobo_core::asar::{Asar, AsarError, Patch};
+use kobo_core::bps;
 use kobo_core::expand;
 use kobo_core::gfx::{self, Bpp, GFX_FILE_COUNT};
 use kobo_core::image::{grayscale, tile_sheet};
@@ -134,6 +135,11 @@ enum Command {
     Mwl {
         #[command(subcommand)]
         command: MwlCommand,
+    },
+    /// Apply and create BPS patches.
+    Bps {
+        #[command(subcommand)]
+        command: BpsCommand,
     },
     /// Convert between SNES addresses and ROM file offsets.
     Addr {
@@ -290,6 +296,30 @@ enum LevelCommand {
         rom: RomArg,
         /// Level number in hex, for example `105`.
         level: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum BpsCommand {
+    /// Apply a patch to the clean ROM, made against it with or without a
+    /// copier header, and write the result without one.
+    Apply {
+        /// The BPS patch.
+        patch: PathBuf,
+        /// Output ROM path.
+        out: PathBuf,
+        /// The clean ROM. Defaults to the configured vanilla ROM.
+        #[command(flatten)]
+        rom: RomArg,
+    },
+    /// Write a patch from the clean ROM to a modified one, both headerless.
+    Create {
+        /// The modified ROM.
+        modified: PathBuf,
+        /// Output patch path.
+        out: PathBuf,
+        #[command(flatten)]
+        rom: RomArg,
     },
 }
 
@@ -496,6 +526,10 @@ fn main() -> Result<()> {
         Command::Mwl {
             command: MwlCommand::Info { file, rom },
         } => mwl_info(&file, rom.as_deref()),
+        Command::Bps { command } => match command {
+            BpsCommand::Apply { patch, out, rom } => bps_apply(&rom.load()?, &patch, &out),
+            BpsCommand::Create { modified, out, rom } => bps_create(&rom.load()?, &modified, &out),
+        },
         Command::Addr { addr, sa1 } => convert_addr(&addr, sa1),
         Command::Import {
             from,
@@ -1254,6 +1288,39 @@ fn gfx_png(rom: &Rom, index: &str, out: &PathBuf, columns: u32, bpp: Option<u8>)
         img.width,
         img.height,
         out.display()
+    );
+    Ok(())
+}
+
+fn bps_apply(rom: &Rom, patch: &Path, out: &Path) -> Result<()> {
+    let bytes = fs::read(patch).with_context(|| format!("reading {}", patch.display()))?;
+    let patched =
+        bps::apply_to_rom(&bytes, rom).with_context(|| format!("applying {}", patch.display()))?;
+    fs::write(out, &patched.data).with_context(|| format!("writing {}", out.display()))?;
+    let form = match patched.source {
+        bps::SourceForm::Headerless => "headerless",
+        bps::SourceForm::OwnHeader => "with the ROM's copier header",
+        bps::SourceForm::SizeHeader => "with a size copier header",
+        bps::SourceForm::ZeroHeader => "with a zero copier header",
+    };
+    println!(
+        "{}: made against the clean ROM {form}; wrote {} bytes to {}",
+        patch.display(),
+        patched.data.len(),
+        out.display()
+    );
+    Ok(())
+}
+
+fn bps_create(rom: &Rom, modified: &Path, out: &Path) -> Result<()> {
+    let target = Rom::load(modified).with_context(|| format!("loading {}", modified.display()))?;
+    let patch = bps::create(rom.data(), target.data());
+    fs::write(out, &patch).with_context(|| format!("writing {}", out.display()))?;
+    println!(
+        "{} -> {}: {} bytes",
+        modified.display(),
+        out.display(),
+        patch.len()
     );
     Ok(())
 }

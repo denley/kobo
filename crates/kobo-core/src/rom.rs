@@ -224,6 +224,11 @@ impl Rom {
         self.copier_header.is_some()
     }
 
+    /// The copier header the image was loaded with, if it had one.
+    pub fn copier_header(&self) -> Option<&[u8]> {
+        self.copier_header.as_deref()
+    }
+
     pub fn mapping(&self) -> Mapping {
         self.mapping
     }
