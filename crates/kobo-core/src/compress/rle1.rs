@@ -56,7 +56,7 @@ enum Chunk {
 /// and input over 64 KiB have no stream.
 pub fn compress(data: &[u8]) -> Result<Vec<u8>, LzError> {
     if data.len() > MAX_OUTPUT {
-        return Err(LzError::TooLarge);
+        return Err(LzError::InputTooLarge(data.len()));
     }
     if data.is_empty() {
         return Err(LzError::Truncated(0));
@@ -171,7 +171,10 @@ mod tests {
         assert_eq!(decompress(&[0x05, 1, 2]), Err(LzError::Truncated(3)));
         assert_eq!(decompress(&[0x81]), Err(LzError::Truncated(1)));
         assert!(compress(&[]).is_err());
-        assert_eq!(compress(&vec![0; MAX_OUTPUT + 1]), Err(LzError::TooLarge));
+        assert_eq!(
+            compress(&vec![0; MAX_OUTPUT + 1]),
+            Err(LzError::InputTooLarge(MAX_OUTPUT + 1))
+        );
         let endless: Vec<u8> = std::iter::repeat_n([0xFF, 0x00], 600).flatten().collect();
         assert_eq!(decompress(&endless), Err(LzError::TooLarge));
     }
