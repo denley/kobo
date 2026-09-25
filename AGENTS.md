@@ -2,7 +2,7 @@
 
 An open-source Super Mario World ROM editor and build system.
 Desktop app for Windows, Linux, and macOS.
-Early stage: roadmap step 1 is complete; step 2 is next.
+Early stage: roadmap step 1 is complete; step 2 is next, planned in `docs/step-2.md`.
 
 ## Principles
 
@@ -41,9 +41,14 @@ Early stage: roadmap step 1 is complete; step 2 is next.
   hard-coded.
 - **SMW only.** Keep game facts data-driven inside the library, but do not build a game-agnostic
   engine.
-- **Compatibility comes from documented formats.** Base Lunar Magic compatibility on the ROM and
-  file formats documented by the community (SMWCentral). We can inspect ROM outputs from
-  Lunar Magic, but do not disassemble or reverse-engineer the Lunar Magic executable.
+- **Clean room: match Lunar Magic's interface, write our own implementation.** Hook addresses,
+  table and block locations and formats, the RAM values hooks leave behind, and bytes other
+  tools check are matched exactly. The code behind a hook is Kobo's own, written from
+  community documentation (SMWCentral, SNESLab), Lunar Magic's readme and help, open tools'
+  sources, byte diffs of ROMs before and after a Lunar Magic operation, and the memory
+  effects of running Lunar Magic-saved ROMs. Never read Lunar Magic's instructions (a
+  disassembly of the executable or of the code it puts in a ROM, or an instruction trace of
+  that code) and never copy its bytes. `docs/step-2.md` has why.
 - **Scope discipline.** Do not chase Lunar Magic feature parity before shipping something usable.
 - **License is MPL-2.0 across the board.** Application, core library, CLI, and ROM-side patches.
   New dependencies must be MPL-compatible; check each tool's license before adopting it.
@@ -53,7 +58,8 @@ Early stage: roadmap step 1 is complete; step 2 is next.
 1. Core library and CLI that reads a vanilla or Lunar-Magic-modified ROM and renders any level to
    PNG. Validate parsers against real hacks.
 2. Build pipeline with native level, Map16, ExGFX, and palette insertion in the Lunar Magic layout,
-   plus MWL import. Lunar Magic users can adopt the build while still editing in Lunar Magic.
+   plus MWL and ROM import, and the toolchain run in a fixed order. Lunar Magic opens and saves
+   a Kobo build without loss, so what Kobo does not cover yet can be finished there.
 3. GUI level editor.
 4. Overworld, Layer 3, graphics and palette editing, emulator integration
    (play-from-level, Mesen-S / bsnes-plus debugging).
@@ -218,6 +224,7 @@ describes that module's code rather than the game). Do not grow this file with t
 - `docs/testing.md`: the emulator oracle and its capture modes, the video oracle, the CPU
   suite, the Lunar Magic hack corpus checks and their known exceptions.
 - `docs/known-gaps.md`: what a rendered level does not reproduce.
+- `docs/step-2.md`: the step 2 plan: decisions and their reasons, prework, work order, risks.
 
 ## Decisions
 
@@ -228,10 +235,24 @@ describes that module's code rather than the game). Do not grow this file with t
   dumps of every vanilla level. Small formats (LC_LZ2 and LC_LZ3, GFX, palettes) are hand-written because
   the build must also encode them.
 
+- **Projects build from the clean ROM alone.** No ROM or BPS in a project; baseroms are
+  supported as imported or template projects. Levels a project does not list keep the clean
+  ROM's content. `kobo build` always overwrites its output; pulling Lunar Magic edits back
+  into a project is not a goal.
+- **Source formats are TOML** (`kobo.toml`, `format = N`), edited through `toml_edit` so
+  comments survive: one object or sprite per line in data order, numeric ids with the name
+  as a Kobo-owned trailing comment, raw hex for what the library cannot interpret, one
+  central level table (`0x105 = "file.toml"`), `#RRGGBB` palettes (channels x8), indexed PNG
+  graphics. Round-trip fidelity is semantic, not byte-exact.
+- **Builds run fixed stages**, rarely changed first and levels last, with a snapshot per
+  stage keyed by a chained input hash. Output is identical on all three platforms.
+- **Tools come from pinned builds**: a companion repository builds the licensed tools per
+  platform and Kobo fetches them by hash; a `[tools]` path overrides one. AddmusicK and
+  SA-1 Pack have no licence and are never bundled.
+
 ## Open decisions
 
 - GUI toolkit. Deferred until the library exists.
-- At what level can/will baseroms be supported?
 
 ## Prior art to know
 
