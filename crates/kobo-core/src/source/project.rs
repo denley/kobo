@@ -38,6 +38,9 @@ pub struct Manifest {
     pub early_patches: Vec<PathBuf>,
     /// Asar patches applied after the tools, before the levels, in order.
     pub late_patches: Vec<PathBuf>,
+    /// A folder of UberASM Tool's input files (`list.txt`, `level/`, ...),
+    /// laid over the user's UberASM Tool folder.
+    pub uberasm: Option<PathBuf>,
     /// A folder of AddmusicK's input files (`Addmusic_list.txt`, `music/`,
     /// `samples/`, ...), laid over the user's AddmusicK folder.
     pub music: Option<PathBuf>,
@@ -73,6 +76,9 @@ impl Manifest {
         if let Some(music) = &self.music {
             out += &format!("\n[music]\ndir = \"{}\"\n", slashes(music));
         }
+        if let Some(uberasm) = &self.uberasm {
+            out += &format!("\n[uberasm]\ndir = \"{}\"\n", slashes(uberasm));
+        }
         out += "\n[levels]\n";
         for (level, path) in &self.levels {
             out += &format!("0x{level:03X} = \"{}\"\n", slashes(path));
@@ -83,7 +89,7 @@ impl Manifest {
     pub fn from_toml(text: &str) -> Result<Self, SourceError> {
         let doc: DocumentMut = text.parse()?;
         for (key, _) in doc.iter() {
-            if !["format", "rom", "patches", "music", "levels"].contains(&key) {
+            if !["format", "rom", "patches", "music", "uberasm", "levels"].contains(&key) {
                 return Err(invalid(MANIFEST, format!("unknown key `{key}`")));
             }
         }
@@ -160,6 +166,22 @@ impl Manifest {
                 }
             }
         }
+        if let Some(uberasm) = doc.get("uberasm") {
+            let uberasm = uberasm
+                .as_table()
+                .ok_or_else(|| invalid("uberasm", "must be a table"))?;
+            for (key, item) in uberasm.iter() {
+                match key {
+                    "dir" => {
+                        let dir = item
+                            .as_str()
+                            .ok_or_else(|| invalid("uberasm.dir", "must be a folder path"))?;
+                        manifest.uberasm = Some(PathBuf::from(dir));
+                    }
+                    _ => return Err(invalid("uberasm", format!("unknown key `{key}`"))),
+                }
+            }
+        }
         if let Some(levels) = doc.get("levels") {
             let levels = levels
                 .as_table()
@@ -219,6 +241,7 @@ mod tests {
             early_patches: vec![PathBuf::from("asm/fastrom.asm")],
             late_patches: vec![PathBuf::from("asm/a.asm"), PathBuf::from("asm/b.asm")],
             music: Some(PathBuf::from("music")),
+            uberasm: Some(PathBuf::from("uberasm")),
             levels: BTreeMap::from([
                 (0x105, PathBuf::from("world1/yoshis-island-1.toml")),
                 (0x0C7, PathBuf::from("title.toml")),
@@ -229,7 +252,7 @@ mod tests {
             text,
             "format = 1\n\n[rom]\nsize = \"1536K\"\nsa1 = true\n\n[patches]\n\
              early = [\"asm/fastrom.asm\"]\nlate = [\"asm/a.asm\", \"asm/b.asm\"]\n\n\
-             [music]\ndir = \"music\"\n\n[levels]\n\
+             [music]\ndir = \"music\"\n\n[uberasm]\ndir = \"uberasm\"\n\n[levels]\n\
              0x0C7 = \"title.toml\"\n0x105 = \"world1/yoshis-island-1.toml\"\n"
         );
         assert_eq!(Manifest::from_toml(&text).unwrap(), manifest);

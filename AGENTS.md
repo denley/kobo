@@ -230,6 +230,8 @@ Windows, and macOS. Keep all three green.
   SMW Central is behind a JavaScript challenge and cannot be fetched from tools.
 - Asar 1.91 built from source (`~/src/asar`, tag `v1.91`): `~/.local/bin/asar`, and
   `libasar.so` in `~/.local/lib`, which `KOBO_ASAR_LIB` points the tests at.
+- .NET 8 SDK in `~/.dotnet` (user-local, from `dot.net/v1/dotnet-install.sh`); UberASM Tool
+  built with it as x64 in `~/.local/share/kobo/tools/uberasm-x64` (docs/toolchain.md).
 - Lunar Magic 3.70, the version step 2 targets: `~/.local/share/kobo/tools/lunar-magic-3.70/`
   (from `fusoya.eludevisibility.org/lm/`). Run `x64/Lunar Magic.exe`, which needs only
   64-bit Wine; set `WINEDLLOVERRIDES="mscoree,mshtml="` so a new Wine prefix does not stop

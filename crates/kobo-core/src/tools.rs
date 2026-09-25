@@ -9,7 +9,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use sha1::{Digest, Sha1};
@@ -126,47 +126,91 @@ const ASAR_LIBRARY_NAME: &str = if cfg!(windows) {
     "libasar.so"
 };
 
+/// A program run in a copy of its own folder, the way the toolchain's
+/// programs expect: with the project's files laid over the copy and Asar's
+/// library beside it, on `rom.sfc` there.
+struct FolderTool<'a> {
+    name: &'static str,
+    /// The program's file name, without `.exe`.
+    program: &'static str,
+    args: &'a [&'a str],
+    /// Files the copy must not keep, such as an options file that would
+    /// replace the arguments.
+    remove: &'a [&'a str],
+}
+
+impl FolderTool<'_> {
+    fn run(&self, rom: &Rom, tool: &Path, overlay: &Path, asar: &Path) -> Result<Rom, ToolError> {
+        let scratch = Scratch::new(self.program)?;
+        let work = &scratch.0;
+        copy_tree(tool, work)?;
+        copy_tree(overlay, work)?;
+        for file in self.remove {
+            let _ = fs::remove_file(work.join(file));
+        }
+        let library = work.join(ASAR_LIBRARY_NAME);
+        fs::copy(asar, &library).map_err(io_error(asar))?;
+        let rom_path = work.join("rom.sfc");
+        rom.save(&rom_path)?;
+        let program = work.join(if cfg!(windows) {
+            format!("{}.exe", self.program)
+        } else {
+            self.program.to_owned()
+        });
+        let output = Command::new(&program)
+            .args(self.args)
+            .current_dir(work)
+            .stdin(Stdio::null())
+            .env("LD_LIBRARY_PATH", work)
+            // .NET programs need no ICU this way, which some systems lack.
+            .env("DOTNET_SYSTEM_GLOBALIZATION_INVARIANT", "1")
+            .output()
+            .map_err(io_error(&program))?;
+        let text = String::from_utf8_lossy(&output.stdout).into_owned()
+            + &String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() {
+            return Err(ToolError::Failed {
+                tool: self.name,
+                status: output.status.to_string(),
+                output: text,
+            });
+        }
+        let after = Rom::from_bytes(fs::read(&rom_path).map_err(io_error(&rom_path))?)?;
+        let damage = rats::Snapshot::take(rom).check(&after, &[]);
+        if !damage.is_empty() {
+            return Err(ToolError::Damaged {
+                tool: self.name,
+                damage,
+            });
+        }
+        Ok(after)
+    }
+}
+
 /// Runs AddmusicK on a copy of `rom`: in a copy of the AddmusicK folder
 /// `tool`, with the project's music folder `music` laid over it and
 /// Asar's library `asar` beside it, as AddmusicK wants.
 pub fn addmusick(rom: &Rom, tool: &Path, music: &Path, asar: &Path) -> Result<Rom, ToolError> {
-    let scratch = Scratch::new("addmusick")?;
-    let work = &scratch.0;
-    copy_tree(tool, work)?;
-    copy_tree(music, work)?;
-    let library = work.join(ASAR_LIBRARY_NAME);
-    fs::copy(asar, &library).map_err(io_error(asar))?;
-    // AddmusicK reads its options file in place of its arguments.
-    let _ = fs::remove_file(work.join("Addmusic_options.txt"));
-    let rom_path = work.join("rom.sfc");
-    rom.save(&rom_path)?;
-    let program = work.join(if cfg!(windows) {
-        "AddmusicK.exe"
-    } else {
-        "AddmusicK"
-    });
-    let output = Command::new(&program)
-        .args(["-noblock", "rom.sfc"])
-        .current_dir(work)
-        .env("LD_LIBRARY_PATH", work)
-        .output()
-        .map_err(io_error(&program))?;
-    let text = String::from_utf8_lossy(&output.stdout).into_owned()
-        + &String::from_utf8_lossy(&output.stderr);
-    if !output.status.success() {
-        return Err(ToolError::Failed {
-            tool: "AddmusicK",
-            status: output.status.to_string(),
-            output: text,
-        });
+    FolderTool {
+        name: "AddmusicK",
+        program: "AddmusicK",
+        args: &["-noblock", "rom.sfc"],
+        // AddmusicK reads its options file in place of its arguments.
+        remove: &["Addmusic_options.txt"],
     }
-    let after = Rom::from_bytes(fs::read(&rom_path).map_err(io_error(&rom_path))?)?;
-    let damage = rats::Snapshot::take(rom).check(&after, &[]);
-    if !damage.is_empty() {
-        return Err(ToolError::Damaged {
-            tool: "AddmusicK",
-            damage,
-        });
+    .run(rom, tool, music, asar)
+}
+
+/// Runs UberASM Tool on a copy of `rom`, in a copy of its folder `tool`
+/// with the project's UberASM folder (`list.txt`, `level/`, `library/`,
+/// ...) laid over it. Its release is built for 32-bit Windows; elsewhere
+/// it runs as an x64 build with a native Asar (docs/toolchain.md).
+pub fn uberasm(rom: &Rom, tool: &Path, files: &Path, asar: &Path) -> Result<Rom, ToolError> {
+    FolderTool {
+        name: "UberASM Tool",
+        program: "UberASMTool",
+        args: &["list.txt", "rom.sfc"],
+        remove: &[],
     }
-    Ok(after)
+    .run(rom, tool, files, asar)
 }

@@ -146,6 +146,9 @@ pub enum Stage {
     EarlyPatches,
     /// AddmusicK, with the project's music.
     Music,
+    /// UberASM Tool, with the project's UberASM files. PIXI and GPS will
+    /// run before it, as it reads what PIXI leaves (docs/toolchain.md).
+    UberAsm,
     /// The project's late Asar patches.
     LatePatches,
     /// The levels the project defines.
@@ -153,10 +156,11 @@ pub enum Stage {
 }
 
 impl Stage {
-    pub const ALL: [Stage; 5] = [
+    pub const ALL: [Stage; 6] = [
         Stage::Base,
         Stage::EarlyPatches,
         Stage::Music,
+        Stage::UberAsm,
         Stage::LatePatches,
         Stage::Levels,
     ];
@@ -166,6 +170,7 @@ impl Stage {
             Stage::Base => "base",
             Stage::EarlyPatches => "early patches",
             Stage::Music => "music",
+            Stage::UberAsm => "uberasm",
             Stage::LatePatches => "late patches",
             Stage::Levels => "levels",
         }
@@ -226,6 +231,16 @@ impl Stage {
                 tools::hash_tree(&mut hash, &project.root.join(music))?;
                 hash.finalize().to_vec()
             }
+            Stage::UberAsm => {
+                let Some(files) = &project.manifest.uberasm else {
+                    return Ok(Vec::new());
+                };
+                let mut hash = Sha1::new();
+                tools::hash_tree(&mut hash, &config::uberasm_path()?)?;
+                tools::hash_tree(&mut hash, &config::asar_library_path()?)?;
+                tools::hash_tree(&mut hash, &project.root.join(files))?;
+                hash.finalize().to_vec()
+            }
             Stage::Levels => {
                 let mut bytes = Vec::new();
                 for (number, level) in &project.levels {
@@ -268,6 +283,13 @@ impl Stage {
                     let tool = config::addmusick_path()?;
                     let asar = config::asar_library_path()?;
                     *rom = tools::addmusick(rom, &tool, &project.root.join(music), &asar)?;
+                }
+            }
+            Stage::UberAsm => {
+                if let Some(files) = &project.manifest.uberasm {
+                    let tool = config::uberasm_path()?;
+                    let asar = config::asar_library_path()?;
+                    *rom = tools::uberasm(rom, &tool, &project.root.join(files), &asar)?;
                 }
             }
             Stage::Levels => {
@@ -321,7 +343,8 @@ fn rom_size(clean: &Rom, project: &Project) -> usize {
         || m.sa1
         || !m.early_patches.is_empty()
         || !m.late_patches.is_empty()
-        || m.music.is_some();
+        || m.music.is_some()
+        || m.uberasm.is_some();
     m.rom_size.unwrap_or(if writes {
         DEFAULT_ROM_SIZE
     } else {

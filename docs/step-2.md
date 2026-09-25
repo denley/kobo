@@ -243,7 +243,8 @@ on the built ROM.
   laid over the user's AddmusicK folder, `tools.addmusick` or `KOBO_ADDMUSICK`), each
   checked with `rats::Snapshot`, each stage keyed by every file it can read. A vanilla
   build with AddmusicK's default music is deterministic, and Lunar Magic saves it keeping
-  AddmusicK's code and data.
+  AddmusicK's code and data. UberASM Tool runs too (`[uberasm] dir`, `tools.uberasm`),
+  as an x64 build on Linux ([toolchain.md](toolchain.md)); Lunar Magic keeps its hooks.
 - 2a: the pipeline with vanilla formats. Its builds leave `$06F600` at `$FF` and write
   nothing in Lunar Magic's layout, so Lunar Magic's first save installs itself and keeps
   Kobo's data, as the spike showed for a relocated level. Manifest and level table, the
