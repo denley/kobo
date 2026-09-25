@@ -107,6 +107,7 @@ fn an_empty_project_builds_the_clean_rom() {
         return;
     };
     let project = Project {
+        root: std::path::PathBuf::from("."),
         manifest: Default::default(),
         levels: Vec::new(),
     };
@@ -124,6 +125,7 @@ fn edits_reach_the_rom() {
     let text = level.to_toml(&Comments::default());
     let (level, _) = Level::from_toml(&text).unwrap();
     let project = Project {
+        root: std::path::PathBuf::from("."),
         manifest: Default::default(),
         levels: vec![(0x105, level.clone())],
     };
@@ -159,6 +161,7 @@ fn lunar_magic_objects_are_refused_for_now() {
         data: vec![0x00, 0x25],
     });
     let project = Project {
+        root: std::path::PathBuf::from("."),
         manifest: Default::default(),
         levels: vec![(0x105, level)],
     };
@@ -175,6 +178,7 @@ fn cached_builds_equal_clean_ones() {
     let cache = build::Cache::new(&cache_dir);
     let (level, _) = import::read_level(&clean, 0x105).unwrap();
     let mut project = Project {
+        root: std::path::PathBuf::from("."),
         manifest: Default::default(),
         levels: vec![(0x105, level)],
     };
@@ -183,7 +187,10 @@ fn cached_builds_equal_clean_ones() {
     let warm = build::build_cached(&clean, &project, Some(&cache)).unwrap();
     assert_eq!(cold.data(), uncached.data());
     assert_eq!(warm.data(), uncached.data());
-    assert_eq!(fs::read_dir(&cache_dir).unwrap().count(), 2);
+    assert_eq!(
+        fs::read_dir(&cache_dir).unwrap().count(),
+        build::Stage::ALL.len()
+    );
 
     // An edit reruns the level stage from the cached base.
     project.levels[0].1.layer1.pop();
@@ -192,7 +199,10 @@ fn cached_builds_equal_clean_ones() {
         edited.data(),
         build::build(&clean, &project).unwrap().data()
     );
-    assert_eq!(fs::read_dir(&cache_dir).unwrap().count(), 3);
+    assert_eq!(
+        fs::read_dir(&cache_dir).unwrap().count(),
+        build::Stage::ALL.len() + 1
+    );
     let _ = fs::remove_dir_all(&cache_dir);
 }
 
@@ -205,6 +215,7 @@ fn a_synthetic_build_is_the_same_everywhere() {
     let (level, comments) = Level::from_toml(text).unwrap();
     assert_eq!(level.to_toml(&comments), text);
     let project = Project {
+        root: std::path::PathBuf::from("."),
         manifest: Default::default(),
         levels: vec![(0x105, level.clone()), (0x0C7, level)],
     };

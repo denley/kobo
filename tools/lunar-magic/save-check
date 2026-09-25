@@ -1,12 +1,16 @@
 #!/bin/bash
 # Has Lunar Magic save a copy of a ROM, then compares every level of the
 # saved copy with the original as Kobo reads them: the Lunar Magic check.
-#   save-check rom.sfc [level]     (level: the one LM re-imports, default 105)
+#   save-check rom.sfc [level [project]]
+# level: the one Lunar Magic re-imports, default 105. With a project, only
+# its levels are compared: Lunar Magic's first save changes some of the
+# clean ROM's own levels (docs/lunar-magic.md).
 # Lunar Magic's restore system wants the original game, with a copier
 # header, in sysLMRestore/smwOrig.smc; the vanilla ROM comes from
 # KOBO_SMW_ROM or `kobo`'s configuration.
 set -euo pipefail
 rom=$(realpath "$1"); level=${2:-105}
+project=(); [ -n "${3:-}" ] && project=(--project "$(realpath "$3")")
 here=$(dirname "$(realpath "$0")")
 kobo=${KOBO:-kobo}
 vanilla=${KOBO_SMW_ROM:-$(sed -n 's/^smw *= *"\(.*\)"/\1/p' "${XDG_CONFIG_HOME:-$HOME/.config}/kobo/config.toml")}
@@ -22,4 +26,4 @@ cp "$rom" "$work/saved.smc"
 cd "$work"
 "$here/lm" -ExportLevel saved.smc level.mwl "$level" >/dev/null
 "$here/lm" -ImportLevel saved.smc level.mwl "$level" | tail -1
-"$kobo" diff "$rom" saved.smc
+"$kobo" diff "$rom" saved.smc "${project[@]}"

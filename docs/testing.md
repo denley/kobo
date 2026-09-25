@@ -202,7 +202,13 @@ how each oracle is produced, where its data lives, and what is known not to matc
   cargo run --release --example render_hashes -- /tmp/built.sfc > built.txt
   cmp vanilla.txt built.txt
   ```
-- **Lunar Magic check**: `tools/lunar-magic/save-check built.sfc [level]` has Lunar Magic
+- **Tool stages**: `tests/tool_stages.rs` builds two Asar patches, early and late, one
+  including a file, onto the synthetic base when Asar's library is configured (no ROM):
+  they apply in order, the output repeats, and changing the included file changes the
+  build. With `KOBO_ADDMUSICK` (an AddmusicK folder; `~/src/addmusick` here) and the
+  vanilla ROM, a project with an empty music folder gets AddmusicK's default music
+  (`@AMK` at `$0E8000`), the same bytes twice.
+- **Lunar Magic check**: `tools/lunar-magic/save-check built.sfc [level [project]]` has Lunar Magic
   3.70 save a copy of a ROM (exporting a level and importing it back) and runs `kobo diff`
   on the two: every level must read the same. A build of the whole vanilla import passes
   with levels `105` and `106`. The Lunar Magic features of step 2b are each to be checked

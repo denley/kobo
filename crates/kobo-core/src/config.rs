@@ -14,6 +14,7 @@ use thiserror::Error;
 
 pub const ROM_ENV_VAR: &str = "KOBO_SMW_ROM";
 pub const ASAR_ENV_VAR: &str = "KOBO_ASAR_LIB";
+pub const ADDMUSICK_ENV_VAR: &str = "KOBO_ADDMUSICK";
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -39,6 +40,11 @@ pub enum ConfigError {
         config_path().map(|p| p.display().to_string()).unwrap_or_default()
     )]
     NoAsar,
+    #[error(
+        "no AddmusicK configured; set {ADDMUSICK_ENV_VAR} or add `tools.addmusick` to {}",
+        config_path().map(|p| p.display().to_string()).unwrap_or_default()
+    )]
+    NoAddmusick,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -63,6 +69,9 @@ pub struct Tools {
     /// Path to Asar's shared library: `libasar.so`, `libasar.dylib`, or
     /// `asar.dll`.
     pub asar: Option<PathBuf>,
+    /// Path to an AddmusicK folder: the program and the files it reads
+    /// beside it. Kobo never bundles AddmusicK, which has no licence.
+    pub addmusick: Option<PathBuf>,
 }
 
 /// Location of the user config file, if a config directory exists on this
@@ -90,6 +99,15 @@ pub fn vanilla_rom_path() -> Result<PathBuf, ConfigError> {
         return Ok(PathBuf::from(p));
     }
     load()?.roms.smw.ok_or(ConfigError::NoVanillaRom)
+}
+
+/// Resolves the path to the AddmusicK folder: `KOBO_ADDMUSICK`, then
+/// `tools.addmusick`.
+pub fn addmusick_path() -> Result<PathBuf, ConfigError> {
+    if let Some(p) = env::var_os(ADDMUSICK_ENV_VAR).filter(|p| !p.is_empty()) {
+        return Ok(PathBuf::from(p));
+    }
+    load()?.tools.addmusick.ok_or(ConfigError::NoAddmusick)
 }
 
 /// Resolves the path to Asar's shared library.
