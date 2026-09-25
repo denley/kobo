@@ -122,8 +122,9 @@ on the built ROM.
   routines, UberASM Tool's library files): a build that uses those is repeatable on one
   file system but may differ on another. Decided 2026-09-25 that this is acceptable for
   now; identical output everywhere is a nice-to-have there, not a requirement.
-- Kobo allocates free space first-fit in a fixed order and tags every block with RATS, so
-  the tools' free-space searches skip it.
+- Kobo allocates free space first-fit in a fixed order and tags every block with RATS for
+  interoperability. Tool stages must also address the Asar boundary limitation in
+  [toolchain.md](toolchain.md#asar-191-rats-boundary-limitation).
 
 ### Tools
 
@@ -164,15 +165,19 @@ on the built ROM.
    table and one-time hook does, and how older versions differ, is still to find.
 4. ROM writing. Done: writes through `SnesAddr` and `Mapping`, expansion, header and
    checksum (`Rom`), and `rats::FreeSpace`, tested on synthetic LoROM and SA-1 images.
-   Its placement follows Asar's, down to a tag in the last eight bytes of a bank when the
-   contents would cross it, and on LoROM images it matched Asar 1.91 byte for byte for
-   every sequence of `freecode` and `freedata` requests tried.
+   Its bank preferences and tag placement follow Asar's, with a deliberate difference:
+   Kobo preserves tagged zeros in a bank-boundary case where Asar 1.91 overwrites them.
+   The regression test covers allocation both in one stage and after a rescan;
+   [toolchain.md](toolchain.md#asar-191-rats-boundary-limitation) has the reproduction.
 5. A level reader and writer for layer 1 and 2 objects, background tilemaps, headers, and
    sprite lists, checked by round trip on every level of vanilla and the corpus and by
    extending `fuzz_inputs`.
 6. BPS reading and writing. It also brings the QLDC entries into `KOBO_LM_ROMS`.
 7. An LC_LZ2 compressor that always produces the same output.
 8. Asar integration: `libasar` through FFI, on all three CI platforms.
+   Before enabling tool stages, guard against or detect Asar's RATS boundary corruption
+   and fail the build on it. A RATS tag alone does not guarantee that a later tool leaves
+   Kobo's blocks intact; mitigation is still outstanding.
 9. Name tables for objects, sprites, tilesets, and level modes, as data in the library.
 10. Build checks: import, rebuild, and compare `render_hashes`; for a hack whose ASM and
     custom sprites the rebuild lacks, compare `LevelTiles` and layers 1 and 2 without
