@@ -143,6 +143,9 @@ Early stage: roadmap step 1 is complete; step 2 is next, planned in `docs/step-2
 - `kobo_core::source` is the project's text formats (`kobo.toml`, level files); `import`
   reads a ROM into them and `build` writes them onto the clean ROM. Kobo owns their
   formatting: `Level::to_toml` of `from_toml` must give the same text back.
+- `kobo_core::names` holds the names Kobo writes after ids (objects by object set, extended
+  objects, sprites, tilesets, music) as data in `names.toml`; `LevelMode::name` names level
+  modes. Take names from there; do not write lists of them elsewhere.
 - `kobo_core::rats::FreeSpace` is the one way Kobo takes free space: everything it writes
   outside fixed addresses goes in a RATS-tagged block placed there. Asar interoperability
   limits and required toolchain checks are in `docs/toolchain.md`.

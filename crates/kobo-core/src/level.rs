@@ -180,7 +180,51 @@ impl LevelMode {
     pub fn layer1_vertical(self) -> bool {
         matches!(self.0, 0x03 | 0x04 | 0x07 | 0x08 | 0x0A | 0x0D)
     }
+
+    /// The mode's name, as Kobo writes it after the number: layer 1's
+    /// orientation, then what layer 2 is, then what the per-mode tables
+    /// do differently (docs/smw.md has them). A "solid" layer 2 is one the
+    /// player stands on. `None` past `$1F`.
+    pub fn name(self) -> Option<&'static str> {
+        LEVEL_MODE_NAMES.get(self.0 as usize).copied()
+    }
 }
+
+/// See [`LevelMode::name`]; `names` has the rest of the library's names.
+const LEVEL_MODE_NAMES: [&str; 0x20] = [
+    "Horizontal, background",
+    "Horizontal, layer 2",
+    "Horizontal, solid layer 2",
+    "Vertical, horizontal layer 2",
+    "Vertical, horizontal solid layer 2",
+    "Horizontal, vertical layer 2",
+    "Horizontal, vertical solid layer 2",
+    "Vertical, layer 2",
+    "Vertical, solid layer 2",
+    "Boss: Morton, Roy, Ludwig, Reznor",
+    "Vertical, background",
+    "Boss: Iggy, Larry",
+    "Horizontal, dark background",
+    "Vertical, dark background",
+    "Horizontal, background, layer 3 in front",
+    "Horizontal, layer 2, layer 3 in front",
+    "Boss: Bowser",
+    "Horizontal, background, spotlight",
+    "Unused",
+    "Unused",
+    "Unused",
+    "Unused",
+    "Unused",
+    "Unused",
+    "Unused",
+    "Unused",
+    "Unused",
+    "Unused",
+    "Unused",
+    "Unused",
+    "Horizontal, background, translucent layer 1",
+    "Horizontal, translucent solid layer 2",
+];
 
 impl std::fmt::Display for LevelMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

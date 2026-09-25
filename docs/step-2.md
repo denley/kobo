@@ -194,6 +194,9 @@ on the built ROM.
    CI builds Asar 1.91 from source on Linux, Windows, and macOS and runs the tests
    against it. `kobo asm` applies one patch.
 9. Name tables for objects, sprites, tilesets, and level modes, as data in the library.
+   Done: `kobo_core::names` (from `names.toml`: standard objects by object set, Lunar
+   Magic's objects, extended objects, sprites, tilesets, music) and `LevelMode::name`,
+   checked against the ROM's dispatch and per-mode tables (`tests/names.rs`).
 10. Build checks: import, rebuild, and compare `render_hashes`; for a hack whose ASM and
     custom sprites the rebuild lacks, compare `LevelTiles` and layers 1 and 2 without
     sprites instead. A synthetic base image lets CI build without ROM data.
