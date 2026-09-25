@@ -235,6 +235,10 @@ how each oracle is produced, where its data lives, and what is known not to matc
     ~/.local/share/kobo/roms/corpus_more/*.smc
   KOBO_MWL_DIR=~/.local/share/kobo/mwl cargo test --release --test mwl_files -- --nocapture
   ```
+  `vanilla_exports_import_and_build` imports all 512 vanilla exports into one project
+  with `import_mwl`, builds it, and allows only those rewrites in `kobo diff` against
+  vanilla: the background of the 276 levels on the shared empty level, `0C5`'s header,
+  and layer 1 of eleven levels.
 - **SA-1**: the oracle script reads SA-1 Pack's RAM map (`ram()` in `dump_levels.lua` is
   `RamMap::Sa1Pack` for what it touches, and the full-WRAM dump is laid out as vanilla's)
   and hooks the pointer lookup on the SA-1 too, where the level loader runs. With

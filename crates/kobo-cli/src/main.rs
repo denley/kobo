@@ -57,15 +57,22 @@ enum Command {
         #[command(subcommand)]
         command: Map16Command,
     },
-    /// Import a ROM's levels into a new project.
+    /// Import a ROM's levels into a new project, or a Lunar Magic MWL file
+    /// into a project.
     Import {
-        /// The ROM to import from.
+        /// The ROM or `.mwl` file to import from.
         from: PathBuf,
-        /// The project directory to create.
+        /// The project directory: a new one for a ROM; for an MWL file, an
+        /// existing one or a new one.
         dir: PathBuf,
-        /// Import every level, not only those that differ from the clean ROM.
+        /// For a ROM, import every level, not only those that differ from
+        /// the clean ROM.
         #[arg(long)]
         all: bool,
+        /// For an MWL file, the level to import it as (hex) instead of the
+        /// one it was saved from.
+        #[arg(long)]
+        level: Option<String>,
         /// The clean ROM. Defaults to the configured vanilla ROM.
         #[command(flatten)]
         rom: RomArg,
@@ -488,8 +495,9 @@ fn main() -> Result<()> {
             from,
             dir,
             all,
+            level,
             rom,
-        } => import(&from, &dir, all, &rom.load()?),
+        } => import(&from, &dir, all, level.as_deref(), &rom.load()?),
         Command::Build {
             dir,
             out,
@@ -1055,9 +1063,18 @@ fn rom_rats(rom: &Rom) -> Result<()> {
     Ok(())
 }
 
-fn import(from: &Path, dir: &Path, all: bool, clean: &Rom) -> Result<()> {
-    let rom = Rom::load(from).with_context(|| format!("loading {}", from.display()))?;
-    let report = kobo_core::import::import_rom(&rom, clean, dir, all)?;
+fn import(from: &Path, dir: &Path, all: bool, level: Option<&str>, clean: &Rom) -> Result<()> {
+    let is_mwl = from
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("mwl"));
+    let report = if is_mwl {
+        let bytes = fs::read(from).with_context(|| format!("reading {}", from.display()))?;
+        let level = level.map(parse_level).transpose()?;
+        kobo_core::import::import_mwl(&bytes, clean, dir, level)?
+    } else {
+        let rom = Rom::load(from).with_context(|| format!("loading {}", from.display()))?;
+        kobo_core::import::import_rom(&rom, clean, dir, all)?
+    };
     for note in &report.notes {
         println!("note: {note}");
     }

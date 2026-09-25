@@ -6,6 +6,8 @@
 //! level in the ROM, apart from the rewrites Lunar Magic is known to make
 //! on export (docs/lunar-magic.md), which are counted.
 
+mod common;
+
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
@@ -437,4 +439,49 @@ fn exported_levels_match_their_rom() {
         }
         eprintln!("{dir_name}: {counts:?}");
     }
+}
+
+/// Every vanilla level imported from its MWL export into one project and
+/// built reads back as vanilla's, but for what Lunar Magic changes on
+/// export (docs/lunar-magic.md): the background of levels sharing the
+/// empty level, level `0C5`'s vertical scroll, and the tileset 4 objects
+/// and exits of eleven levels.
+#[test]
+fn vanilla_exports_import_and_build() {
+    let Some(dirs) = export_dirs() else { return };
+    let Some(clean) = common::vanilla() else {
+        return;
+    };
+    let Some((dir, _)) = dirs.into_iter().find(|(_, rom)| {
+        kobo_core::Rom::load(rom).is_ok_and(|r| r.identify() == kobo_core::RomIdentity::VanillaUsa)
+    }) else {
+        eprintln!("skipping: KOBO_MWL_DIR has no vanilla export");
+        return;
+    };
+    let project_dir = std::env::temp_dir().join(format!("kobo-mwl-import-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&project_dir);
+    for level in 0..0x200u16 {
+        let file = dir.join(format!("level {level:03X}.mwl"));
+        let bytes = std::fs::read(&file).unwrap();
+        kobo_core::import::import_mwl(&bytes, &clean, &project_dir, None).unwrap();
+    }
+    let project = kobo_core::build::Project::load(&project_dir).unwrap();
+    assert_eq!(project.levels.len(), 512);
+    let built = kobo_core::build::build(&clean, &project).unwrap();
+    let empty = kobo_core::SnesAddr::new(0x068000);
+    for diff in kobo_core::import::diff_levels(&built, &clean) {
+        let n = diff.level;
+        let parts: Vec<&str> = diff.parts.iter().map(String::as_str).collect();
+        let expected = match parts[..] {
+            ["layer2"] => kobo_core::level::layer1_ptr(&clean, n).unwrap() == empty,
+            ["header"] => n == 0x0C5,
+            ["layer1"] => [
+                0x000, 0x0BD, 0x0DA, 0x0E6, 0x0F4, 0x0FD, 0x100, 0x1BB, 0x1BC, 0x1E4, 0x1F7,
+            ]
+            .contains(&n),
+            _ => false,
+        };
+        assert!(expected, "level {n:03X}: {parts:?}");
+    }
+    let _ = std::fs::remove_dir_all(&project_dir);
 }
