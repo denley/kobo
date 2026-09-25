@@ -257,6 +257,14 @@ on the built ROM.
   the source format. An MWL is Lunar Magic's view of a level, not the ROM's: it rewrites
   screen exits, objects `3C`-`3F` in tileset 4, and pre-3.00 header bits on export, so
   import from an MWL and from the ROM can differ in those.
+- 2b progress: `kobo_core::install` holds Kobo's clean-room patches (`asm/lunar-magic/`),
+  applied through Asar and not yet used by builds. `map16.asm`: the Map16 routine behind
+  `$06F540`, `$06F5D0`, and `$06F5E4` (each a `JML` to Kobo's code; the page tables are
+  data at their fixed addresses), the seven hooks that call it, and tile generation that
+  sets a page outright. Vanilla with it installed renders all 512 levels as vanilla does,
+  and tiles on pages 2 to `7F`, and page 2 per tileset, resolve from tables where Lunar
+  Magic's layout puts their pointers (`tests/install.rs`). The overworld entry keeps the
+  game's behaviour; how Lunar Magic stores overworld pages past 0 is not known.
 - 2b starts with the one-time set. The first Lunar Magic-layout table Kobo writes needs the
   gate set, or Lunar Magic's install wipes it, and with the gate set Lunar Magic never
   installs the 15 one-time hooks and 95 one-time ranges itself. So Kobo provides all of

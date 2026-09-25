@@ -151,6 +151,10 @@ Early stage: roadmap step 1 is complete; step 2 is next, planned in `docs/step-2
 - `kobo_core::rats::FreeSpace` is the one way Kobo takes free space: everything it writes
   outside fixed addresses goes in a RATS-tagged block placed there. Asar interoperability
   limits and required toolchain checks are in `docs/toolchain.md`.
+- `kobo_core::install` is Kobo's ROM-side code, Asar patches in `crates/kobo-core/asm/`,
+  written clean-room: interface from docs/lunar-magic-install.md, implementation Kobo's
+  own. Fixed entry points jump to Kobo's code in RATS blocks; fixed table addresses hold
+  data. Never shape code after Lunar Magic's.
 - `kobo_core::asar` is the one way Kobo runs Asar: `libasar` loaded at run time (never
   linked; LGPL), one patch at a time behind a process-wide lock. A patch that damages a
   RATS block it found fails (`rats::Snapshot`); every tool stage checks the same way.

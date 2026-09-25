@@ -6,10 +6,12 @@ use super::ExpandError;
 use super::machine::{Call, LOOKUP_STEP_LIMIT, Machine};
 use super::routines;
 use super::tiles::{GRID_LEN, LM_TALL_SCREEN_LEN, PIPE_TILE_COUNT, PIPE_VARIANTS, SCREEN_LEN};
+use crate::addr::SnesAddr;
 use crate::cpu::Bus;
 use crate::cpu::smw_bus::SmwBus;
 use crate::map16::{self, Map16Tile};
 use crate::ram;
+use crate::rom::Rom;
 
 /// Opcode of `JSL`, which Lunar Magic's hooks replace vanilla code with.
 const JSL: u8 = 0x22;
@@ -123,6 +125,13 @@ pub(super) fn lookup_map16(
     Ok(out)
 }
 
+/// Whether the first row upload calls the Map16 routine (`JSL $06F540` at
+/// `$058A65`, over the game's `TAY : LDA Map16Pointers,Y`).
+pub fn uploads_use_routine(rom: &Rom) -> bool {
+    let jsl = [0x22, 0x40, 0xF5, 0x06];
+    rom.read(SnesAddr::new(0x058A65), 4).is_ok_and(|b| b == jsl)
+}
+
 /// Tiles per Map16 page.
 pub const PAGE_TILES: usize = 0x100;
 
@@ -134,7 +143,7 @@ pub const FG_PAGES: usize = 4;
 
 /// The definition of one foreground tile number, or `None` where the ROM
 /// has no such tile (a vanilla ROM has pages 0 and 1 only).
-fn lookup_one(
+pub(super) fn lookup_one(
     machine: &mut Machine,
     lunar_magic: bool,
     n: u16,
