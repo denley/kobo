@@ -27,6 +27,21 @@ are SMWDisX's.
   `$7E7D00`, then decompresses `GFX32` to `$7E2000`. Lunar Magic rewrites the three operands
   when it moves the files, stores `GFX33` as 4bpp, and replaces the widening loop with a
   direct decompression to `$7E7D00`.
+- The game's LC_LZ2 routine is `CODE_00B8DE`, reading through `ReadByte` (`$00B983`) from
+  `$8A` into `[$00],Y`; `PrepareGraphicsFile` (`$00BA28`, output `$7EAD00`) and
+  `CODE_00B888` call it. It agrees with `compress::lz2` on commands 0-4, short and long
+  headers, word fills of odd length (they end on the first byte), incrementing fills
+  (8-bit, so they wrap), and back-references copied a byte at a time from an offset into
+  the output, so one overlapping its own output repeats. It is more lenient in two ways,
+  which `compress::lz2::decompress` rejects and `compress::lz2::compress` never writes:
+  any command with bit 2 set is a back-reference (5, 6, and a long header's 7, `$FC`-`$FE`),
+  and a back-reference to bytes not yet written reads whatever the buffer holds. The
+  offset is big-endian in the US version (`TAX` at `$00B96D`); SMWDisX assembles an extra
+  `XBA` before that `TAX` for the Japanese and E1 versions, which makes it little-endian.
+  `ReadByte` goes on at `$8000` of the next bank when the address wraps, so a stream may
+  cross a LoROM bank boundary. The vanilla files are not optimally packed: `compress::lz2`
+  stores the 52 in 121,663 bytes against the ROM's 130,317, and the game reads them back
+  (`tests/lz2_compression.rs`).
 - The game's `UploadGFXFile` sets the fourth plane to the tile silhouette for the first 16x16
   block of `GFX01`/`17`/`31` (the berry, drawn with colours 9-F) and for all of `GFX1E` (and
   `GFX08` in tilesets `$11+`). Lunar Magic's export mirrors this except it skips `17` and flags a

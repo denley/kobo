@@ -9,7 +9,8 @@
 //! and the following byte. A header byte of `$FF` ends the stream. The
 //! formats differ in what commands 3 and up do.
 //!
-//! LC_RLE1, the simpler format of background tilemaps, is [`rle1`].
+//! LC_RLE1, the simpler format of background tilemaps, is [`rle1`]. LC_LZ2 and LC_RLE1
+//! have encoders as well; LC_LZ3 is read only.
 
 use thiserror::Error;
 
@@ -19,6 +20,10 @@ pub mod rle1;
 
 /// Output offsets are 16-bit, so no stream can address more than this.
 pub const MAX_OUTPUT: usize = 0x1_0000;
+
+/// The longest chunk a short header can hold, and a long one.
+const SHORT_LEN: usize = 32;
+const LONG_LEN: usize = 1024;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum LzError {
@@ -36,6 +41,8 @@ pub enum LzError {
     },
     #[error("decompressed output exceeds {MAX_OUTPUT} bytes")]
     TooLarge,
+    #[error("{0} bytes is more than one stream can hold ({MAX_OUTPUT})")]
+    InputTooLarge(usize),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -83,6 +90,19 @@ impl Reader<'_> {
         } else {
             (header >> 5, (header & 0x1F) as usize + 1)
         }))
+    }
+}
+
+/// Appends the header of a chunk of `len` bytes (1 to 1024): short up to
+/// 32 bytes, long above. `cmd` is below 7, since a long header for 7 can
+/// be `$FF`, the terminator.
+fn write_header(out: &mut Vec<u8>, cmd: u8, len: usize) {
+    debug_assert!(cmd < 7 && (1..=LONG_LEN).contains(&len));
+    let n = len - 1;
+    if len <= SHORT_LEN {
+        out.push((cmd << 5) | n as u8);
+    } else {
+        out.extend([0xE0 | (cmd << 2) | (n >> 8) as u8, n as u8]);
     }
 }
 

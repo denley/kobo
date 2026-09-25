@@ -80,8 +80,8 @@ What a rendered level does not reproduce, and what the tooling does not handle.
   describes a fixed screen. Revisit only for a GUI viewport, which is a single frame.
 - The GFX tooling refuses ROMs their authors locked (`GfxError::Locked`, see
   [lunar-magic.md](lunar-magic.md)): their pointer tables are not addresses. Levels are
-  unaffected, since the ROM's own decompression runs for them. There is no LC_LZ2 or
-  LC_LZ3 encoder yet, which the build will need.
+  unaffected, since the ROM's own decompression runs for them. There is an LC_LZ2
+  encoder (`compress::lz2::compress`) but no LC_LZ3 one yet.
 
 ## Full hack render sweep: 2026-09-22
 

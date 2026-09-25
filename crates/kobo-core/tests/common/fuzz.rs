@@ -46,6 +46,30 @@ pub fn case(mut seed: u64) {
             result.data
         );
     }
+    // LC_LZ2 round trips, of the noise and of runs and repeats built from
+    // it, never larger than storing the bytes as they are.
+    let mut shaped = Vec::new();
+    while shaped.len() < len {
+        let run = 1 + next() as usize % 80;
+        let b = next() as u8;
+        match next() % 4 {
+            0 => shaped.extend(input.iter().take(run)),
+            1 => shaped.extend(std::iter::repeat_n(b, run)),
+            2 => shaped.extend((0..run).map(|k| b.wrapping_add(k as u8))),
+            _ => {
+                let from = next() as usize % (shaped.len() + 1);
+                let copy: Vec<u8> = shaped[from..].iter().cycle().take(run).copied().collect();
+                shaped.extend(copy);
+            }
+        }
+    }
+    for data in [&input, &shaped] {
+        let packed = compress::lz2::compress(data).unwrap();
+        let back = compress::lz2::decompress(&packed).unwrap();
+        assert_eq!(back.data, *data);
+        assert_eq!(back.consumed, packed.len());
+        assert!(packed.len() <= data.len() + 2 * data.len().div_ceil(1024) + 1);
+    }
     // Valid container shape, arbitrary headers and pointer operands. Without
     // a structured seed, almost every ROM mutation is rejected at BadSize.
     let mut bytes = vec![0; 0x8000];

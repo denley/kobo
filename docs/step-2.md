@@ -177,7 +177,11 @@ on the built ROM.
    Magic ([lunar-magic.md](lunar-magic.md)). Locked ROMs are out of scope. Interpreting
    Lunar Magic's Map16 objects and custom backgrounds as tiles comes with their 2b features.
 6. BPS reading and writing. It also brings the QLDC entries into `KOBO_LM_ROMS`.
-7. An LC_LZ2 compressor that always produces the same output.
+7. An LC_LZ2 compressor that always produces the same output. Done:
+   `compress::lz2::compress`, an optimal parse over commands 0-4 (dynamic programming,
+   longest matches from a suffix array) with a fixed tie-break. It writes only what the
+   game's routine and Kobo's decoder read alike ([smw.md](smw.md)); the vanilla GFX files
+   come out 121,663 bytes against 130,317, and the game reads them back.
 8. Asar integration: `libasar` through FFI, on all three CI platforms.
    Before enabling tool stages, guard against or detect Asar's RATS boundary corruption
    and fail the build on it. A RATS tag alone does not guarantee that a later tool leaves
