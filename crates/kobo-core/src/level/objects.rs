@@ -466,12 +466,12 @@ mod tests {
     #[test]
     fn horizontal_objects_are_placed_on_their_screens() {
         // Coins (05) on screen 0, a new-screen cement block (0D), and a
-        // screen jump to 3 before an extended object (the dragon coin, 2D).
+        // screen jump to 3 before an extended object.
         let bytes = data(&[
             0x0A, 0x53, 0x12, // coins at (3, 10)
             0x98, 0xD2, 0x00, // new screen: cement at (16 + 2, 24)
             0x03, 0x00, 0x01, // jump to screen 3
-            0x05, 0x04, 0x2D, // dragon coin at (48 + 4, 5)
+            0x05, 0x04, 0x2D, // extended object 2D at (48 + 4, 5)
         ]);
         let decoded = decode(&bytes, Layout::Horizontal, Jumps::Vanilla).unwrap();
         assert_eq!(
