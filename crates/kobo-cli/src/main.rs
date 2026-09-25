@@ -94,7 +94,13 @@ enum Command {
     },
     /// Compare the levels of two ROMs as Kobo reads them, whatever their
     /// layouts; exits nonzero if any differ.
-    Diff { a: PathBuf, b: PathBuf },
+    Diff {
+        a: PathBuf,
+        b: PathBuf,
+        /// Compare only the levels this project defines.
+        #[arg(long)]
+        project: Option<PathBuf>,
+    },
     /// Rewrite a project's level files in Kobo's format, keeping comments
     /// on lines of their own.
     Fmt {
@@ -505,7 +511,7 @@ fn main() -> Result<()> {
             rom,
         } => build(&dir, &out, no_cache, &rom.load()?),
         Command::Fmt { dir, check } => fmt(&dir, check),
-        Command::Diff { a, b } => diff(&a, &b),
+        Command::Diff { a, b, project } => diff(&a, &b, project.as_deref()),
     }
 }
 
@@ -1118,16 +1124,20 @@ fn build(dir: &Path, out: &Path, no_cache: bool, clean: &Rom) -> Result<()> {
     Ok(())
 }
 
-fn diff(a: &Path, b: &Path) -> Result<()> {
+fn diff(a: &Path, b: &Path, project: Option<&Path>) -> Result<()> {
     let load = |p: &Path| Rom::load(p).with_context(|| format!("loading {}", p.display()));
-    let diffs = kobo_core::import::diff_levels(&load(a)?, &load(b)?);
+    let mut diffs = kobo_core::import::diff_levels(&load(a)?, &load(b)?);
+    if let Some(dir) = project {
+        let project = kobo_core::build::Project::load(dir)?;
+        diffs.retain(|d| project.manifest.levels.contains_key(&d.level));
+    }
     for d in &diffs {
         println!("{:03X}: {}", d.level, d.parts.join(", "));
     }
     if !diffs.is_empty() {
         bail!("{} levels differ", diffs.len());
     }
-    println!("all 512 levels are the same");
+    println!("the levels are the same");
     Ok(())
 }
 

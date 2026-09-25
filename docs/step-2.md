@@ -220,6 +220,12 @@ on the built ROM.
   differ from vanilla only where Lunar Magic changed them on export. Level files carry
   Kobo's names (`kobo_core::names`) as trailing comments. Still to do in 2a: BPS output,
   and Asar for Kobo's own patches, which have none until 2b.
+- 2c progress, ahead of 2b where nothing waits on Lunar Magic's layout: the build runs
+  the project's Asar patches (`[patches] early` and `late`) and AddmusicK (`[music] dir`,
+  laid over the user's AddmusicK folder, `tools.addmusick` or `KOBO_ADDMUSICK`), each
+  checked with `rats::Snapshot`, each stage keyed by every file it can read. A vanilla
+  build with AddmusicK's default music is deterministic, and Lunar Magic saves it keeping
+  AddmusicK's code and data.
 - 2a: the pipeline with vanilla formats. Its builds leave `$06F600` at `$FF` and write
   nothing in Lunar Magic's layout, so Lunar Magic's first save installs itself and keeps
   Kobo's data, as the spike showed for a relocated level. Manifest and level table, the
@@ -269,8 +275,11 @@ on the built ROM.
 - The code GPS patches has to have a shape GPS's source describes, which pulls Kobo's
   bank `$06` code towards Lunar Magic's. It is written from GPS's source, the vanilla
   disassembly, and observed behaviour only, and reviewed with that in mind.
-- AddmusicK overwrites `$0FF035`-`$0FF050`, which Lunar Magic's install fills. What Lunar
-  Magic keeps there, and whether its save repairs it, is unknown.
+- AddmusicK overwrites `$0FF035`-`$0FF050`, which Lunar Magic's install fills. Lunar
+  Magic's first save of a build with music writes its bytes back over AddmusicK's unused
+  `$55` filler there and leaves AddmusicK's code and data alone
+  ([lunar-magic.md](lunar-magic.md)); whether AddmusicK run after Lunar Magic's install
+  keeps what Lunar Magic needs there is not checked (a build never does that).
 - The tools: licences (three have none), directory-order dependence, and UberASM Tool on
   .NET outside Windows.
 - The corpus is ROMs, not projects; every test project is made by exporting from Lunar

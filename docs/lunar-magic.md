@@ -136,6 +136,12 @@ executable. Vanilla behaviour is in [smw.md](smw.md).
   (`ScreenExit::in_lunar_magic_format`). Its restore system will not change a ROM it
   does not recognise unless `sysLMRestore/smwOrig.smc` beside the ROM holds the original
   game with a copier header; the script puts one there.
+- Lunar Magic's first save points the background of every level on the shared empty level
+  (`$068000`) at `$FFDE54`, as its MWL export does: 276 of the 277 such levels of a vanilla
+  ROM change, whoever built it. `save-check` with a project compares only its levels.
+- On a build with AddmusicK's music, the first save writes Lunar Magic's own bytes over
+  `$0FEF9F`-`$0FF050`, which AddmusicK filled with `$55` and left unused; AddmusicK's code
+  and data (`$0E8000`, its RATS blocks) are untouched (2026-09-25, AddmusicK 1.0.11).
 - An MWL export records where the level's data was in the ROM, so exports of the same
   level from two ROMs differ there (see "MWL files" below). A level whose layer 1 is the
   shared empty level at `$068000` exports with the background at `$FFDE54`, so exports of

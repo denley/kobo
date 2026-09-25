@@ -25,6 +25,7 @@ pub mod render;
 pub mod rom;
 pub mod source;
 pub mod sprites;
+pub mod tools;
 pub mod video;
 
 pub use addr::{MapError, Mapping, PcAddr, SnesAddr};

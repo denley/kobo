@@ -23,6 +23,8 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::addr::SnesAddr;
+use crate::asar::{Asar, AsarError, Patch};
+use crate::config::{self, ConfigError};
 use crate::level::objects::{self, Jumps, Layout, Object, ObjectError};
 use crate::level::{self, LevelError, tables};
 use crate::rats::{Contents, FreeSpace, FreeSpaceError};
@@ -31,9 +33,10 @@ use crate::source::SourceError;
 use crate::source::level::{Layer2, Level};
 use crate::source::project::{MANIFEST, Manifest};
 use crate::sprites::{self, SpriteEncodeError};
+use crate::tools::{self, ToolError};
 use sha1::{Digest, Sha1};
 
-/// The size a project that writes levels and sets none is expanded to.
+/// The size a project that writes anything and sets none is expanded to.
 pub const DEFAULT_ROM_SIZE: usize = 0x10_0000;
 
 /// Unused space in bank `$07`, all `$FF` in the US version (SMWDisX's
@@ -70,6 +73,18 @@ pub enum BuildError {
     ReadLevel(#[from] LevelError),
     #[error(transparent)]
     FreeSpace(#[from] FreeSpaceError),
+    #[error("patch {path}: {source}")]
+    Patch {
+        path: PathBuf,
+        #[source]
+        source: Box<AsarError>,
+    },
+    #[error(transparent)]
+    Asar(Box<AsarError>),
+    #[error(transparent)]
+    Tool(#[from] ToolError),
+    #[error(transparent)]
+    Config(#[from] ConfigError),
     #[error("the build cache at {path}: {source}")]
     Cache {
         path: PathBuf,
@@ -88,6 +103,8 @@ fn level_error(level: u16, message: impl std::fmt::Display) -> BuildError {
 /// A loaded project.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Project {
+    /// The folder the manifest's paths are relative to.
+    pub root: PathBuf,
     pub manifest: Manifest,
     pub levels: Vec<(u16, Level)>,
 }
@@ -111,27 +128,54 @@ impl Project {
                 .map_err(|source| BuildError::Source { path, source })?;
             levels.push((number, level));
         }
-        Ok(Self { manifest, levels })
+        Ok(Self {
+            root: dir.to_path_buf(),
+            manifest,
+            levels,
+        })
     }
 }
 
-/// The build's stages, in the order they run (docs/step-2.md). The later
-/// ones of the plan take their places between these as they arrive.
+/// The build's stages, in the order they run (docs/step-2.md). The ones
+/// of the plan still to come take their places between these.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Stage {
     /// The clean ROM, expanded to the project's size.
     Base,
+    /// The project's early Asar patches.
+    EarlyPatches,
+    /// AddmusicK, with the project's music.
+    Music,
+    /// The project's late Asar patches.
+    LatePatches,
     /// The levels the project defines.
     Levels,
 }
 
 impl Stage {
-    pub const ALL: [Stage; 2] = [Stage::Base, Stage::Levels];
+    pub const ALL: [Stage; 5] = [
+        Stage::Base,
+        Stage::EarlyPatches,
+        Stage::Music,
+        Stage::LatePatches,
+        Stage::Levels,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
             Stage::Base => "base",
+            Stage::EarlyPatches => "early patches",
+            Stage::Music => "music",
+            Stage::LatePatches => "late patches",
             Stage::Levels => "levels",
+        }
+    }
+
+    fn patches(self, project: &Project) -> &[PathBuf] {
+        match self {
+            Stage::EarlyPatches => &project.manifest.early_patches,
+            Stage::LatePatches => &project.manifest.late_patches,
+            _ => &[],
         }
     }
 
@@ -142,12 +186,40 @@ impl Stage {
     }
 
     /// The stage's inputs, as bytes that differ whenever its output would.
-    fn inputs(self, clean: &Rom, project: &Project) -> Vec<u8> {
-        match self {
+    /// A patch's inputs are every file in its folder and below, since a
+    /// patch can include any of them; a tool's are its whole folder.
+    fn inputs(self, clean: &Rom, project: &Project) -> Result<Vec<u8>, BuildError> {
+        Ok(match self {
             Stage::Base => {
                 let mut bytes = clean.sha1().to_vec();
                 bytes.extend((rom_size(clean, project) as u64).to_le_bytes());
                 bytes
+            }
+            Stage::EarlyPatches | Stage::LatePatches => {
+                let patches = self.patches(project);
+                if patches.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let mut hash = Sha1::new();
+                tools::hash_tree(&mut hash, &config::asar_library_path()?)?;
+                for patch in patches {
+                    hash.update(patch.to_string_lossy().as_bytes());
+                    hash.update([0]);
+                    let folder = project.root.join(patch);
+                    let folder = folder.parent().unwrap_or(&project.root);
+                    tools::hash_tree(&mut hash, folder)?;
+                }
+                hash.finalize().to_vec()
+            }
+            Stage::Music => {
+                let Some(music) = &project.manifest.music else {
+                    return Ok(Vec::new());
+                };
+                let mut hash = Sha1::new();
+                tools::hash_tree(&mut hash, &config::addmusick_path()?)?;
+                tools::hash_tree(&mut hash, &config::asar_library_path()?)?;
+                tools::hash_tree(&mut hash, &project.root.join(music))?;
+                hash.finalize().to_vec()
             }
             Stage::Levels => {
                 let mut bytes = Vec::new();
@@ -159,12 +231,35 @@ impl Stage {
                 }
                 bytes
             }
-        }
+        })
     }
 
     fn run(self, rom: &mut Rom, clean: &Rom, project: &Project) -> Result<(), BuildError> {
         match self {
             Stage::Base => rom.expand(rom_size(clean, project))?,
+            Stage::EarlyPatches | Stage::LatePatches => {
+                let patches = self.patches(project);
+                if patches.is_empty() {
+                    return Ok(());
+                }
+                let asar = Asar::configured().map_err(|e| BuildError::Asar(Box::new(e)))?;
+                for patch in patches {
+                    let path = project.root.join(patch);
+                    let spec = Patch::new(&path).include_path(&project.root);
+                    let patched = asar.patch(rom, &spec).map_err(|source| BuildError::Patch {
+                        path: path.clone(),
+                        source: Box::new(source),
+                    })?;
+                    *rom = patched.rom;
+                }
+            }
+            Stage::Music => {
+                if let Some(music) = &project.manifest.music {
+                    let tool = config::addmusick_path()?;
+                    let asar = config::asar_library_path()?;
+                    *rom = tools::addmusick(rom, &tool, &project.root.join(music), &asar)?;
+                }
+            }
             Stage::Levels => {
                 let mut space = FreeSpace::scan(rom);
                 let mut bank07 = Bank07::new(clean);
@@ -177,20 +272,24 @@ impl Stage {
     }
 }
 
-/// The size the project expands the ROM to.
+/// The size the project expands the ROM to: its own, or
+/// [`DEFAULT_ROM_SIZE`] if it writes anything, for the free space its
+/// levels take and the space AddmusicK requires past 512 KiB.
 fn rom_size(clean: &Rom, project: &Project) -> usize {
-    project
-        .manifest
-        .rom_size
-        .unwrap_or(if project.levels.is_empty() {
-            clean.len()
-        } else {
-            DEFAULT_ROM_SIZE
-        })
+    let m = &project.manifest;
+    let writes = !project.levels.is_empty()
+        || !m.early_patches.is_empty()
+        || !m.late_patches.is_empty()
+        || m.music.is_some();
+    m.rom_size.unwrap_or(if writes {
+        DEFAULT_ROM_SIZE
+    } else {
+        clean.len()
+    })
 }
 
 /// Each stage's key, chained from the one before.
-pub fn stage_keys(clean: &Rom, project: &Project) -> Vec<[u8; 20]> {
+pub fn stage_keys(clean: &Rom, project: &Project) -> Result<Vec<[u8; 20]>, BuildError> {
     let mut key = [0u8; 20];
     Stage::ALL
         .iter()
@@ -200,9 +299,9 @@ pub fn stage_keys(clean: &Rom, project: &Project) -> Vec<[u8; 20]> {
             hash.update(stage.name());
             hash.update(stage.version().to_le_bytes());
             hash.update(env!("CARGO_PKG_VERSION"));
-            hash.update(stage.inputs(clean, project));
+            hash.update(stage.inputs(clean, project)?);
             key = hash.finalize().into();
-            key
+            Ok(key)
         })
         .collect()
 }
@@ -271,7 +370,7 @@ pub fn build_cached(
 /// [`build_cached`] on any base image laid out as the vanilla ROM is, for
 /// synthetic images in tests.
 pub fn build_on(base: &Rom, project: &Project, cache: Option<&Cache>) -> Result<Rom, BuildError> {
-    let keys = stage_keys(base, project);
+    let keys = stage_keys(base, project)?;
     // The last stage with a snapshot, and the image it holds.
     let resumed = cache.and_then(|cache| {
         (0..keys.len())

@@ -32,6 +32,13 @@ pub const MANIFEST: &str = "kobo.toml";
 pub struct Manifest {
     /// The size to expand the ROM to, if the project sets one.
     pub rom_size: Option<usize>,
+    /// Asar patches applied before AddmusicK and the tools, in order.
+    pub early_patches: Vec<PathBuf>,
+    /// Asar patches applied after the tools, before the levels, in order.
+    pub late_patches: Vec<PathBuf>,
+    /// A folder of AddmusicK's input files (`Addmusic_list.txt`, `music/`,
+    /// `samples/`, ...), laid over the user's AddmusicK folder.
+    pub music: Option<PathBuf>,
     /// Level number to file, relative to the project directory.
     pub levels: BTreeMap<u16, PathBuf>,
 }
@@ -42,10 +49,25 @@ impl Manifest {
         if let Some(size) = self.rom_size {
             out += &format!("\n[rom]\nsize = \"{}\"\n", size_text(size));
         }
+        let paths = |list: &[PathBuf]| {
+            let quoted: Vec<String> = list.iter().map(|p| format!("\"{}\"", slashes(p))).collect();
+            format!("[{}]", quoted.join(", "))
+        };
+        if !self.early_patches.is_empty() || !self.late_patches.is_empty() {
+            out += "\n[patches]\n";
+            if !self.early_patches.is_empty() {
+                out += &format!("early = {}\n", paths(&self.early_patches));
+            }
+            if !self.late_patches.is_empty() {
+                out += &format!("late = {}\n", paths(&self.late_patches));
+            }
+        }
+        if let Some(music) = &self.music {
+            out += &format!("\n[music]\ndir = \"{}\"\n", slashes(music));
+        }
         out += "\n[levels]\n";
         for (level, path) in &self.levels {
-            let path = path.to_string_lossy().replace('\\', "/");
-            out += &format!("0x{level:03X} = \"{path}\"\n");
+            out += &format!("0x{level:03X} = \"{}\"\n", slashes(path));
         }
         out
     }
@@ -53,7 +75,7 @@ impl Manifest {
     pub fn from_toml(text: &str) -> Result<Self, SourceError> {
         let doc: DocumentMut = text.parse()?;
         for (key, _) in doc.iter() {
-            if !["format", "rom", "levels"].contains(&key) {
+            if !["format", "rom", "patches", "music", "levels"].contains(&key) {
                 return Err(invalid(MANIFEST, format!("unknown key `{key}`")));
             }
         }
@@ -86,6 +108,45 @@ impl Manifest {
                 }
             }
         }
+        if let Some(patches) = doc.get("patches") {
+            let patches = patches
+                .as_table()
+                .ok_or_else(|| invalid("patches", "must be a table"))?;
+            for (key, item) in patches.iter() {
+                let at = format!("patches.{key}");
+                let list = item
+                    .as_array()
+                    .ok_or_else(|| invalid(&at, "must be a list of patch files"))?
+                    .iter()
+                    .map(|v| {
+                        v.as_str()
+                            .map(PathBuf::from)
+                            .ok_or_else(|| invalid(&at, "must be a list of patch files"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                match key {
+                    "early" => manifest.early_patches = list,
+                    "late" => manifest.late_patches = list,
+                    _ => return Err(invalid("patches", format!("unknown key `{key}`"))),
+                }
+            }
+        }
+        if let Some(music) = doc.get("music") {
+            let music = music
+                .as_table()
+                .ok_or_else(|| invalid("music", "must be a table"))?;
+            for (key, item) in music.iter() {
+                match key {
+                    "dir" => {
+                        let dir = item
+                            .as_str()
+                            .ok_or_else(|| invalid("music.dir", "must be a folder path"))?;
+                        manifest.music = Some(PathBuf::from(dir));
+                    }
+                    _ => return Err(invalid("music", format!("unknown key `{key}`"))),
+                }
+            }
+        }
         if let Some(levels) = doc.get("levels") {
             let levels = levels
                 .as_table()
@@ -107,6 +168,12 @@ impl Manifest {
         }
         Ok(manifest)
     }
+}
+
+/// A path as the manifest writes it, with forward slashes on every
+/// platform.
+fn slashes(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 /// `512K`, `1M`, `3M`, or a byte count.
@@ -135,6 +202,9 @@ mod tests {
     fn round_trip() {
         let manifest = Manifest {
             rom_size: Some(0x18_0000),
+            early_patches: vec![PathBuf::from("asm/fastrom.asm")],
+            late_patches: vec![PathBuf::from("asm/a.asm"), PathBuf::from("asm/b.asm")],
+            music: Some(PathBuf::from("music")),
             levels: BTreeMap::from([
                 (0x105, PathBuf::from("world1/yoshis-island-1.toml")),
                 (0x0C7, PathBuf::from("title.toml")),
@@ -143,7 +213,9 @@ mod tests {
         let text = manifest.to_toml();
         assert_eq!(
             text,
-            "format = 1\n\n[rom]\nsize = \"1536K\"\n\n[levels]\n\
+            "format = 1\n\n[rom]\nsize = \"1536K\"\n\n[patches]\n\
+             early = [\"asm/fastrom.asm\"]\nlate = [\"asm/a.asm\", \"asm/b.asm\"]\n\n\
+             [music]\ndir = \"music\"\n\n[levels]\n\
              0x0C7 = \"title.toml\"\n0x105 = \"world1/yoshis-island-1.toml\"\n"
         );
         assert_eq!(Manifest::from_toml(&text).unwrap(), manifest);
