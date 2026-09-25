@@ -207,6 +207,13 @@ how each oracle is produced, where its data lives, and what is known not to matc
   game's, pages past 1 from tables written where Lunar Magic's layout points, and a few
   levels drawn as vanilla. After a change to a patch, compare `render_hashes` of all 512
   levels with vanilla's by hand (`kobo rom expand 1M`, then `kobo asm` each patch).
+- **Block contact probe**: `tools/lunar-magic/block-probe/make-rom out/` builds vanilla
+  saved once by Lunar Magic with GPS's logging probe block in level `105` (needs Wine,
+  Lunar Magic, and GPS 1.4.4 built for the system in `KOBO_GPS`;
+  `~/.local/share/kobo/tools/gps-1.4.4` here), and `cargo run --release --example
+  contact_probe -- run out/probe.sfc` plays the level with the player placed against the
+  block in each scenario and prints the actions that ran. The same run on a Kobo build with
+  the same block must print the same.
 - **Tool stages**: `tests/tool_stages.rs` builds two Asar patches, early and late, one
   including a file, onto the synthetic base when Asar's library is configured (no ROM):
   they apply in order, the output repeats, and changing the included file changes the

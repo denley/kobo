@@ -153,6 +153,34 @@ filler. "Target" areas are Lunar Magic's fixed code.
   set outright (0 or 1) rather than bit 0 toggled (inferred). In every corpus ROM from
   1.62 on.
 
+### Custom block actions, observed
+
+What Lunar Magic 3.70's chain runs as the player meets a custom block, found by playing a
+Lunar Magic-saved vanilla ROM with a GPS probe block at tile `$200` that logs each action
+it is called for with the game's touch position (`$98`-`$9B`) and the player's (`$94`-`$97`)
+(`tools/lunar-magic/block-probe`, `examples/contact_probe.rs`; memory effects only). The
+touch offset from the player names the interaction point through the game's hitbox tables
+(`PlayerXHitboxPoints` `$00E830`, `PlayerYHitboxPoints` `$00E89C`), and the point names the
+call site of `$00F44D` whose return address the chain sees (the low byte GPS compares):
+
+| Interaction point (`NormalCollision`) | Call site, return low byte | Offset (small; big) | Action |
+|---|---|---|---|
+| 0, centre | `$00EBAF`, `$B1` | (8, 24); (8, 18) | body |
+| 1, side body | `$00EC24`, `$26` | (14 or 2, 26) | side |
+| 2, side head | `$00EC3A`, `$3C` | (14 or 2, 22); (14 or 2, 15) | head |
+| 3, head | `$00EC8A`, `$8C` | (8, 16); (8, 8) | below |
+| 4, right foot | `$00ED4A`, `$4C` | (11, 32) | above, or top corner |
+| 5, left foot | `$00EDE9`, `$EB` | (5, 32) | above, or top corner |
+| wall run | `$00EB37`, `$39` | | wall feet (GPS's own check) |
+| wall run | `$00EFE8`, `$EA` | | wall body (GPS's own check) |
+
+- A foot point gives "top corner" rather than "above" in some frames: with the left foot
+  alone on the block (the right one over air) standing still, and for the foot still on
+  the block while walking off either edge; with the right foot alone on the block
+  standing still it gives "above". The condition is not yet known.
+- The "head" action is the side head point, not the head point (which gives "below").
+- Sprites, the cape, fireballs, and Yoshi's tongue are not yet probed.
+
 ### Taller levels (3.00, "ExLevel")
 
 Vanilla finds a horizontal level's screens through fixed tables: `LoadBlkPtrs` (`$00BEA8`)
