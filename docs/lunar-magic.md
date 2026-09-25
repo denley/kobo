@@ -139,6 +139,11 @@ executable. Vanilla behaviour is in [smw.md](smw.md).
 - Lunar Magic's first save points the background of every level on the shared empty level
   (`$068000`) at `$FFDE54`, as its MWL export does: 276 of the 277 such levels of a vanilla
   ROM change, whoever built it. `save-check` with a project compares only its levels.
+- Its first save sets bit 3 of `$05FE00` (its copy of the destination's bit 8) in every
+  secondary entrance from `100` on, used or not, and zeroes the never-used entrances the
+  game leaves pointing at level `000` with other bytes set (`0CE`, `0CF`, ...). Kobo does
+  not keep bit 3 in the source, counts an entrance in use without it, and `save-check` of
+  a project that defines level `000` reports that level's entrances.
 - On a build with AddmusicK's music, the first save writes Lunar Magic's own bytes over
   `$0FEF9F`-`$0FF050`, which AddmusicK filled with `$55` and left unused; AddmusicK's code
   and data (`$0E8000`, its RATS blocks) are untouched (2026-09-25, AddmusicK 1.0.11).

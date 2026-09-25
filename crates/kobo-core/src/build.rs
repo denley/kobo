@@ -266,6 +266,7 @@ impl Stage {
                 for (number, level) in &project.levels {
                     write_level(rom, clean, &mut space, &mut bank07, *number, level)?;
                 }
+                write_entrances(rom, project)?;
             }
         }
         Ok(())
@@ -504,6 +505,49 @@ fn write_level(
         at
     };
     rom.write_u16(tables::SPRITE_PTRS.add(2 * number as u32), at.offset())?;
+    Ok(())
+}
+
+/// Writes every project level's secondary entrances. A level's list is all
+/// of them: an entrance the base ROM had leading to it that the list does
+/// not name is cleared. In the game's format an entrance's number gives its
+/// destination's bit 8, so it must match the level's.
+fn write_entrances(rom: &mut Rom, project: &Project) -> Result<(), BuildError> {
+    let format = level::LevelFormat::of(rom);
+    let mut entrances = level::read_entrances(rom)?;
+    let defined: Vec<u16> = project.levels.iter().map(|(n, _)| *n).collect();
+    for (id, bytes) in (0..).zip(entrances.iter_mut()) {
+        if bytes.in_use(format) && defined.contains(&bytes.destination(id, format)) {
+            *bytes = level::EntranceBytes::default();
+        }
+    }
+    let mut owner: Vec<Option<u16>> = vec![None; entrances.len()];
+    for (number, level) in &project.levels {
+        for entrance in &level.entrances {
+            let id = entrance.id as usize;
+            if let Some(other) = owner[id].replace(*number) {
+                return Err(level_error(
+                    *number,
+                    format!("entrance {:03X} is also level {other:03X}'s", entrance.id),
+                ));
+            }
+            if entrance.id >> 8 != number >> 8 {
+                return Err(level_error(
+                    *number,
+                    format!(
+                        "entrance {:03X} cannot lead here in the game's format, where its number gives the level's bit 8",
+                        entrance.id
+                    ),
+                ));
+            }
+            let [fa, fc, fe] = entrance.to_bytes();
+            entrances[id] = level::EntranceBytes([*number as u8, fa, fc, fe]);
+        }
+    }
+    for (i, table) in tables::ENTRANCES.iter().enumerate() {
+        let column: Vec<u8> = entrances.iter().map(|e| e.0[i]).collect();
+        rom.write(*table, &column)?;
+    }
     Ok(())
 }
 

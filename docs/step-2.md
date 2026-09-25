@@ -220,6 +220,9 @@ on the built ROM.
   differ from vanilla only where Lunar Magic changed them on export. Level files carry
   Kobo's names (`kobo_core::names`) as trailing comments. Still to do in 2a: BPS output,
   and Asar for Kobo's own patches, which have none until 2b.
+- Secondary entrances are in the level they lead to (`[entrances]`), read from a ROM or
+  an MWL file and written in the game's format, where an entrance's number must share its
+  level's bit 8; a level's list replaces what the base ROM had leading to it.
 - 2c progress, ahead of 2b where nothing waits on Lunar Magic's layout: the build runs
   the project's Asar patches (`[patches] early` and `late`) and AddmusicK (`[music] dir`,
   laid over the user's AddmusicK folder, `tools.addmusick` or `KOBO_ADDMUSICK`), each

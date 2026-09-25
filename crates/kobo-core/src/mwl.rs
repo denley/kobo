@@ -55,14 +55,7 @@ pub mod tables {
     pub const SECONDARY_HEADER_FE: SnesAddr = SnesAddr::new(0x06FE00);
     /// Per-level animation settings, `PTLG----`.
     pub const ANIMATION_SETTINGS: SnesAddr = SnesAddr::new(0x03FE00);
-    /// The game's secondary entrance tables, one byte per entrance each;
-    /// `$05F800` holds the destination level's low byte.
-    pub const ENTRANCES: [SnesAddr; 4] = [
-        SnesAddr::new(0x05F800),
-        SnesAddr::new(0x05FA00),
-        SnesAddr::new(0x05FC00),
-        SnesAddr::new(0x05FE00),
-    ];
+    pub use crate::level::tables::ENTRANCES;
 }
 
 /// The sections Lunar Magic writes, in table order.
