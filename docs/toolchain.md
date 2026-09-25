@@ -17,7 +17,16 @@ address, "PC" an offset in the headerless file.
   jump it replaces, and refills it with `$00` (`libsmw.cpp:135-150`,
   `assembleblock.cpp:2081-2158`). Anything a tool repoints, or a hook site a tool takes
   over, has to lead to a block of its own: the tables at `$06F624` and `$06F63A` (GPS) and
-  `$0EF30C` (PIXI), and the targets of the jumps at every tool's hook sites.
+  `$0EF30C` (PIXI), and the targets of the jumps at every tool's hook sites. The erasure
+  happens in pass 1, before free space is found, so a `freecode` after the `autoclean`
+  can land in the erased block, even at the same place with the same length.
+- On LoROM, the addresses Asar gives free space are in banks `$80` and up (`$908008` for
+  PC `0x80008`), since its `pctosnes` sets bit 23 (`libsmw.h:126-134`). Kobo's own
+  allocator uses `$10`-`$3F`; the bytes are the same.
+- The library (`libasar`, API version 3.03) takes the image in memory through
+  `asar_patch_ex` and lists every range a patch wrote, erasures included
+  (`asar_getwrittenblocks`). It keeps its state in globals: one patch at a time per
+  process. On Windows it runs each patch on a fiber of its own with a 4 MiB stack.
 
 ### Asar 1.91 RATS boundary limitation
 
@@ -45,10 +54,17 @@ fails if the behavior changes; it is a diagnostic, not a requirement for future 
 The always-run `rats::tests::bank_boundary_search_preserves_tagged_zeros` regression checks
 Kobo's safe behavior for the same sequence, including after reloading the image and rescanning.
 
-Toolchain integration must guard against this corruption or detect it and fail the build
-before publishing an output. This remains open work in [step-2.md](step-2.md); the current
-allocator does not protect its blocks from subsequent Asar runs. Tests of tool stages must
-check preservation of existing blocks as well as placement of new ones.
+Kobo detects it rather than prevents it. `asar::Asar::patch` takes a `rats::Snapshot` of
+every block before the patch and fails with `AsarError::Damaged` if one was changed
+without being released. A block is released if its tag is gone or Asar reports writing
+over it, and each of its bytes is now `$00` or inside a tagged block of the result, which
+covers `autoclean` and the reuse of its space. Anything else is damage, above all a
+change under a tag that still stands, as here. `tests/asar.rs` reproduces this case
+through the library and checks that the guard reports the second block. The external
+tools (PIXI, GPS, UberASM Tool, AddmusicK) do not report their writes, so their stages
+can use the same snapshot without them; a block rewritten in place under a tag of the
+same length then counts as damage. Tests of tool stages must still check that new blocks
+are placed as well as that old ones are kept.
 
 ## PIXI 1.43 (GPL-3.0)
 

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
+use kobo_core::asar::{Asar, AsarError, Patch};
 use kobo_core::expand;
 use kobo_core::gfx::{self, Bpp, GFX_FILE_COUNT};
 use kobo_core::image::{grayscale, tile_sheet};
@@ -95,6 +96,25 @@ enum Command {
         /// Only report files that would change, and fail if any would.
         #[arg(long)]
         check: bool,
+    },
+    /// Apply an Asar patch to a copy of a ROM, with the checksum fixed.
+    Asm {
+        #[command(flatten)]
+        rom: RomArg,
+        /// The patch.
+        patch: PathBuf,
+        /// Output path. The image is written without a copier header.
+        out: PathBuf,
+        /// Another directory to look for included files in.
+        #[arg(long = "include", short = 'I')]
+        include: Vec<PathBuf>,
+        /// Define `!name`, as `name=value` or `name` for an empty value.
+        #[arg(long = "define", short = 'D')]
+        define: Vec<String>,
+        /// Asar's shared library. Defaults to `KOBO_ASAR_LIB`, then
+        /// `tools.asar` in the user config.
+        #[arg(long)]
+        asar: Option<PathBuf>,
     },
     /// Convert between SNES addresses and ROM file offsets.
     Addr {
@@ -426,6 +446,21 @@ fn main() -> Result<()> {
                     out,
                 },
         } => map16_png(&rom.load()?, &sel, tileset, layer, &out),
+        Command::Asm {
+            rom,
+            patch,
+            out,
+            include,
+            define,
+            asar,
+        } => asm(
+            &rom.load()?,
+            &patch,
+            &out,
+            &include,
+            &define,
+            asar.as_deref(),
+        ),
         Command::Addr { addr, sa1 } => convert_addr(&addr, sa1),
         Command::Import {
             from,
@@ -442,6 +477,59 @@ fn main() -> Result<()> {
         Command::Fmt { dir, check } => fmt(&dir, check),
         Command::Diff { a, b } => diff(&a, &b),
     }
+}
+
+fn asm(
+    rom: &Rom,
+    patch: &Path,
+    out: &Path,
+    include: &[PathBuf],
+    define: &[String],
+    asar: Option<&Path>,
+) -> Result<()> {
+    let asar = match asar {
+        Some(path) => Asar::load(path)?,
+        None => Asar::configured()?,
+    };
+    let mut spec = Patch::new(patch);
+    for dir in include {
+        spec = spec.include_path(dir);
+    }
+    for d in define {
+        let (name, value) = d.split_once('=').unwrap_or((d, ""));
+        spec = spec.define(name, value);
+    }
+    let patched = match asar.patch(rom, &spec) {
+        Ok(patched) => patched,
+        Err(AsarError::Failed {
+            errors,
+            warnings,
+            prints,
+        }) => {
+            prints.iter().for_each(|p| println!("{p}"));
+            warnings.iter().for_each(|w| eprintln!("{w}"));
+            errors.iter().for_each(|e| eprintln!("{e}"));
+            bail!("Asar failed on {}", patch.display());
+        }
+        Err(e) => return Err(e.into()),
+    };
+    patched.output.prints.iter().for_each(|p| println!("{p}"));
+    patched
+        .output
+        .warnings
+        .iter()
+        .for_each(|w| eprintln!("{w}"));
+    let mut rom = patched.rom;
+    rom.fix_checksum()?;
+    rom.save(out)?;
+    println!(
+        "{}: {} KiB, checksum ${:04X} (Asar {})",
+        out.display(),
+        rom.len() / 1024,
+        rom.internal_header().checksum,
+        asar.version()
+    );
+    Ok(())
 }
 
 fn level_info(rom: &Rom, level: &str) -> Result<()> {
