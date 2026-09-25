@@ -115,3 +115,42 @@ fn addmusick_inserts_the_music() {
     assert_eq!(build::build(&clean, &project).unwrap().data(), built.data());
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// With SA-1 Pack (`KOBO_SA1PACK`), Asar, and the vanilla ROM: the SA-1
+/// base's levels, imported and built back as an SA-1 project, read back
+/// the same and render the same as the base. The check of all 512
+/// pictures is `render_hashes` (docs/testing.md).
+#[test]
+fn sa1_projects_build_onto_sa1_pack() {
+    if std::env::var_os("KOBO_SA1PACK").is_none() {
+        eprintln!("skipping: KOBO_SA1PACK is not set");
+        return;
+    }
+    let Some(clean) = common::vanilla() else {
+        return;
+    };
+    if common::asar().is_none() {
+        return;
+    }
+    let manifest = Manifest {
+        sa1: true,
+        ..Manifest::default()
+    };
+    let base = build::base_image(&clean, &manifest).unwrap();
+    assert!(base.mapping().is_sa1());
+    let dir = temp_dir("sa1");
+    let report = kobo_core::import::import_rom(&base, &base, &dir, true).unwrap();
+    assert_eq!(report.levels.len(), 512);
+    assert!(report.unmodelled.is_empty(), "{:?}", report.unmodelled);
+    let project = Project::load(&dir).unwrap();
+    assert!(project.manifest.sa1);
+    let built = build::build(&clean, &project).unwrap();
+    assert!(kobo_core::import::diff_levels(&built, &base).is_empty());
+    for level in [0x105, 0x0D3, 0x0CB, 0x1C7] {
+        let options = kobo_core::render::RenderOptions::default();
+        let a = kobo_core::render::render_level(&base, level, options).unwrap();
+        let b = kobo_core::render::render_level(&built, level, options).unwrap();
+        assert!(a.image.pixels == b.image.pixels, "level {level:03X}");
+    }
+    let _ = fs::remove_dir_all(&dir);
+}

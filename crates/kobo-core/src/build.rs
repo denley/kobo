@@ -191,9 +191,14 @@ impl Stage {
     fn inputs(self, clean: &Rom, project: &Project) -> Result<Vec<u8>, BuildError> {
         Ok(match self {
             Stage::Base => {
-                let mut bytes = clean.sha1().to_vec();
-                bytes.extend((rom_size(clean, project) as u64).to_le_bytes());
-                bytes
+                let mut hash = Sha1::new();
+                hash.update(clean.sha1());
+                hash.update((rom_size(clean, project) as u64).to_le_bytes());
+                if project.manifest.sa1 {
+                    tools::hash_tree(&mut hash, &config::sa1pack_path()?)?;
+                    tools::hash_tree(&mut hash, &config::asar_library_path()?)?;
+                }
+                hash.finalize().to_vec()
             }
             Stage::EarlyPatches | Stage::LatePatches => {
                 let patches = self.patches(project);
@@ -236,7 +241,12 @@ impl Stage {
 
     fn run(self, rom: &mut Rom, clean: &Rom, project: &Project) -> Result<(), BuildError> {
         match self {
-            Stage::Base => rom.expand(rom_size(clean, project))?,
+            Stage::Base => {
+                if project.manifest.sa1 {
+                    *rom = apply_sa1pack(rom, rom_size(clean, project))?;
+                }
+                rom.expand(rom_size(clean, project))?;
+            }
             Stage::EarlyPatches | Stage::LatePatches => {
                 let patches = self.patches(project);
                 if patches.is_empty() {
@@ -261,10 +271,14 @@ impl Stage {
                 }
             }
             Stage::Levels => {
+                // Sprite lists are compared with, and bank $07's space
+                // taken from, the image the stage starts from: SA-1 Pack
+                // has changed the clean ROM's by then.
+                let before = Rom::from_bytes(rom.data().to_vec())?;
                 let mut space = FreeSpace::scan(rom);
-                let mut bank07 = Bank07::new(clean);
+                let mut bank07 = Bank07::new(&before);
                 for (number, level) in &project.levels {
-                    write_level(rom, clean, &mut space, &mut bank07, *number, level)?;
+                    write_level(rom, &before, &mut space, &mut bank07, *number, level)?;
                 }
                 write_entrances(rom, project)?;
             }
@@ -273,12 +287,38 @@ impl Stage {
     }
 }
 
+/// SA-1 Pack on the clean ROM, and its 6 or 8 MiB patch for a larger
+/// image, run through Asar from the configured SA-1 Pack folder. SA-1 Pack
+/// applies to a clean ROM only, before anything else (docs/toolchain.md).
+fn apply_sa1pack(rom: &Rom, size: usize) -> Result<Rom, BuildError> {
+    let dir = config::sa1pack_path()?.join("asm");
+    let asar = Asar::configured().map_err(|e| BuildError::Asar(Box::new(e)))?;
+    let mut rom = Rom::from_bytes(rom.data().to_vec())?;
+    let mut patches = vec![dir.join("sa1.asm")];
+    match size {
+        s if s > 0x60_0000 => patches.push(dir.join("8mb.asm")),
+        s if s > 0x40_0000 => patches.push(dir.join("6mb.asm")),
+        _ => {}
+    }
+    for path in patches {
+        let patched = asar
+            .patch(&rom, &Patch::new(&path))
+            .map_err(|source| BuildError::Patch {
+                path: path.clone(),
+                source: Box::new(source),
+            })?;
+        rom = patched.rom;
+    }
+    Ok(rom)
+}
+
 /// The size the project expands the ROM to: its own, or
 /// [`DEFAULT_ROM_SIZE`] if it writes anything, for the free space its
 /// levels take and the space AddmusicK requires past 512 KiB.
 fn rom_size(clean: &Rom, project: &Project) -> usize {
     let m = &project.manifest;
     let writes = !project.levels.is_empty()
+        || m.sa1
         || !m.early_patches.is_empty()
         || !m.late_patches.is_empty()
         || m.music.is_some();
@@ -348,6 +388,21 @@ impl Cache {
         fs::write(&partial, data).map_err(fail)?;
         fs::rename(&partial, &path).map_err(fail)
     }
+}
+
+/// The image a project with this manifest builds onto: the clean ROM
+/// after the base stage (SA-1 Pack if the manifest says so, and the
+/// expansion). Import compares a ROM with it to find what changed.
+pub fn base_image(clean: &Rom, manifest: &Manifest) -> Result<Rom, BuildError> {
+    let project = Project {
+        root: PathBuf::from("."),
+        manifest: manifest.clone(),
+        levels: Vec::new(),
+    };
+    let mut rom = Rom::from_bytes(clean.data().to_vec())?;
+    Stage::Base.run(&mut rom, clean, &project)?;
+    rom.fix_checksum()?;
+    Ok(rom)
 }
 
 /// Builds a project onto a copy of the clean ROM, which must be the
@@ -427,10 +482,11 @@ impl Bank07 {
 }
 
 /// Writes one level: layer data in new RATS blocks, and its pointers and
-/// secondary header over the clean ROM's.
+/// secondary header over the base's. A sprite list the base already has
+/// for the level keeps its place.
 fn write_level(
     rom: &mut Rom,
-    clean: &Rom,
+    base: &Rom,
     space: &mut FreeSpace,
     bank07: &mut Bank07,
     number: u16,
@@ -488,12 +544,12 @@ fn write_level(
     let (header, entries) = level.sprites.to_entries(mode.layer1_vertical(), false);
     let list = sprites::encode(header, &entries, None)
         .map_err(|e: SpriteEncodeError| err(&format_args!("sprites: {e}")))?;
-    let clean_at = level::sprite_ptr(clean, number)?;
-    let clean_len = sprites::read_sprites_at(clean, clean_at)
+    let base_at = level::sprite_ptr(base, number)?;
+    let base_len = sprites::read_sprites_at(base, base_at)
         .map_err(|e| err(&e))?
         .len;
-    let at = if clean.read(clean_at, clean_len)? == &list[..] {
-        clean_at
+    let at = if base.read(base_at, base_len)? == &list[..] {
+        base_at
     } else {
         let at = bank07.alloc(list.len()).ok_or_else(|| {
             err(&format_args!(

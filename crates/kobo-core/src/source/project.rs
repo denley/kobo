@@ -32,6 +32,8 @@ pub const MANIFEST: &str = "kobo.toml";
 pub struct Manifest {
     /// The size to expand the ROM to, if the project sets one.
     pub rom_size: Option<usize>,
+    /// Whether the ROM runs on the SA-1, through SA-1 Pack.
+    pub sa1: bool,
     /// Asar patches applied before AddmusicK and the tools, in order.
     pub early_patches: Vec<PathBuf>,
     /// Asar patches applied after the tools, before the levels, in order.
@@ -46,8 +48,14 @@ pub struct Manifest {
 impl Manifest {
     pub fn to_toml(&self) -> String {
         let mut out = format!("format = {FORMAT}\n");
+        if self.rom_size.is_some() || self.sa1 {
+            out += "\n[rom]\n";
+        }
         if let Some(size) = self.rom_size {
-            out += &format!("\n[rom]\nsize = \"{}\"\n", size_text(size));
+            out += &format!("size = \"{}\"\n", size_text(size));
+        }
+        if self.sa1 {
+            out += "sa1 = true\n";
         }
         let paths = |list: &[PathBuf]| {
             let quoted: Vec<String> = list.iter().map(|p| format!("\"{}\"", slashes(p))).collect();
@@ -103,6 +111,11 @@ impl Manifest {
                         manifest.rom_size = Some(parse_size(text).ok_or_else(|| {
                             invalid("rom.size", format!("{text:?} is not a size such as \"1M\""))
                         })?);
+                    }
+                    "sa1" => {
+                        manifest.sa1 = item
+                            .as_bool()
+                            .ok_or_else(|| invalid("rom.sa1", "must be true or false"))?;
                     }
                     _ => return Err(invalid("rom", format!("unknown key `{key}`"))),
                 }
@@ -202,6 +215,7 @@ mod tests {
     fn round_trip() {
         let manifest = Manifest {
             rom_size: Some(0x18_0000),
+            sa1: true,
             early_patches: vec![PathBuf::from("asm/fastrom.asm")],
             late_patches: vec![PathBuf::from("asm/a.asm"), PathBuf::from("asm/b.asm")],
             music: Some(PathBuf::from("music")),
@@ -213,7 +227,7 @@ mod tests {
         let text = manifest.to_toml();
         assert_eq!(
             text,
-            "format = 1\n\n[rom]\nsize = \"1536K\"\n\n[patches]\n\
+            "format = 1\n\n[rom]\nsize = \"1536K\"\nsa1 = true\n\n[patches]\n\
              early = [\"asm/fastrom.asm\"]\nlate = [\"asm/a.asm\", \"asm/b.asm\"]\n\n\
              [music]\ndir = \"music\"\n\n[levels]\n\
              0x0C7 = \"title.toml\"\n0x105 = \"world1/yoshis-island-1.toml\"\n"

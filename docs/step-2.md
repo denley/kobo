@@ -220,6 +220,12 @@ on the built ROM.
   differ from vanilla only where Lunar Magic changed them on export. Level files carry
   Kobo's names (`kobo_core::names`) as trailing comments. Still to do in 2a: BPS output,
   and Asar for Kobo's own patches, which have none until 2b.
+- SA-1 builds: `[rom] sa1 = true` has the base stage apply SA-1 Pack (`tools.sa1pack` or
+  `KOBO_SA1PACK`, run through Asar, never bundled) and its 6 or 8 MiB patch for a larger
+  image. An empty SA-1 project builds byte for byte what `asar sa1.asm` makes of vanilla;
+  every level of that ROM imported and built back as an SA-1 project renders the same
+  picture on all 512 levels. Import of an SA-1 ROM compares it with the SA-1 base
+  (`build::base_image`). LC_LZ3 (`$0FFFEB`) is not yet set before SA-1 Pack.
 - Secondary entrances are in the level they lead to (`[entrances]`), read from a ROM or
   an MWL file and written in the game's format, where an entrance's number must share its
   level's bit 8; a level's list replaces what the base ROM had leading to it.
