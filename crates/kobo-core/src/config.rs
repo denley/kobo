@@ -16,6 +16,7 @@ pub const ROM_ENV_VAR: &str = "KOBO_SMW_ROM";
 pub const ASAR_ENV_VAR: &str = "KOBO_ASAR_LIB";
 pub const ADDMUSICK_ENV_VAR: &str = "KOBO_ADDMUSICK";
 pub const SA1PACK_ENV_VAR: &str = "KOBO_SA1PACK";
+pub const UBERASM_ENV_VAR: &str = "KOBO_UBERASM";
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -51,6 +52,11 @@ pub enum ConfigError {
         config_path().map(|p| p.display().to_string()).unwrap_or_default()
     )]
     NoSa1Pack,
+    #[error(
+        "no UberASM Tool configured; set {UBERASM_ENV_VAR} or add `tools.uberasm` to {}",
+        config_path().map(|p| p.display().to_string()).unwrap_or_default()
+    )]
+    NoUberasm,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -78,6 +84,9 @@ pub struct Tools {
     /// Path to an AddmusicK folder: the program and the files it reads
     /// beside it. Kobo never bundles AddmusicK, which has no licence.
     pub addmusick: Option<PathBuf>,
+    /// Path to an UberASM Tool folder: the program, built for the
+    /// platform, and its files.
+    pub uberasm: Option<PathBuf>,
     /// Path to an SA-1 Pack folder, the one holding `asm/sa1.asm`. Kobo
     /// never bundles SA-1 Pack, which has no licence.
     pub sa1pack: Option<PathBuf>,
@@ -117,6 +126,15 @@ pub fn addmusick_path() -> Result<PathBuf, ConfigError> {
         return Ok(PathBuf::from(p));
     }
     load()?.tools.addmusick.ok_or(ConfigError::NoAddmusick)
+}
+
+/// Resolves the path to the UberASM Tool folder: `KOBO_UBERASM`, then
+/// `tools.uberasm`.
+pub fn uberasm_path() -> Result<PathBuf, ConfigError> {
+    if let Some(p) = env::var_os(UBERASM_ENV_VAR).filter(|p| !p.is_empty()) {
+        return Ok(PathBuf::from(p));
+    }
+    load()?.tools.uberasm.ok_or(ConfigError::NoUberasm)
 }
 
 /// Resolves the path to the SA-1 Pack folder: `KOBO_SA1PACK`, then

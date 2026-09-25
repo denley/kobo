@@ -154,3 +154,46 @@ fn sa1_projects_build_onto_sa1_pack() {
     }
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// With UberASM Tool (`KOBO_UBERASM`, a folder with the program built for
+/// this platform), Asar, and the vanilla ROM: a project's level code goes
+/// in, the same bytes twice.
+#[test]
+fn uberasm_inserts_level_code() {
+    if std::env::var_os("KOBO_UBERASM").is_none() {
+        eprintln!("skipping: KOBO_UBERASM is not set");
+        return;
+    }
+    let Some(clean) = common::vanilla() else {
+        return;
+    };
+    if common::asar().is_none() {
+        return;
+    }
+    let dir = temp_dir("uberasm");
+    write(
+        &dir,
+        "uberasm/list.txt",
+        "verbose: off\nlevel:\n105 kobo_test.asm\noverworld:\ngamemode:\n\
+         global: other/global_code.asm\nstatusbar: other/status_code.asm\n\
+         macrolib: other/macro_library.asm\nfreeram: $7FAC80\n",
+    );
+    write(
+        &dir,
+        "uberasm/level/kobo_test.asm",
+        "main:\n    LDA #$42\n    STA $0DBF\n    RTL\n",
+    );
+    let project = Project {
+        root: dir.clone(),
+        manifest: Manifest {
+            uberasm: Some(PathBuf::from("uberasm")),
+            ..Manifest::default()
+        },
+        levels: Vec::new(),
+    };
+    let built = build::build(&clean, &project).unwrap();
+    let base = build::base_image(&clean, &project.manifest).unwrap();
+    assert_ne!(built.data(), base.data());
+    assert_eq!(build::build(&clean, &project).unwrap().data(), built.data());
+    let _ = fs::remove_dir_all(&dir);
+}

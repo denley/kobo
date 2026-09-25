@@ -122,8 +122,14 @@ are placed as well as that old ones are kept.
   `$05D8B7`-`$05D8DF` around PIXI's hook (`assets/asm/base/main.asm:15-101`).
 - Library files are inserted in `Directory.GetFiles` order (`Library.cs:17`).
 - Targets `net8.0` with `PlatformTarget` x86 and a 32-bit Windows Asar, so the published
-  build does not run on Linux or macOS, where .NET has no x86 runtime. A rebuild as x64
-  with a native `libasar` probably does; not tried.
+  build does not run on Linux or macOS, where .NET has no x86 runtime. Built unmodified as
+  x64 (`dotnet publish UberASMTool/UberASMTool.csproj -c Release -r linux-x64
+  --self-contained false -p:PlatformTarget=x64`), it runs on Linux with `libasar.so`
+  beside it, found through its `DllImport("asar")`, and gives the same bytes on every run
+  (2026-09-26). A framework-dependent build needs `DOTNET_ROOT`; the .NET CLI and the
+  program need `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1` where ICU is missing. A checkout's
+  `.gitkeep` files are taken for library binaries ("Zero insert size"); a release has none.
+- Lunar Magic's first save keeps UberASM Tool's ten hooks and its code blocks.
 
 ## AddmusicK 1.0.11, AddMusicKFF (no licence)
 
