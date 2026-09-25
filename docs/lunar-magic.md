@@ -105,3 +105,54 @@ executable. Vanilla behaviour is in [smw.md](smw.md).
   entrance screen's sprites never respawned in those hacks and came out as markers.
 - SA-1 hacks run on a second CPU; see [sa1.md](sa1.md). On one, SA-1 Pack's own loader hook is
   at `$02A856`, not Lunar Magic's, and the flags are wherever the RAM map puts `$1938`.
+
+## What Lunar Magic installs, and how it decides
+
+Found with Lunar Magic 3.70's command line under Wine, by byte diffs of ROMs before and
+after a save and by changing bytes and saving again (the hook spike of
+[step-2.md](step-2.md)); none of it comes from reading Lunar Magic's code.
+`tools/lunar-magic/` has the wrapper and the region diff used.
+
+- The first save into a vanilla ROM (here `-ImportLevel` of level `105`'s own MWL) expands
+  it to 1 MiB and writes `JSL`/`JML` at 52 sites in vanilla code, changes about 160 other
+  ranges of vanilla code and data, fills fixed parts of vanilla's unused space (`$05DC50`-
+  `$05DFFF`, `$06F540`-`$06FFFF`, `$0DE190`-`$0DE24F`, `$0EF100`-`$0EF56B`,
+  `$0EFD00`-`$0EFD7F`, `$0FF035`-`$0FF13F`, among others), adds 13 RATS blocks from
+  `$108000`, and writes a 64-byte marker at `$0FF0A0`. It does not update the internal
+  checksum. The output is the same byte for byte on every run, and saving the same level
+  again changes nothing.
+- The marker is not what Lunar Magic reads to decide what is installed. With it removed, a
+  save writes it back and changes nothing else, and a ROM with no hooks gets the full
+  install whether or not it carries the marker.
+- The one-time install is gated by one byte: `$06F600` other than `$FF` (vanilla's fill)
+  means it has been done. Found by putting Lunar Magic's regions back to vanilla in halves
+  until the install ran again; `$00`, `$42`, and `$5C` there all count as installed.
+- With the gate set, a save repairs only part of what is missing. It reinstalls 32 of the
+  52 hooks as new copies of its code in fresh space, with the jumps retargeted, and puts 5
+  back in place (`$00A6B8`, `$00A6CC`, `$0583C7`, `$05D8F5`, `$05D97D`); of the other
+  ranges it restores 52 and 16 in part. The rest only the one-time install writes: 15
+  hooks (`$00C17A`, `$00C25C`, `$02BA9E`, `$04DCFA`, `$04E5F1`, `$05803B`, `$058A65`,
+  `$058B45`, `$058C33`, `$058D2A`, `$058DA4`, `$05D7CE`, `$05D8E2`, `$05DB5B`,
+  `$05DBC2`) and 95 other ranges, `$695` bytes, in banks `$00`-`$06`, `$0D`, and `$0E`.
+- It never checks the code behind a hook. Foreign bytes at all 46 hook targets survive a
+  save, and all 52 sites retargeted to a foreign RATS block count as installed, with the
+  block kept.
+- With the gate clear, the install reinitialises Lunar Magic's tables over whatever is
+  there: a custom palette imported for level `105` lost its pointer at `$0EF600` and its
+  space was reused. Vanilla-format data elsewhere survives it: level `105`'s layer 1 moved
+  into a RATS block at `$118000`, with its pointer at `$05E000` retargeted, kept both.
+- Lunar Magic warns "The ROM may be Corrupt!" when the internal checksum is wrong, and
+  "This isn't a fresh ROM!" when it is right but the image is not vanilla. The command
+  line answers both on its own; the GUI shows them.
+- Only command-line level and palette imports were tried. Whether other operations, the
+  GUI's options in particular, write inside what Lunar Magic takes to be its own code is
+  not known.
+- Lunar Magic's help file (`Lunar Magic.chm`, "Technical Information") documents three
+  entry points into its code, which other code calls or patches and so are interface:
+  `JSL $0FF900` decompresses GFX or ExGFX file A (16-bit) to the 24-bit address in `$00`;
+  `JSL $03BCDC` returns the screen Mario is on for screen exits in X; and the Map16
+  "acts like" code has room for three 4-byte `JSL`s at each of `$06F890`-`$06F9F0`
+  (file offsets `0x37890`-`0x379F0`, one per kind of contact), which block tools write
+  into. There, A/X/Y are 8-bit, X and Y must be preserved, Y and `$1693` hold the tile
+  number reported to the game after the acts-like chain (always below `$200`), and `$03`
+  holds the last tile number of the chain (up to `$7FFF`).

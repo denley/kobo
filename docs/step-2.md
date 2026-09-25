@@ -45,8 +45,11 @@ on the built ROM.
   migration, and if it is stable a round trip falls out for supported features, but effort
   goes into supporting a feature, not into working around its absence.
 - `kobo build` always overwrites its output. The ROM is a build artefact.
-- Whether a build carries the `Lunar Magic Version` string at `$0FF0A0` is decided by the
-  hook spike; omitted until then.
+- A build does not carry the `Lunar Magic Version` string at `$0FF0A0`. The hook spike
+  showed Lunar Magic neither reads it to decide what is installed nor needs it, and writes
+  it on its own first save.
+- A build always has a correct internal checksum; Lunar Magic warns that a ROM "may be
+  Corrupt" otherwise.
 - Kobo writes the layout of the current Lunar Magic release and pins that release for the
   Lunar Magic checks.
 
@@ -135,10 +138,10 @@ on the built ROM.
 
 1. Development environment: Wine with the current Lunar Magic release (for its
    command-line exports and the Lunar Magic checks) and Asar.
-2. The hook spike: hand-write one minimal hook in Lunar Magic's layout, open the ROM in
-   Lunar Magic under Wine, save, and diff. Does Lunar Magic use the data as it is, reinstall
-   its hooks and keep the data, or reset the tables? This settles the `$0FF0A0` string and
-   how exact the layout has to be.
+2. The hook spike. Done: [lunar-magic.md](lunar-magic.md) has what Lunar Magic installs
+   and how it decides. Lunar Magic keeps Kobo's code behind any hook site that jumps to
+   it, but its one-time install is gated by `$06F600` alone and wipes its tables when it
+   runs, and a save never adds the 15 one-time hooks to a ROM whose gate is set.
 3. Write-side research, into [lunar-magic.md](lunar-magic.md): every table and block Lunar
    Magic writes, how they differ by version, the hook sites, and what PIXI, GPS, UberASM
    Tool, and AddmusicK check before accepting a ROM (from their sources).
@@ -157,11 +160,20 @@ on the built ROM.
 
 ## Work order
 
-- 2a: the pipeline with vanilla formats. Manifest and level table, the level reader and
+- 2a: the pipeline with vanilla formats. Its builds leave `$06F600` at `$FF` and write
+  nothing in Lunar Magic's layout, so Lunar Magic's first save installs itself and keeps
+  Kobo's data, as the spike showed for a relocated level. Manifest and level table, the level reader and
   writer, ROM writing and the allocator, the staged build and its cache, BPS output, Asar
   for Kobo's own patches, and import from MWL files and ROMs. Milestone: every vanilla
   level imported as text, rebuilt into expanded space, and rendering as vanilla does.
-- 2b: Lunar Magic-layout features one at a time, each taken through its source format,
+- 2b starts with the one-time set. The first Lunar Magic-layout table Kobo writes needs the
+  gate set, or Lunar Magic's install wipes it, and with the gate set Lunar Magic never
+  installs the 15 one-time hooks and 95 one-time ranges itself. So Kobo provides all of
+  them, clean-room, before any feature: the Map16 routine at `$06F540` and its four call
+  sites, the BG Map16 and per-level flag hooks, and the rest of that list. This is the
+  largest piece of 2b. The 32 hooks a save reinstalls need Kobo's own code only for the
+  features Kobo supports.
+- 2b then takes Lunar Magic-layout features one at a time, each through its source format,
   import from MWL and ROM, build, the Lunar Magic check, and the corpus check together, so
   neither direction anchors the format: Map16 pages 2 and up and background Map16, custom
   palettes, ExGFX, expanded level sizes, the sprite data formats (new sprite system, 255
@@ -171,8 +183,14 @@ on the built ROM.
 
 ## Risks
 
-- Lunar Magic rejecting or overwriting Kobo's hooks, or resetting tables it thinks are
-  uninitialised. The hook spike comes first.
+- The one-time set's behaviour has to be worked out without reading Lunar Magic's code:
+  from documentation (the help file documents the GFX decompression routine, the screen
+  exit routine, and the Map16 acts-like code's contract and `JSL` slots; see
+  [lunar-magic.md](lunar-magic.md)), tool sources, and the memory effects of running
+  Lunar Magic-saved ROMs.
+- Lunar Magic operations the spike did not try, the GUI's options especially, may write
+  inside what Lunar Magic takes to be its own code at the fixed addresses, which in a Kobo
+  build is Kobo's.
 - Clean-room contamination, from an agent or contributor working from Lunar Magic's code.
 - Lunar Magic's layout changing between versions: read many, write one.
 - Import losing data silently. The import report and raw fields cover it.

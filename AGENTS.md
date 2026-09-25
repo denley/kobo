@@ -199,7 +199,10 @@ Windows, and macOS. Keep all three green.
   (from `fusoya.eludevisibility.org/lm/`). Run `x64/Lunar Magic.exe`, which needs only
   64-bit Wine; set `WINEDLLOVERRIDES="mscoree,mshtml="` so a new Wine prefix does not stop
   to offer Mono and Gecko. `Lunar Magic.chm` is its help file, which documents the
-  command-line functions.
+  command-line functions; its pages as text are in
+  `~/.local/share/kobo/docs/lunar-magic-3.70-help/txt/` (the `info_*` pages are the
+  technical ones). `tools/lunar-magic/` has a wrapper that runs it headlessly and a ROM
+  diff that reports changed regions without printing Lunar Magic's code.
 - Mesen 2: `~/.local/share/kobo/tools/mesen2/Mesen`, built from source against the system
   libstdc++ (`tools/mesen-src/`; .NET SDK in `~/.dotnet`). The official 2.1.1 binary in
   `tools/mesen/` bundles GCC 12's libstdc++ and aborts with `std::bad_cast` at startup about
