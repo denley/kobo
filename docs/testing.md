@@ -185,6 +185,19 @@ how each oracle is produced, where its data lives, and what is known not to matc
   added. `Super Hark Bros 2` level `00A` used to fail with 896 of 2048 words: its
   level-init code leaves layer 2 at `$5D` and the game had uploaded for `$C0`, which the
   camera update `expand` now runs after preparation restores.
+- **Project build**: `tests/project_build.rs` imports every vanilla level into a
+  project, requires Kobo's formatting to be a fixed point on every file, builds it (twice,
+  for byte-identical output), and requires every level to read back as vanilla's, its
+  layer 1 data in the expanded ROM, and seven levels of different kinds to render the
+  same picture. The check of all 512 pictures is by hand, as for any change that should
+  not change a picture:
+
+  ```sh
+  kobo import "$KOBO_SMW_ROM" /tmp/p --all && kobo build /tmp/p -o /tmp/built.sfc
+  cargo run --release --example render_hashes -- "$KOBO_SMW_ROM" > vanilla.txt
+  cargo run --release --example render_hashes -- /tmp/built.sfc > built.txt
+  cmp vanilla.txt built.txt
+  ```
 - **Level data**: `tests/level_data.rs` decodes and encodes every level's object data,
   sprite list, and distinct background of the vanilla ROM and of every `KOBO_LM_ROMS` ROM
   but the locked ones, and requires the same objects, sprites, and tiles back, an encoding

@@ -1,0 +1,166 @@
+//! The step 2a round trip: every vanilla level imported as text and built
+//! back into a ROM, with its layer data in the expanded ROM, reads back as
+//! the same level and renders as vanilla does. The full picture check of
+//! all 512 levels is `render_hashes` (docs/testing.md); this renders a
+//! sample of level kinds.
+
+mod common;
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use kobo_core::build::{self, Project};
+use kobo_core::import;
+use kobo_core::level::{self, tables};
+use kobo_core::render::{self, RenderOptions};
+use kobo_core::source::level::{Comments, Level};
+use kobo_core::{Rom, SnesAddr};
+
+fn temp_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("kobo-{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    dir
+}
+
+fn level_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<_> = fs::read_dir(dir.join("levels"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    files.sort();
+    files
+}
+
+#[test]
+fn vanilla_imports_and_builds_back() {
+    let Some(clean) = common::vanilla() else {
+        return;
+    };
+    let dir = temp_dir("import-all");
+    let report = import::import_rom(&clean, &clean, &dir, true).unwrap();
+    assert_eq!(report.levels.len(), 512);
+    assert!(report.notes.is_empty(), "{:?}", report.notes);
+
+    // Kobo's formatting is a fixed point.
+    for file in level_files(&dir) {
+        let text = fs::read_to_string(&file).unwrap();
+        let (level, comments) = Level::from_toml(&text).unwrap();
+        assert_eq!(level.to_toml(&comments), text, "{}", file.display());
+    }
+
+    let project = Project::load(&dir).unwrap();
+    let built = build::build(&clean, &project).unwrap();
+    assert_eq!(
+        build::build(&clean, &project).unwrap().data(),
+        built.data(),
+        "same inputs, same output"
+    );
+    assert!(built.internal_header().checksum_pair_valid());
+    assert_eq!(built.internal_header().checksum, built.compute_checksum());
+
+    for number in 0..level::LEVEL_COUNT {
+        let (read, _) = import::read_level(&built, number).unwrap();
+        let (vanilla, _) = import::read_level(&clean, number).unwrap();
+        assert_eq!(read, vanilla, "level {number:03X}");
+        let layer1 = level::layer1_ptr(&built, number).unwrap();
+        assert!(layer1.bank() >= 0x10, "level {number:03X} at {layer1}");
+    }
+    // A build of the imported vanilla ROM imports as no changes at all.
+    let again = temp_dir("reimport");
+    let built_path = again.with_extension("sfc");
+    built.save(&built_path).unwrap();
+    let rebuilt = Rom::load(&built_path).unwrap();
+    assert!(
+        import::import_rom(&rebuilt, &clean, &again, false)
+            .unwrap()
+            .levels
+            .is_empty()
+    );
+
+    // Level kinds: horizontal with a background, vertical, layer 2
+    // objects (horizontal and vertical), a boss arena, the title screen.
+    for number in [0x105, 0x0D3, 0x01C, 0x0CB, 0x0E5, 0x1C7, 0x0C7] {
+        for options in [
+            RenderOptions::default(),
+            RenderOptions {
+                sprites: render::Sprites::Markers,
+                player: false,
+            },
+        ] {
+            let a = render::render_level(&clean, number, options).unwrap().image;
+            let b = render::render_level(&built, number, options).unwrap().image;
+            assert!(
+                a.pixels == b.pixels,
+                "level {number:03X} renders differently"
+            );
+        }
+    }
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&again);
+    let _ = fs::remove_file(&built_path);
+}
+
+#[test]
+fn an_empty_project_builds_the_clean_rom() {
+    let Some(clean) = common::vanilla() else {
+        return;
+    };
+    let project = Project {
+        manifest: Default::default(),
+        levels: Vec::new(),
+    };
+    assert_eq!(build::build(&clean, &project).unwrap().data(), clean.data());
+}
+
+#[test]
+fn edits_reach_the_rom() {
+    let Some(clean) = common::vanilla() else {
+        return;
+    };
+    let (mut level, _) = import::read_level(&clean, 0x105).unwrap();
+    level.layer1.truncate(10);
+    level.sprites.list[0].x += 1;
+    let text = level.to_toml(&Comments::default());
+    let (level, _) = Level::from_toml(&text).unwrap();
+    let project = Project {
+        manifest: Default::default(),
+        levels: vec![(0x105, level.clone())],
+    };
+    let built = build::build(&clean, &project).unwrap();
+    assert_eq!(import::read_level(&built, 0x105).unwrap().0, level);
+    // The changed sprite list went to bank $07's unused space; the other
+    // levels kept theirs.
+    assert_eq!(
+        level::sprite_ptr(&built, 0x105).unwrap(),
+        SnesAddr::new(0x07A179)
+    );
+    assert_eq!(
+        built.read_u16(tables::SPRITE_PTRS.add(2 * 0x106)).unwrap(),
+        clean.read_u16(tables::SPRITE_PTRS.add(2 * 0x106)).unwrap()
+    );
+    assert_eq!(
+        level::layer1_ptr(&built, 0x106).unwrap(),
+        level::layer1_ptr(&clean, 0x106).unwrap()
+    );
+    assert!(built.read(SnesAddr::new(0x108000), 4).unwrap() == b"STAR");
+}
+
+#[test]
+fn lunar_magic_objects_are_refused_for_now() {
+    let Some(clean) = common::vanilla() else {
+        return;
+    };
+    let (mut level, _) = import::read_level(&clean, 0x105).unwrap();
+    level.layer1.push(kobo_core::level::objects::Object::Lunar {
+        number: 0x22,
+        x: 1,
+        y: 1,
+        data: vec![0x00, 0x25],
+    });
+    let project = Project {
+        manifest: Default::default(),
+        levels: vec![(0x105, level)],
+    };
+    let error = build::build(&clean, &project).unwrap_err().to_string();
+    assert!(error.contains("Lunar Magic"), "{error}");
+}

@@ -193,6 +193,14 @@ on the built ROM.
 
 ## Work order
 
+- 2a progress: the level format, manifest, import from ROM, and build are in
+  (`kobo_core::source`, `import`, `build`), and the milestone holds: every vanilla level
+  imported with `kobo import --all`, built with its layer data in RATS blocks at `$108000`
+  and up, re-imports as no changes and renders the same picture on all 512 levels
+  (`render_hashes`, 2026-09-25). Sprite lists stay in bank `$07`, where the game reads
+  them: unchanged ones keep their place and changed ones go in the bank's unused space
+  (4.5 KiB), until 2b's Lunar Magic layout lifts that. Still to do in 2a: the staged
+  build and its cache, BPS output, Asar for Kobo's own patches, and import from MWL.
 - 2a: the pipeline with vanilla formats. Its builds leave `$06F600` at `$FF` and write
   nothing in Lunar Magic's layout, so Lunar Magic's first save installs itself and keeps
   Kobo's data, as the spike showed for a relocated level. Manifest and level table, the
