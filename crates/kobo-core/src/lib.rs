@@ -13,6 +13,7 @@ pub mod expand;
 pub mod gfx;
 pub mod image;
 pub mod import;
+pub mod install;
 pub mod level;
 pub mod map16;
 pub mod mwl;

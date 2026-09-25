@@ -202,6 +202,11 @@ how each oracle is produced, where its data lives, and what is known not to matc
   cargo run --release --example render_hashes -- /tmp/built.sfc > built.txt
   cmp vanilla.txt built.txt
   ```
+- **Kobo's ROM-side code**: `tests/install.rs` applies `kobo_core::install`'s patches to
+  vanilla (Asar's library needed) and runs the ROM: Map16 lookups for pages 0 and 1 as the
+  game's, pages past 1 from tables written where Lunar Magic's layout points, and a few
+  levels drawn as vanilla. After a change to a patch, compare `render_hashes` of all 512
+  levels with vanilla's by hand (`kobo rom expand 1M`, then `kobo asm` each patch).
 - **Tool stages**: `tests/tool_stages.rs` builds two Asar patches, early and late, one
   including a file, onto the synthetic base when Asar's library is configured (no ROM):
   they apply in order, the output repeats, and changing the included file changes the

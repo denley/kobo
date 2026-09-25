@@ -100,7 +100,10 @@ pub(crate) fn expand_controlled(
         Some(planes) => map16::read_bg_map16(&mut machine, planes)?,
         None => (Vec::new(), SCREEN_LEN),
     };
-    let map16 = map16::lookup_map16(&mut machine, lunar_magic)?;
+    // The uploads go through the Map16 routine in Lunar Magic's ROMs and
+    // in Kobo's builds that install it, which have no marker.
+    let map16_routine = lunar_magic || map16::uploads_use_routine(rom);
+    let map16 = map16::lookup_map16(&mut machine, map16_routine)?;
     let pipe_map16 = (!lunar_magic).then(|| map16::read_pipe_map16(&mut machine.bus));
     if let Some(op) = operation {
         op.check()?;
@@ -165,6 +168,25 @@ pub fn decompress_gfx_file(rom: &Rom, index: u8, len: usize) -> Result<Vec<u8>, 
         .try_call(Call::jsl(routines::DECOMPRESS_GFX_FILE).index_y(index as u16))
         .map_err(failed)?;
     Ok(machine.bus.ram.bytes(ram::GFX_BUFFER, len))
+}
+
+/// The definitions of Map16 tiles as the ROM's own code finds them once
+/// `level` has loaded: through the Map16 routine where the uploads call it
+/// (Lunar Magic's layout), else from the game's pointer table, which holds
+/// pages 0 and 1 only (`None` past them).
+pub fn resolve_map16(
+    rom: &Rom,
+    level: u16,
+    tiles: &[u16],
+) -> Result<Vec<Option<crate::map16::Map16Tile>>, ExpandError> {
+    let mut machine = Machine::new(rom, level);
+    boot(&mut machine)?;
+    load_level(&mut machine)?;
+    let routine = rom.lunar_magic_version().is_some() || map16::uploads_use_routine(rom);
+    tiles
+        .iter()
+        .map(|&n| map16::lookup_one(&mut machine, routine, n))
+        .collect()
 }
 
 /// Brings the machine to where the game is when a level load starts.
