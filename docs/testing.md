@@ -114,6 +114,10 @@ how each oracle is produced, where its data lives, and what is known not to matc
   capture got one level: the emulator stays in game mode `$14` on `026`, the cutscene level
   whose sprite waits for a button ([known-gaps.md](known-gaps.md)).
 - Lunar Magic exports (hashes in `tests/fixtures/`) are the oracle for GFX, palette, and Map16.
+  The fixtures were made with 3.21. Lunar Magic 3.70's `-ExportGFX` of the vanilla ROM
+  differs in one file: `GFX17` has `$FF` where 3.21 and `gfx export` have `$00`, in 32
+  bytes from offset `$11`. Regenerating the fixtures with 3.70 needs that explained first.
+  3.70 ships a 64-bit build (`x64/Lunar Magic.exe`) that runs under 64-bit Wine alone.
 - `tests/map16_sheet.rs` checks that the foreground Map16 a loaded vanilla level resolves
   (`LevelTiles::foreground_map16`, what `map16 png --level` draws) is the vanilla table of
   its tileset, and its background definitions the BG table. The sheet a level shows differs

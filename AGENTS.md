@@ -161,8 +161,8 @@ cargo run --release --example fuzz_inputs -- 10000      # seeded parser mutation
 ```
 
 Lunar Magic runs headlessly under Wine for reference exports, e.g.
-`wine "Lunar Magic.exe" -ExportGFX rom.smc` (also `-ExportAllMap16`, `-ExportSharedPalette`,
-`-ExportLevel`). Always run it on a copy of the ROM. Export hashes, never the exported bytes,
+`xvfb-run -a wine "Lunar Magic.exe" -ExportGFX rom.smc` (also `-ExportAllMap16`,
+`-ExportSharedPalette`, `-ExportLevel`). Always run it on a copy of the ROM. Export hashes, never the exported bytes,
 go in `crates/kobo-core/tests/fixtures/`.
 
 CI (`.github/workflows/ci.yml`) runs fmt, clippy with warnings denied, and tests on Linux,
@@ -195,6 +195,11 @@ Windows, and macOS. Keep all three green.
   from GitHub, not committed). Use it to read how the game consumes a table; never build on it.
   SMW Central is behind a JavaScript challenge and cannot be fetched from tools.
 - Asar 1.91 built from source: `~/.local/bin/asar`, `libasar.so` in `~/.local/lib`.
+- Lunar Magic 3.70, the version step 2 targets: `~/.local/share/kobo/tools/lunar-magic-3.70/`
+  (from `fusoya.eludevisibility.org/lm/`). Run `x64/Lunar Magic.exe`, which needs only
+  64-bit Wine; set `WINEDLLOVERRIDES="mscoree,mshtml="` so a new Wine prefix does not stop
+  to offer Mono and Gecko. `Lunar Magic.chm` is its help file, which documents the
+  command-line functions.
 - Mesen 2: `~/.local/share/kobo/tools/mesen2/Mesen`, built from source against the system
   libstdc++ (`tools/mesen-src/`; .NET SDK in `~/.dotnet`). The official 2.1.1 binary in
   `tools/mesen/` bundles GCC 12's libstdc++ and aborts with `std::bad_cast` at startup about
