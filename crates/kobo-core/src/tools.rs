@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use sha1::{Digest, Sha1};
 use thiserror::Error;
 
+use crate::addr::SnesAddr;
 use crate::rats::{self, Damage};
 use crate::rom::{Rom, RomError};
 
@@ -137,6 +138,9 @@ struct FolderTool<'a> {
     /// Files the copy must not keep, such as an options file that would
     /// replace the arguments.
     remove: &'a [&'a str],
+    /// Blocks the tool may rewrite in place, as their interface has it:
+    /// damage to them is not damage.
+    owns: fn(&Rom) -> Vec<SnesAddr>,
 }
 
 impl FolderTool<'_> {
@@ -176,7 +180,16 @@ impl FolderTool<'_> {
             });
         }
         let after = Rom::from_bytes(fs::read(&rom_path).map_err(io_error(&rom_path))?)?;
-        let damage = rats::Snapshot::take(rom).check(&after, &[]);
+        // By file offset: a pointer may name a block through a mirror.
+        let owned: Vec<_> = (self.owns)(rom)
+            .into_iter()
+            .filter_map(|at| rom.pc(at).ok())
+            .collect();
+        let damage: Vec<_> = rats::Snapshot::take(rom)
+            .check(&after, &[])
+            .into_iter()
+            .filter(|d| rom.pc(d.block.start).is_ok_and(|pc| !owned.contains(&pc)))
+            .collect();
         if !damage.is_empty() {
             return Err(ToolError::Damaged {
                 tool: self.name,
@@ -185,6 +198,33 @@ impl FolderTool<'_> {
         }
         Ok(after)
     }
+}
+
+/// Runs GPS on a copy of `rom`, in a copy of its folder `tool` with the
+/// project's GPS folder (`list.txt`, `blocks/`, `routines/`) laid over it.
+/// GPS patches the acts-like chain in bank `$06`, which Kobo's install has
+/// in the shape GPS expects (docs/toolchain.md).
+pub fn gps(rom: &Rom, tool: &Path, files: &Path, asar: &Path) -> Result<Rom, ToolError> {
+    FolderTool {
+        name: "GPS",
+        program: "gps",
+        args: &["rom.sfc"],
+        remove: &[],
+        // GPS applies its list to the acts-like tables in place.
+        owns: |rom| {
+            use crate::map16::pages::{ACTS_LIKE, ACTS_LIKE_UPPER};
+            let mut owned = Vec::new();
+            if let Ok(at) = rom.read_u24(ACTS_LIKE) {
+                owned.push(SnesAddr::new(at));
+            }
+            // The pointer to pages $40 on is kept less $8000.
+            if let Ok(at) = rom.read_u24(ACTS_LIKE_UPPER).map(|a| a + 0x8000) {
+                owned.push(SnesAddr::new(at));
+            }
+            owned
+        },
+    }
+    .run(rom, tool, files, asar)
 }
 
 /// Runs AddmusicK on a copy of `rom`: in a copy of the AddmusicK folder
@@ -197,6 +237,7 @@ pub fn addmusick(rom: &Rom, tool: &Path, music: &Path, asar: &Path) -> Result<Ro
         args: &["-noblock", "rom.sfc"],
         // AddmusicK reads its options file in place of its arguments.
         remove: &["Addmusic_options.txt"],
+        owns: |_| Vec::new(),
     }
     .run(rom, tool, music, asar)
 }
@@ -211,6 +252,7 @@ pub fn uberasm(rom: &Rom, tool: &Path, files: &Path, asar: &Path) -> Result<Rom,
         program: "UberASMTool",
         args: &["list.txt", "rom.sfc"],
         remove: &[],
+        owns: |_| Vec::new(),
     }
     .run(rom, tool, files, asar)
 }

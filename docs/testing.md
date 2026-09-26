@@ -273,6 +273,9 @@ how each oracle is produced, where its data lives, and what is known not to matc
   build. With `KOBO_ADDMUSICK` (an AddmusicK folder; `~/src/addmusick` here) and the
   vanilla ROM, a project with an empty music folder gets AddmusicK's default music
   (`@AMK` at `$0E8000`), the same bytes twice.
+- **GPS**: with `KOBO_GPS` (a folder with GPS built for the system and its files;
+  `~/.local/share/kobo/tools/gps-1.4.4` here), `tool_stages.rs` inserts a block acting like
+  `$025` at tile `$200` into Kobo's acts-like chain and checks the table and GPS's entry.
 - **UberASM Tool**: with `KOBO_UBERASM` (a folder with the program built for the platform
   and its files; `~/.local/share/kobo/tools/uberasm-x64` here, which needs
   `DOTNET_ROOT=~/.dotnet`), `tool_stages.rs` inserts one level's code, the same bytes twice.

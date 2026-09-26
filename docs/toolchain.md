@@ -100,7 +100,9 @@ are placed as well as that old ones are kept.
   `GPS_VeRsIoN` string, as "unidentified custom block code" (`gps_src/main.cpp:544-548`,
   `822-825`, `851-853`).
 - Copies the acts-like table (`$8000` bytes, two per tile, from the pointer at `$06F624`;
-  pages `40`-`7F` from `$06F63A`), applies its list, and writes it back to a new block.
+  pages `40`-`7F` from `$06F63A`), applies its list, and writes it back: into the block
+  the pointer names, in place, on a Kobo build (the build's blocks stage allows that one
+  change under a standing tag).
 - It depends on the shape of Lunar Magic's code in bank `$06`, not only on tables: it
   writes 16-byte entries at `$06F690`, `$06F6A0`, `$06F6B0`, `$06F6C0`, `$06F6D0`,
   `$06F6E0`, `$06F720`, `$06F730`, `$06F780`, `$06F7C0`, `$06F7D0`, and `$06F7E0`, each

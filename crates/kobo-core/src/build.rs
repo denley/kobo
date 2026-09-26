@@ -186,6 +186,7 @@ impl Project {
     pub fn lunar_magic_layout(&self) -> bool {
         !self.map16.is_empty()
             || !self.map16_bg.is_empty()
+            || self.manifest.gps.is_some()
             || self.levels.iter().any(|(_, level)| {
                 level.layer1.iter().any(handled)
                     || level.palette.is_some()
@@ -209,9 +210,10 @@ pub enum Stage {
     Music,
     /// GFX files `00` to `33`.
     Graphics,
-    /// Map16 pages past 1 and the acts-like tables. GPS, which will run
-    /// after it, rewrites the acts-like table.
+    /// Map16 pages past 1 and the acts-like tables.
     Map16,
+    /// GPS, with the project's blocks. It rewrites the acts-like table.
+    Blocks,
     /// UberASM Tool, with the project's UberASM files. PIXI and GPS will
     /// run before it, as it reads what PIXI leaves (docs/toolchain.md).
     UberAsm,
@@ -222,13 +224,14 @@ pub enum Stage {
 }
 
 impl Stage {
-    pub const ALL: [Stage; 9] = [
+    pub const ALL: [Stage; 10] = [
         Stage::Base,
         Stage::Install,
         Stage::EarlyPatches,
         Stage::Music,
         Stage::Graphics,
         Stage::Map16,
+        Stage::Blocks,
         Stage::UberAsm,
         Stage::LatePatches,
         Stage::Levels,
@@ -241,6 +244,7 @@ impl Stage {
             Stage::EarlyPatches => "early patches",
             Stage::Music => "music",
             Stage::Graphics => "graphics",
+            Stage::Blocks => "blocks",
             Stage::Map16 => "map16",
             Stage::UberAsm => "uberasm",
             Stage::LatePatches => "late patches",
@@ -350,6 +354,16 @@ impl Stage {
                 tools::hash_tree(&mut hash, &project.root.join(music))?;
                 hash.finalize().to_vec()
             }
+            Stage::Blocks => {
+                let Some(files) = &project.manifest.gps else {
+                    return Ok(Vec::new());
+                };
+                let mut hash = Sha1::new();
+                tools::hash_tree(&mut hash, &config::gps_path()?)?;
+                tools::hash_tree(&mut hash, &config::asar_library_path()?)?;
+                tools::hash_tree(&mut hash, &project.root.join(files))?;
+                hash.finalize().to_vec()
+            }
             Stage::UberAsm => {
                 let Some(files) = &project.manifest.uberasm else {
                     return Ok(Vec::new());
@@ -416,6 +430,13 @@ impl Stage {
                     *rom = tools::addmusick(rom, &tool, &project.root.join(music), &asar)?;
                 }
             }
+            Stage::Blocks => {
+                if let Some(files) = &project.manifest.gps {
+                    let tool = config::gps_path()?;
+                    let asar = config::asar_library_path()?;
+                    *rom = tools::gps(rom, &tool, &project.root.join(files), &asar)?;
+                }
+            }
             Stage::UberAsm => {
                 if let Some(files) = &project.manifest.uberasm {
                     let tool = config::uberasm_path()?;
@@ -477,7 +498,8 @@ fn rom_size(clean: &Rom, project: &Project) -> usize {
         || !m.early_patches.is_empty()
         || !m.late_patches.is_empty()
         || m.music.is_some()
-        || m.uberasm.is_some();
+        || m.uberasm.is_some()
+        || m.gps.is_some();
     m.rom_size.unwrap_or(if writes {
         DEFAULT_ROM_SIZE
     } else {
