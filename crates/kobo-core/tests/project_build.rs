@@ -152,22 +152,64 @@ fn edits_reach_the_rom() {
 }
 
 #[test]
-fn lunar_magic_objects_are_refused_for_now() {
+fn lunar_magic_objects_build() {
     let Some(clean) = common::vanilla() else {
         return;
     };
+    if common::asar().is_none() {
+        return;
+    }
+    use kobo_core::level::objects::Object;
     let (mut level, _) = import::read_level(&clean, 0x105).unwrap();
-    level.layer1.push(kobo_core::level::objects::Object::Lunar {
+    // A 2x1 of tile $0AB, and a 2x2 block of Map16 from $1A0.
+    level.layer1.push(Object::Lunar {
         number: 0x22,
         x: 1,
         y: 1,
-        data: vec![0x00, 0x25],
+        data: vec![0x01, 0xAB],
+    });
+    level.layer1.push(Object::Lunar {
+        number: 0x27,
+        x: 4,
+        y: 1,
+        data: vec![0x11, 0x41, 0xA0],
     });
     let project = Project {
         root: std::path::PathBuf::from("."),
         manifest: Default::default(),
-        levels: vec![(0x105, level)],
+        levels: vec![(0x105, level.clone())],
         map16: Vec::new(),
+    };
+    let built = build::build(&clean, &project).unwrap();
+    assert_eq!(import::read_level(&built, 0x105).unwrap().0, level);
+    let tiles = kobo_core::expand::expand_level(&built, 0x105)
+        .unwrap()
+        .tiles;
+    let at = |x, y| tiles.tile_at(x, y);
+    assert_eq!([at(1, 1), at(2, 1)], [0x0AB, 0x0AB]);
+    assert_eq!(
+        [at(4, 1), at(5, 1), at(4, 2), at(5, 2)],
+        [0x1A0, 0x1A1, 0x1B0, 0x1B1]
+    );
+
+    // The music bypass, song $0A.
+    let mut with_music = level.clone();
+    with_music
+        .layer1
+        .push(Object::Unplaced(vec![0x40, 0x60, 0x0B]));
+    let project = Project {
+        levels: vec![(0x105, with_music)],
+        ..project
+    };
+    let built = build::build(&clean, &project).unwrap();
+    let ram = kobo_core::expand::expand_level(&built, 0x105).unwrap().ram;
+    assert_eq!(ram.u8(kobo_core::ram::RamAddr::new(0x7E_0DDA)), 0x0A);
+
+    // Its graphics and time limit bypasses are not in yet.
+    level.layer1.push(Object::Unplaced(vec![0x40, 0x80, 0x00]));
+    let project = Project {
+        levels: vec![(0x105, level)],
+        ..project
     };
     let error = build::build(&clean, &project).unwrap_err().to_string();
     assert!(error.contains("Lunar Magic"), "{error}");

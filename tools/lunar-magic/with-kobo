@@ -1,7 +1,8 @@
 #!/bin/bash
-# A Lunar Magic-saved ROM with Kobo's bank $06 code (asm/lunar-magic/map16.asm and
-# actslike.asm) in place of Lunar Magic's, keeping the ROM's Map16 page tables and
-# acts-like tables, so a hack's content runs through both implementations:
+# A Lunar Magic-saved ROM with Kobo's code for Lunar Magic's layout (asm/lunar-magic/:
+# the Map16 routine, the acts-like chain, and the placed objects) in place of Lunar
+# Magic's, keeping the ROM's Map16 page tables and acts-like tables, so a hack's content
+# runs through both implementations:
 #   with-kobo lm.smc out.sfc
 # then compare the two with examples/render_hashes and ramdiff.py. The operands Kobo's
 # patches autoclean are cleared first, so that Asar frees nothing of the ROM's.
@@ -18,7 +19,8 @@ for x in (0x06F540, 0x06F624, 0x06F660): d[pc(x):pc(x)+4]=b'\xff'*4
 open(sys.argv[2],'wb').write(d)
 PY
 $K asm $A/map16.asm $t/1.sfc -r $t/0.sfc >/dev/null
-$K asm $A/actslike.asm $t/2.sfc -r $t/1.sfc >/dev/null
+$K asm $A/actslike.asm $t/1b.sfc -r $t/1.sfc >/dev/null
+$K asm $A/objects.asm $t/2.sfc -r $t/1b.sfc >/dev/null
 python3 - "$1" $t/2.sfc "$2" <<'PY'
 import sys
 def ld(p):

@@ -8,7 +8,13 @@ executable. Vanilla behaviour is in [smw.md](smw.md).
 - Map16 pages 0-1 stay in the vanilla tables (rewritten in place). Higher pages live in
   RATS-tagged blocks whose layout differs by Lunar Magic version; the routine at `$06F540`
   (called with A = tile*2, 16-bit; returns the pointer's low word in A and bank in `$0C`)
-  resolves any layer 1 tile number. Call it on the core instead of parsing the blocks.
+  resolves any layer 1 tile number. Call it on the core instead of parsing the blocks to
+  draw a level. From 2.52 on (the corpus's 2.52 and 2.53 ROMs and every 3.x one) the
+  blocks are one per group of 16 pages, found through the pointers at `$06F553` and on
+  ([lunar-magic-install.md](lunar-magic-install.md)), and a group's block holds its pages
+  up to the last one used, so the next group's may start inside the space a whole group
+  would take; `map16::pages` and `import::read_map16` read them so. Super Dram World 2
+  (2.43) has other values there, which point at no block.
 - The BG Map16 pages (`200`-`3FF`, Lunar Magic's file index `8000+`) are a separate block from
   layer 1 pages 2-3 and `$06F540` does not find them. Lunar Magic 2.3+ replaces `STA $0A` at
   `$058DA4` in the layer 2 tilemap upload with a `JSL` (to `$0EFD00`) that leaves the level's BG

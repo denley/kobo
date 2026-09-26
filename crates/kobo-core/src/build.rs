@@ -150,9 +150,13 @@ impl Project {
     }
 
     /// Whether the project has anything only Lunar Magic's layout holds,
-    /// which needs Kobo's code for it installed.
+    /// which needs Kobo's code for it installed: Map16 pages past 1, or
+    /// Lunar Magic's objects in a level.
     pub fn lunar_magic_layout(&self) -> bool {
-        !self.map16.is_empty()
+        !self.map16.is_empty() || self.levels.iter().any(|(_, level)| {
+            level.layer1.iter().any(places_tiles)
+                || matches!(&level.layer2, Layer2::Objects(list) if list.iter().any(places_tiles))
+        })
     }
 }
 
@@ -647,7 +651,7 @@ fn write_level(
         }
     };
     let layout1 = vertical(mode.layer1_vertical());
-    check_vanilla(number, &level.layer1)?;
+    check_objects(number, &level.layer1)?;
     let layer1 = objects::encode(
         level.header.to_bytes(),
         &level.layer1,
@@ -662,7 +666,7 @@ fn write_level(
     match &level.layer2 {
         Layer2::None => {}
         Layer2::Objects(list) => {
-            check_vanilla(number, list)?;
+            check_objects(number, list)?;
             let layout = vertical(mode.layer2() == level::Layer2Kind::VerticalObjects);
             let bytes = objects::encode(level.header.to_bytes(), list, layout, Jumps::Vanilla)
                 .map_err(|e| err(&format_args!("layer 2: {e}")))?;
@@ -752,16 +756,37 @@ fn write_entrances(rom: &mut Rom, project: &Project) -> Result<(), BuildError> {
     Ok(())
 }
 
-/// Lunar Magic's objects need its code in the ROM, which step 2a's builds
-/// do not install.
-fn check_vanilla(number: u16, list: &[Object]) -> Result<(), BuildError> {
+/// Lunar Magic's objects that place tiles (`22`, `23`, `27`, `29`), which
+/// Kobo's code ([`crate::install`]) handles.
+fn places_tiles(object: &Object) -> bool {
+    matches!(
+        object,
+        Object::Lunar {
+            number: 0x22 | 0x23 | 0x27 | 0x29,
+            ..
+        }
+    )
+}
+
+/// Lunar Magic's objects Kobo's code handles besides those: its music
+/// bypass (`26`) and its user object (`2D`).
+fn handled(object: &Object) -> bool {
+    places_tiles(object)
+        || matches!(object, Object::Lunar { number: 0x2D, .. })
+        || matches!(object, Object::Unplaced(b) if b.len() == 3 && b[0] & 0x60 == 0x40 && b[1] >> 4 == 6)
+}
+
+/// Lunar Magic's other objects need code of its own Kobo does not install
+/// yet: its graphics and time limit bypasses (`24`, `25`, `28`) and its
+/// long screen exits.
+fn check_objects(number: u16, list: &[Object]) -> Result<(), BuildError> {
     match list
         .iter()
-        .position(|o| matches!(o, Object::Lunar { .. } | Object::Unplaced(_)))
+        .position(|o| matches!(o, Object::Lunar { .. } | Object::Unplaced(_)) && !handled(o))
     {
         Some(i) => Err(level_error(
             number,
-            format!("object {i} is one of Lunar Magic's, which this build cannot write yet"),
+            format!("object {i} is one of Lunar Magic's that this build cannot write yet"),
         )),
         None => Ok(()),
     }

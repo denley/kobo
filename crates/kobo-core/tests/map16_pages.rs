@@ -57,7 +57,8 @@ fn project() -> Project {
 }
 
 fn check_read_back(rom: &Rom, project: &Project) {
-    let read = import::read_map16(rom).unwrap();
+    let (read, notes) = import::read_map16(rom).unwrap();
+    assert!(notes.is_empty(), "{notes:?}");
     let listed: Vec<u8> = project.map16.iter().map(|(p, _)| *p).collect();
     let back: Vec<u8> = read.iter().map(|(p, _)| *p).collect();
     assert_eq!(
