@@ -287,13 +287,13 @@ fn background_tiles(bg: &level::Background) -> Option<BackgroundTiles> {
     Some(BackgroundTiles { table, rows, tiles })
 }
 
+/// GFX files by number, as images, and notes on what was left out.
+pub type GfxImport = (Vec<(u8, IndexedImage)>, Vec<String>);
+
 /// GFX files `00` to `33` that differ from `base`'s, as images, and notes on
 /// those left out: all of a locked ROM's, and any stored in another format
 /// than `base`'s (Lunar Magic can store some as 4bpp, with code of its own).
-pub fn read_gfx(
-    rom: &Rom,
-    base: &Rom,
-) -> Result<(Vec<(u8, IndexedImage)>, Vec<String>), ImportError> {
+pub fn read_gfx(rom: &Rom, base: &Rom) -> Result<GfxImport, ImportError> {
     let (mut out, mut notes) = (Vec::new(), Vec::new());
     let reader = match gfx::GfxReader::new(rom) {
         Ok(reader) => reader,
