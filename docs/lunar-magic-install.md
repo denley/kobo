@@ -103,7 +103,11 @@ filler. "Target" areas are Lunar Magic's fixed code.
     `$06F5B1`/`$06F5B5` (`40`-`7F` likewise); `$06F547` non-zero turns on per-tileset
     page 2, whose table is `read3` at `$06F586`/`$06F58A` plus `$1000`, `$800` bytes per
     tileset. Kobo's routine has to hold these values at exactly these addresses, which
-    fixes much of its layout.
+    fixes much of its layout. A tile's definition is at its group's pointer (plus 1 for
+    the groups kept less one) plus the tile number times 8, in 16 bits (observed: Kaizo
+    Kindergarten's pages `02`-`0F` at `$187000`, so tile `$200` is at `$188000`, and
+    `10`-`1F` at `$190000`). A pointer outside `$8000`-`$FFFF` is therefore usual, and a
+    fresh install's `$00F000` puts pages 2 and up in bank `$00`'s work RAM mirror.
   - `$06F600`: the gate, any byte but `$FF` (3.x writes `$EA`, 1.62 and 2.41 `$68`). It is
     an instruction in Lunar Magic's code, so whatever Kobo puts there sits in its own code
     path. `$06F602` is the acts-like chain's common exit (GPS jumps to it).
@@ -191,11 +195,44 @@ call site of `$00F44D` whose return address the chain sees (the low byte GPS com
 - The default table a fresh install writes: pages 0 and 1 act as themselves, pages 2 to
   `3F` as `$130` (cement); `$06F63A`-`$06F63C` is `$FF8000`, none. Solid matters: the
   boss arenas' floors are sampled with high bytes past 1.
+- In the Mode 7 boss battles (`$0D9B` bit 7: Reznor, Morton, Roy, Ludwig, Bowser) the
+  chain neither follows the table nor runs an action: the tile goes to `RemapBlocks` as
+  it was, so a floor sampled as `$3232` stays `$3232` whatever the table says (observed
+  with the player: `$0D9B` = `$C0` or `$80` passes tiles through, `$40` or `$00` follows
+  the table; a probe block in arena `095` logs nothing).
 - Kobo's implementation (`asm/lunar-magic/actslike.asm`) gives the same actions, at the
   same points, with the same `Y`, `$1693`, and `$03`, in every probe scenario: the
   player's, sprites', the cape's spin on both sides, and a fireball in the block (34
   scenarios, 2026-09-26); GPS 1.4.4 inserts into it unchanged. Yoshi's tongue (3.70) is
-  neither probed nor implemented.
+  neither probed nor implemented. `contact_probe stand` drops the player onto chosen
+  tiles, in any level and with RAM held at chosen values, and reports whether they land
+  and what `$1693` became, which needs no probe block.
+- With a hack's own tables: Kaizo Kindergarten, its levels, Map16, graphics, palette,
+  and ExAnimation transferred into a Lunar Magic-saved vanilla ROM with Lunar Magic's
+  command line, and the same ROM with Kobo's bank `$06` code swapped in and the table
+  pointers kept (`tools/lunar-magic/with-kobo`), render all 512 levels the same and
+  leave the same RAM after every load but `$0B`, a direct-page scratch byte that no code
+  reads before writing (2026-09-26).
+
+### Kobo's set against Lunar Magic's, after a save
+
+The acceptance check for the whole set: Kobo's install, saved by Lunar Magic (which adds
+its restorable hooks), against vanilla saved by Lunar Magic, both with level `105`
+re-imported from its own export; `render_hashes` and `ramdiff.py --summary` over all 512
+levels. With `map16.asm` and `actslike.asm` (2026-09-26): every picture and every level's
+data the same; RAM after load differs at `$0B` in 492 levels (the background upload's
+scratch: the `$058DA4` hook is not implemented yet), at `$1693` in the 18 boss arenas, and
+in level `105`'s data pointers (each save put the level elsewhere). Found on the way:
+
+- A fresh install's page table pointers, before any page has data, are bank `$00`:
+  `$00F000` for pages 2-`F` and for page 2 per tileset, `$008000` for `10`-`1F`, `30`-`3F`,
+  `50`-`5F`, and `70`-`7F`, `$000000` for `20`-`2F`, `40`-`4F`, and `60`-`6F`. Kobo writes
+  the same, so Lunar Magic finds no tables where there are none.
+- For a tile on pages `40` and up with no table (`$06F63A` = `$FF8000`), Lunar Magic's
+  chain reads through the pointer anyway, which wraps into work RAM near the stack: tile
+  `$40EC` came out solid and `$FFEC` not. The game reads such high bytes in the boss
+  arenas. Kobo's chain treats a tile past its tables as cement instead; the boss arenas'
+  `$1693` is the only trace.
 
 ### Taller levels (3.00, "ExLevel")
 

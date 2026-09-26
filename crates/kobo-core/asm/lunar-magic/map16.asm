@@ -8,9 +8,33 @@
 
 lorom
 
-; The per-tileset page 2 flag: off until a build writes such a page.
-org $06F547
-    db $00
+; The page tables' pointers, as a fresh Lunar Magic install writes them
+; before any page has data: bank $00, which Lunar Magic takes for none. A
+; tile's definition is at its group's pointer plus the tile number times 8,
+; kept to 16 bits: pages $02-$0F start $1000 bytes past their pointer, pages
+; $10-$1F $8000, and a pointer outside $8000-$FFFF is usual. The groups of
+; pages $20-$3F and $60-$7F keep their pointer less one.
+org $06F553 : dw $F000
+org $06F557 : db $00          ; pages $02-$0F
+org $06F55C : dw $8000
+org $06F560 : db $00          ; pages $10-$1F
+org $06F567 : dw $FFFF
+org $06F56B : db $00          ; pages $20-$2F
+org $06F570 : dw $7FFF
+org $06F574 : db $00          ; pages $30-$3F
+org $06F594 : dw $0000
+org $06F598 : db $00          ; pages $40-$4F
+org $06F59D : dw $8000
+org $06F5A1 : db $00          ; pages $50-$5F
+org $06F5A8 : dw $FFFF
+org $06F5AC : db $00          ; pages $60-$6F
+org $06F5B1 : dw $7FFF
+org $06F5B5 : db $00          ; pages $70-$7F
+
+; Page 2 per tileset: off, and its table none.
+org $06F547 : db $00
+org $06F586 : dw $F000
+org $06F58A : db $00
 
 ; Entry points.
 org $06F540
@@ -103,16 +127,14 @@ map16_find:
     LSR A
     LSR A
     TAX                       ; X = its group of 16 pages, times 2
-    LDA 1,s
-    SEC
-    SBC.l .first,x
+    LDA 1,s                   ; its offset from the pointer, 16 bits
     ASL A
     ASL A
     ASL A
     STA 1,s
     CPX #$0000
     BNE .table
-    CMP #$0800                ; page 2, with tables per tileset?
+    CMP #$1800                ; page 2, with tables per tileset?
     BCS .table
     LDA $F547
     AND #$00FF
@@ -124,10 +146,8 @@ map16_find:
     ASL A
     ASL A
     CLC
-    ADC #$1000
-    CLC
-    ADC 1,s
-    CLC
+    ADC 1,s                   ; $1000 past the pointer, as in the group's
+    CLC                       ; table, then $800 bytes a tileset
     ADC $F586
     STA 1,s
     LDA $F58A
@@ -153,10 +173,8 @@ map16_find:
     PLX
     RTS
 
-; Each group's first tile, and where its table's pointer and bank are.
-; Pages $20-$3F and $60-$7F keep the pointer less one.
-.first:
-    dw $0200, $1000, $2000, $3000, $4000, $5000, $6000, $7000
+; Where each group's table pointer and bank are. Pages $20-$3F and $60-$7F
+; keep the pointer less one.
 .pointer:
     dw $F553, $F55C, $F567, $F570, $F594, $F59D, $F5A8, $F5B1
 .bank:

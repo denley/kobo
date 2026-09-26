@@ -13,6 +13,8 @@
 ; through $06F602, which hands the tile to the game's RemapBlocks. Where
 ; GPS adds contacts of its own, a 4-byte slot at a fixed address is reached
 ; with A holding the low byte of the return address that tells the contact.
+; In the Mode 7 boss battles ($0D9B bit 7) a tile is neither followed nor
+; acted on: it goes to the game's RemapBlocks as it is.
 
 lorom
 
@@ -89,6 +91,8 @@ freecode
 ; interaction point's call to $00F44D pushed, below the JSL's and the
 ; JSR's in GetBlockAtTouchPos.
 player_contact:
+    BIT.w $0D9B
+    BMI chain_skip
     JSR follow_acts_like
     LDA 6,s
     CMP #$B1 : BEQ .body         ; interaction point 0, centre
@@ -119,6 +123,8 @@ player_contact:
 ; A sprite: the return address of the call into the sprite block check
 ; (CODE_019441) tells a side from above or below.
 sprite_contact:
+    BIT.w $0D9B
+    BMI chain_skip
     JSR follow_acts_like
     LDA 4,s
     CMP #$D2 : BEQ .vertical     ; CODE_0192C9
@@ -130,12 +136,20 @@ sprite_contact:
     JML $06F730
 
 cape_contact:
+    BIT.w $0D9B
+    BMI chain_skip
     JSR follow_acts_like
     JML $06F780
 
 fireball_contact:
+    BIT.w $0D9B
+    BMI chain_skip
     JSR follow_acts_like
     JML $06F7C0
+
+; A boss battle's tile, A its high byte, straight to the game.
+chain_skip:
+    JML $00F545
 
 ; Every action's end: the game's RemapBlocks, with A the reported high
 ; byte, returns to the call.
