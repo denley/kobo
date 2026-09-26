@@ -488,26 +488,80 @@ Magic-saved ROM and diffing (data only), and by following pointers to what chang
   entrances numbered in the other bank. Kaizo Kindergarten built by Kobo sends every exit
   where the hack does. Main entrances that use the per-level tables (`$05DE00`,
   `$06FC00`-`$06FFFF`) still start the player elsewhere: those tables are not carried yet.
-- Main entrance settings, observed by flipping each bit of a level's eight settings bytes
-  in a Lunar Magic-saved ROM and running its entry (examples/entry_probe.rs `effects`;
-  formats in the smwspeedruns level data format page):
+- Entrance settings, observed by running a Lunar Magic-saved ROM's entrance code with each
+  value of each settings byte (examples/entry_probe.rs: `effects` flips bits, `compare`
+  runs every value in two ROMs, `batch` chosen combinations, `levels` every level as it
+  stands; `KOBO_ENTRY_OW` enters from the overworld, `KOBO_ENTRY_MIDWAY` and
+  `KOBO_ENTRY_SECONDARY` vary the midway and secondary tables, `KOBO_ENTRY_FULL` runs the
+  whole level load; formats in the smwspeedruns level data format page). Positions are in
+  pixels, rows are 16 of them.
   - `$05DE00` `IWPXXtTT`: `I` and `W` add `$80` and `$40` to `$192A` (the entrance
-    action, which `$05F200` bits 5-3 set); `P` (position method 2) puts the player at the
-    tile the full bits give, Y = `$06FC00` bits 5-0 then `$05F000` bits 3-0 and X = `XX`
-    then `$05F200` bits 2-0, where method 1 takes them from the game's tables; `tTT` goes
-    to `$0BF4` (`t` as bit 7).
-  - `$06FE00` `RL-ooooo`: the whole byte is copied to `$13CD` (the value earlier notes
-    called unknown); `R` sets the layers' starting positions from the player instead of
-    `$05F400`'s `ff`/`bb`, with `$06FC00`'s `O` and `F` and `ooooo` giving offsets
-    (`$1C`-`$21`, `$1417`-`$1418`); without `R` those have no effect at entry.
-  - `$06FA00` `S`: separate layer 2 scroll settings (`$1413`-`$1414`).
-  - Lunar Magic's code for this runs from its restorable hook at `$05D97D` (into
-    `$05DD30`, which every save rewrites) and the hooks at `$05D9A1` and `$05DA17`.
+    action, which `$05F200` bits 5-3 set); the entrance setup at `$00A6CC` turns them into
+    `$86` = `$80` (slippery) and `$85` = 1 (water) and clears them. `P` (position method 2)
+    places the player by tile: in a horizontal level X = the screen's plus (`XX` bit 0,
+    `$05F200` bits 2-0) and Y = (`$06FC00` bits 5-0, `$05F000` bits 3-0); in a vertical
+    one X = (`XX`, `$05F200` bits 2-0) and Y = the screen's plus `$05F000` bits 3-0.
+    `tTT` goes to `$0BF4` (`t` as bit 7), for Lunar Magic's sprite loader.
+  - `$06FE00` `RL-ooooo`: the entrance used leaves its `R` and `L` over the level's
+    `ooooo` in `$13CD`, which the game kept the midway screen in; the midway tape records
+    the midway point on any screen (`$00F2DB`). `R` places layer 1 at the player's Y plus
+    the signed 5-bit offset `F:ff:bb` rows (`F` from `$06FC00` bit 6, `ff` and `bb` from
+    `$05F400`), not below 0. Layer 2 then: with `O` (`$06FC00` bit 7) at layer 1 plus the
+    signed `ooooo` rows, `$10` meaning 0 exactly; without, so that the background's last
+    row shows at the level's bottom: layer 2 = (`ooooo` + 1) × 16 − `$F0` + (layer 1 −
+    the level's bottom camera position) × the vertical scroll rate (0, 1, 1/2, 1/32 for
+    settings 0 to 3, the shifts arithmetic), the bottom being `$C0`, or in a vertical level
+    the top of its last screen. `$1417` is then layer 2 − layer 1 × the rate.
+  - `L` (face left) changes nothing a level load or a few frames of play leave, through a
+    screen exit or from the overworld, and neither does it with the slanted pipe action,
+    whose X speed Lunar Magic's code takes from `$F9`, which nothing observed sets. Kobo
+    keeps the bit and does nothing with it.
+  - `$06FA00` `SHCvvvvv`: `S` gives layer 2 separate horizontal (`hhhh`) and vertical
+    (`vvvvv`) scroll settings (`$1413`, `$1414`); `C` is the editor's.
+  - Vertical positioning (`$05F600` bit 5) leaves `$1412` clear when `R` is set, where the
+    game's sets it to 1 before the level's own setting replaces it; and vertical scrolling
+    at will (`$13F1`) starts off where layer 1 is at the level's bottom, where the game
+    compares `$1C` with `$C0`.
+  - Midway entrances (four tables through `read3(read3($05D9E4) + $0A)`: `IWHMXAAA`,
+    `yyyyxxxx`, `RLE-ffbb`, `-FYYYYYY`): with `H`, entering past the midway point uses
+    them, as the main entrance's are used, on the midway screen (`$05F400` bits 7-4 and
+    `M`); with `E` as well, the entrance is that of the level `$05FC00`'s table 2 and table
+    3 bit 0 name, whose settings are then read again. Without `H`, the game's midway
+    entrance, which in a vertical level Lunar Magic moves to Y's screen, with layers 1 and
+    2 on it. An exit with `w` and without `s` leads to the destination's midway entrance
+    when it has `H` and no `E`, else to its main entrance.
+  - Secondary entrances: `$05FE00` `IPXXDAAA` and the tables behind `$05DC86`
+    (`EFYYYYYY`) and `$05DC8B` (`RLW-----`): `I`, `P` with `XX` and `YYYYYY`, `R` with the
+    offset `F:bb:ff` (`$05FA00`'s high nibble), and `W` (`$40` in `$192A`), as the main
+    entrance's. `E` makes it an exit to the overworld, which the probe cannot follow and
+    Kobo does not build.
+  - Lunar Magic's code for this runs from its restorable hooks at `$05D97D` (into
+    `$05DD30`), `$05D9A1` (which also sets up its taller levels' RAM, so the two cannot be
+    swapped apart), `$05D9E3`, and `$05DA17`, and `$00A6CC` (into `$05DD00`).
+- Kobo's (`asm/lunar-magic/entrance.asm`, with `exits.asm`: `JSL`s at `$05DA17`, the
+  check, `$05D9E3`, whose target has its midway tables' address `$0A` bytes in, and
+  `$00A6CC`, and the midway tape's `BEQ` at `$00F2DB`) does all of this in one routine at
+  the end of the entrance code, where the game has set everything up for the entrance
+  used; `exits.asm` leaves it the secondary entrance's number and the exit's flags in
+  `$0BF6`-`$0BF8`. Checked with `entry_probe`: every value of every byte of Kaizo
+  Kindergarten's levels `101` and `105` (horizontal), `0AD` and `15B` (vertical), `001`,
+  `023`, `12A`, `1CE`, the midway tables, and secondary entrances `0C5`, `0D7`, `1BB`,
+  `1C0`, through a screen exit, from the overworld past the midway point, and through an
+  exit with `w`, leave the same RAM at the end of the entrance code as Lunar Magic's, but
+  for `L` and for layer 2 scroll settings 8 to 11 and `S` (Lunar Magic's added rates,
+  which need its camera code: builds refuse them); after the whole load, the same
+  player, camera, and entrance RAM but where other pieces of Lunar Magic's differ (its
+  camera's X start in vertical levels, layer 3 tides, the slanted pipe's speed). Kaizo
+  Kindergarten imported and built by Kobo enters every level the same way as the hack,
+  from each kind of entrance, but for a vertical level whose "No Yoshi" intro Lunar Magic
+  also moves the layers for (its 3.01 fix), and Lunar Magic saves the build keeping every
+  setting (2026-09-26).
 - `DATA_05D710`/`DATA_05D720` (layer 2 vertical and horizontal scroll by the high nibble
   of `$05F000`; data): entries 8-11 become vertical settings 4-7 with horizontal 2.
   Lunar Magic's added layer 2 scroll speeds (3.40) are handled in its scroll code.
 - `$05DD00`-`$05DD1C`: code, the target of the restorable hook at `$00A6CC` (the entrance
-  setup after `CODE_00A6CC`, which checks `$1C == $C0` for vertical scrolling).
+  setup after `CODE_00A6CC`, which checks `$1C == $C0` for vertical scrolling), where the
+  entrance's slippery and water flags are applied.
 - `$03BCDC`-`$03BCDF`: the first four bytes of the documented screen-number routine
   (`JSL $03BCDC`: 8-bit in and out, X = the screen Mario is on, A and Y and `$00` (16-bit)
   clobbered); a save restores the rest. UberASM Tool's and GPS's teleport routines call it
@@ -533,7 +587,12 @@ Initialised for all 512 levels; a save rewrites the saved level's entry (observe
 - `$05DE00`-`$05DFFF`: all `$00` (fifth secondary header byte, `IWPXXtTT`).
 - `$06FC00`-`$06FDFF`: all `$00` (`OFYYYYYY`); `$06FE00`-`$06FFFF`: all `$1A` (`RL-ooooo`,
   background height 27). `$06FA00` (`SHCvvvvv`, all `$20`: auto screen count) is written by
-  every save, not once.
+  every save, not once. Before 3.40 `$06FA00` is `$FF`; before 3.00 only `$05DE00` exists,
+  as `IWPYX---`.
+- The midway tables exist only once a separate midway entrance has been set (`$05D9E3`
+  stays the game's `LSR`s in a fresh install); the secondary entrances' two further tables
+  are made by the first save, 510 bytes each (entrances `1FE` and `1FF` read the next
+  block's tag).
 - `$0EF100`-`$0EF2FF`: sprite data banks, all `$07`. `$0EF300`-`$0EF30B`: code, the
   target of the restorable hook at `$05D8F5` (`LDA #$07 : STA $D0`), which takes the bank
   from here. `$0EF30C`-`$0EF30F` stay `$FF` for PIXI.

@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::addr::{PcAddr, SnesAddr};
+use crate::entrance::{self, EntranceSettings, LevelSettings};
 use crate::gfx;
 use crate::image::IndexedImage;
 use crate::level::objects::Object;
@@ -86,18 +87,27 @@ pub fn read_level(rom: &Rom, number: u16) -> Result<(Level, Vec<String>), Import
     let list = sprites::read_sprites_at(rom, level::sprite_ptr(rom, number)?)?;
     let vertical = header.level_mode.layer1_vertical();
     let format = LevelFormat::of(rom);
+    let layout = entrance::Layout::of(rom);
     let entrances = level::read_entrances(rom)?
         .into_iter()
         .zip(0..)
         .filter(|(bytes, id)| bytes.in_use(format) && bytes.destination(*id, format) == number)
         .map(|(bytes, id)| {
             let [_, fa, fc, fe] = bytes.0;
-            Entrance::from_bytes(id, [fa, fc, fe])
+            let settings = entrance::read_entrance_settings(rom, &layout, id, fe, vertical)?;
+            Ok(Entrance::from_bytes(id, [fa, fc, fe], settings))
         })
-        .collect();
+        .collect::<Result<Vec<_>, ImportError>>()?;
+    let mut secondary = level::read_secondary_header(rom, number)?;
+    // Lunar Magic 2's layer 2 scroll setting 8 is its 3's setting 3, as
+    // its MWL export rewrites it.
+    if layout.settings == Some(entrance::Version::Old) && secondary.layer2_scroll == 8 {
+        secondary.layer2_scroll = 3;
+    }
     let level = Level {
         header,
-        entrance: level::read_secondary_header(rom, number)?,
+        entrance: secondary,
+        settings: entrance::read_level_settings(rom, &layout, number, vertical)?,
         layer1: data.layer1.objects,
         layer2,
         sprites: Sprites::from_entries(list.header, &list.sprites, vertical),
@@ -629,6 +639,7 @@ pub fn diff_levels(a: &Rom, b: &Rom) -> Vec<LevelDiff> {
             (Ok(x), Ok(y)) => [
                 ("header", x.header != y.header),
                 ("entrance", x.entrance != y.entrance),
+                ("settings", x.settings != y.settings),
                 ("layer1", x.layer1 != y.layer1),
                 ("layer2", x.layer2 != y.layer2),
                 ("sprites", x.sprites != y.sprites),
@@ -694,21 +705,23 @@ pub fn level_from_mwl(mwl: &Mwl, clean: &Rom) -> Result<(Level, Vec<String>), Im
     if palette.as_ref().is_some_and(high_bits) {
         notes.push("its palette has colours with bit 15 set, which is not kept".into());
     }
-    let lunar = mwl
-        .entrances
-        .entries
-        .iter()
-        .filter(|e| e.lm != [0, 0])
-        .count();
-    if lunar > 0 {
-        notes.push(format!(
-            "{lunar} secondary entrances use Lunar Magic 3's settings, which are not imported yet"
-        ));
-    }
     let list = &mwl.sprites.list;
+    // Files from before Lunar Magic 3 have none of its per-level bytes.
+    let [fc, fe, _, fa] = match mwl.info.lm3 {
+        [0, 0, 0, 0] => {
+            let [_, fa, fc, fe] = entrance::DEFAULT_BYTES;
+            [fc, fe, 0, fa]
+        }
+        bytes => bytes,
+    };
+    let [m1, m2, m3, m4, _] = mwl.info.midway;
     let level = Level {
         header,
         entrance: mwl.info.secondary,
+        settings: LevelSettings::from_bytes(
+            [mwl.info.secondary_lm[0], fa, fc, fe],
+            [m1, m2, m3, m4],
+        ),
         layer1: mwl.layer1.data.objects.clone(),
         layer2,
         sprites: Sprites::from_entries(list.header, &list.sprites, mode.layer1_vertical()),
@@ -716,7 +729,9 @@ pub fn level_from_mwl(mwl: &Mwl, clean: &Rom) -> Result<(Level, Vec<String>), Im
             .entrances
             .entries
             .iter()
-            .map(|e| Entrance::from_bytes(e.id, e.tables))
+            .map(|e| {
+                Entrance::from_bytes(e.id, e.tables, EntranceSettings::from_bytes(e.tables, e.lm))
+            })
             .collect(),
         palette,
     };

@@ -12,7 +12,9 @@
 //! the placed objects (`22`, `23`, `27`, `29`), whose check is on Lunar
 //! Magic's own code, so its first save puts its own in their place; the
 //! level number (`$0EF550` occupied); and backgrounds and BG Map16 (a `JML`
-//! at `$0EF519`, a `JSL` at `$058DA4`); and custom palettes.
+//! at `$0EF519`, a `JSL` at `$058DA4`); custom palettes; screen exits in
+//! Lunar Magic's format; and the entrance settings, whose check is the
+//! `JSL` at `$05DA17`.
 
 use crate::asar::{Asar, AsarError, Patch, Patched};
 use crate::rom::Rom;
@@ -39,6 +41,10 @@ pub const LUNAR_MAGIC: &[(&str, &str)] = &[
         include_str!("../asm/lunar-magic/palette.asm"),
     ),
     ("exits.asm", include_str!("../asm/lunar-magic/exits.asm")),
+    (
+        "entrance.asm",
+        include_str!("../asm/lunar-magic/entrance.asm"),
+    ),
 ];
 
 /// Applies the Lunar Magic layout patches to a ROM.

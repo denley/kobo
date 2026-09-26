@@ -405,6 +405,76 @@ fn entrances_in_lunar_magic_format_build() {
 }
 
 #[test]
+fn lunar_magic_entrance_settings_build() {
+    let Some(clean) = common::vanilla() else {
+        return;
+    };
+    if common::asar().is_none() {
+        return;
+    }
+    use kobo_core::entrance::{MidwayEntrance, SeparateMidway};
+    use kobo_core::ram::RamAddr;
+    // Level 105's main entrance at tile (9, 22) of screen 1 with the
+    // layers relative to the player, 10 rows above it; a midway entrance
+    // of its own at tile (17, 20) of screen 2; and its secondary entrance
+    // made a water level at tile (3, 40).
+    let (mut level, _) = import::read_level(&clean, 0x105).unwrap();
+    level.entrance.entrance_screen = 1;
+    level.entrance.midway_screen = 2;
+    level.entrance.entrance_x = 1;
+    level.entrance.entrance_y = 6;
+    (level.entrance.fg_position, level.entrance.bg_position) = (1, 2);
+    level.settings.tile_position = Some((1, 1));
+    level.settings.relative = Some(true);
+    level.settings.midway.separate = Some(SeparateMidway::Entrance(MidwayEntrance {
+        slippery: false,
+        water: false,
+        action: 0,
+        x: 17,
+        y: 20,
+        fg_position: 3,
+        bg_position: 0,
+        relative: None,
+        face_left: false,
+    }));
+    let entrance = &mut level.entrances[0];
+    (entrance.x, entrance.y) = (3, 8);
+    entrance.settings.tile_position = Some((0, 2));
+    entrance.settings.water = true;
+    let id = entrance.id;
+    let text = level.to_toml(&Comments::default());
+    assert_eq!(Level::from_toml(&text).unwrap().0, level);
+    let project = Project {
+        root: std::path::PathBuf::from("."),
+        manifest: Default::default(),
+        levels: vec![(0x105, level.clone())],
+        map16: Vec::new(),
+        map16_bg: Vec::new(),
+        gfx: Vec::new(),
+    };
+    let built = build::build(&clean, &project).unwrap();
+    assert_eq!(import::read_level(&built, 0x105).unwrap().0, level);
+    let word = |ram: &kobo_core::ram::Ram, a: u32| ram.u16(RamAddr::new(0x7E_0000 | a));
+    let main = kobo_core::expand::enter_by_exit(&built, 0x05, 0x05, false, 1, |_| {}).unwrap();
+    assert_eq!((word(&main, 0x94), word(&main, 0x96)), (0x190, 0x160));
+    assert_eq!(word(&main, 0x1C), 0xC0);
+    // From the overworld with the midway point passed.
+    let midway = kobo_core::expand::enter_by_exit(&built, 0x05, 0x05, false, 1, |ram| {
+        ram.set_u8(kobo_core::ram::SUBLEVEL_COUNT, 0);
+        ram.set_u8(RamAddr::new(0x7E_0109), 0x05);
+        ram.set_u8(RamAddr::new(0x7E_13BF), 0x10);
+        ram.set_u8(RamAddr::new(0x7E_1EB2), 0x40);
+    })
+    .unwrap();
+    assert_eq!((word(&midway, 0x94), word(&midway, 0x96)), (0x210, 0x140));
+    let secondary =
+        kobo_core::expand::enter_by_exit(&built, id as u8, 0x06 | (id >> 8) as u8, true, 0, |_| {})
+            .unwrap();
+    assert_eq!(word(&secondary, 0x96), 0x280);
+    assert_eq!(secondary.u8(RamAddr::new(0x7E_192A)) & 0x40, 0x40);
+}
+
+#[test]
 fn cached_builds_equal_clean_ones() {
     let Some(clean) = common::vanilla() else {
         return;

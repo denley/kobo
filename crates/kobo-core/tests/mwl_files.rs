@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 use sha1::{Digest, Sha1};
 
+use kobo_core::entrance::{self, EntranceSettings, LevelSettings};
 use kobo_core::level::objects::{self, Layout, Object, ScreenExit};
 use kobo_core::level::{self, BACKGROUND_TILES, Layer2Data as Pointer, Layer2Kind, LevelFormat};
 use kobo_core::mwl::{self, Layer2Data, Mwl, MwlFile};
@@ -85,6 +86,8 @@ struct RomInfo<'a> {
     /// Lunar Magic moved the secondary entrance tables away from the
     /// game's, which Kobo does not follow.
     relocated_entrances: bool,
+    /// Where the ROM keeps Lunar Magic's entrance settings.
+    layout: entrance::Layout,
 }
 
 fn check_level(info: &RomInfo, file: &MwlFile, mwl: &Mwl, name: &str, counts: &mut Counts) {
@@ -262,6 +265,16 @@ fn check_level(info: &RomInfo, file: &MwlFile, mwl: &Mwl, name: &str, counts: &m
         }
     }
 
+    // Lunar Magic's per-level and midway settings, as Kobo reads them from
+    // the ROM and from the file.
+    let vertical = mode.layer1_vertical();
+    let ours = entrance::read_level_settings(rom, &info.layout, level, vertical).unwrap();
+    let [m1, m2, m3, m4, _] = mwl.info.midway;
+    let [fc, fe, _, fa] = mwl.info.lm3;
+    let theirs =
+        LevelSettings::from_bytes([mwl.info.secondary_lm[0], fa, fc, fe], [m1, m2, m3, m4]);
+    assert_eq!(ours, theirs, "{name}: Lunar Magic's settings");
+
     // Secondary entrances: each as the game's tables have it, and all of
     // those in use that lead here. Lunar Magic sets bit 3 of `$05FE00` to
     // bit 8 of the destination; the game takes it from the entrance's
@@ -294,6 +307,22 @@ fn check_level(info: &RomInfo, file: &MwlFile, mwl: &Mwl, name: &str, counts: &m
                 e.id
             );
             assert_eq!(e.unused, 0, "{name}");
+            // Lunar Magic's settings, as Kobo reads them from the ROM (in
+            // Lunar Magic 3's layout, whatever the version) and from the
+            // file. A fresh install's extra tables stop short of the last
+            // two entrances, where the file has the bytes after them.
+            if (e.id as usize) < entrance::tables::ENTRANCE_EXTRA_LEN {
+                let ours = entrance::read_entrance_settings(
+                    rom,
+                    &info.layout,
+                    e.id,
+                    entrance(3, e.id),
+                    mode.layer1_vertical(),
+                )
+                .unwrap();
+                let theirs = EntranceSettings::from_bytes(e.tables, e.lm);
+                assert_eq!(ours, theirs, "{name}: entrance {:03X} settings", e.id);
+            }
         }
         if level & 0xFF != 0 {
             let leads_here = |id: u16| {
@@ -432,6 +461,7 @@ fn exported_levels_match_their_rom() {
             relocated_entrances: levels
                 .iter()
                 .any(|(_, _, m)| m.entrances.entries.iter().any(|e| e.id >= 0x200)),
+            layout: entrance::Layout::of(&rom),
         };
         let mut counts = Counts::new();
         for (name, file, mwl) in &levels {

@@ -10,6 +10,7 @@ pub mod build;
 pub mod compress;
 pub mod config;
 pub mod cpu;
+pub mod entrance;
 pub mod expand;
 pub mod gfx;
 pub mod image;

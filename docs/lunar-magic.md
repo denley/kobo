@@ -228,7 +228,9 @@ Lunar Magic rewrites some things on export, which an import from the ROM will no
 - From a ROM before 3.00: layer 2 scroll setting 8 becomes 3; the Y bit of `$05DE00`
   (`IWPYX---`, bit 4) and of `$05FE00` (`IPYXDAAA`, bit 5, when `P` is set) moves to bit 0
   of `$06FC00` and of the entrance's first Lunar Magic 3 byte, except in vertical levels,
-  which keep it where it was; Lunar Magic 1.62's missing `$03FE00` (`$FF`) becomes 0; and
+  which keep it where it was; the midway entrance's Y bit (bit 3 of its first byte,
+  `IWHMYAAA`) likewise moves to bit 0 of its fourth, which before 3.00 does not exist, and
+  its third byte is kept whole; Lunar Magic 1.62's missing `$03FE00` (`$FF`) becomes 0; and
   Lunar Magic 2.41's ExAnimation comes out in the current format (Kaizo Mario World 3,
   seven levels).
 - Bit 3 of `$05FE00` is set to bit 8 of the destination.
@@ -236,13 +238,17 @@ Lunar Magic rewrites some things on export, which an import from the ROM will no
   `$FFDE54` whatever its own pointer is. A background stream shorter than its format
   (Kaizo Mario 2 level `1C7`, 743 bytes of 864) comes out with other tiles past its end.
 
+- The midway entrance bytes and a secondary entrance's two Lunar Magic 3 bytes are the
+  tables' at `read3(read3($05D9E4) + $0A)` (`kobo_core::entrance`) and
+  `read3($05DC86)`/`read3($05DC8B)`, converted as above for older versions: Kobo's
+  reading of the ROM gives every file's settings, in every corpus ROM
+  (`kobo_core::entrance::LevelSettings`, `EntranceSettings`).
+
 Not confirmed:
 
-- The midway entrance bytes, the level size byte, the entrance's two Lunar Magic 3 bytes,
-  and the ExGFX files were not compared with the ROM: the write-up locates their tables
-  through pointers in what Lunar Magic installs (`read3($05D9E4)+$0A`,
-  `read3(read3($05D9A2)+70)`, `read3($05DC86)`, `read3($0FF7FF)`), some of them surely
-  operands of its code, which Kobo does not read. Their layouts are the write-up's.
+- The level size byte and the ExGFX files were not compared with the ROM: the write-up
+  locates their tables through pointers in what Lunar Magic installs
+  (`read3(read3($05D9A2)+70)`, `read3($0FF7FF)`). Their layouts are the write-up's.
 - A ROM whose secondary entrance tables Lunar Magic moved (entrances past `$1FF`, Super
   Riff World 2) is not compared; the tables are behind such pointers too.
 - No flag bit but SMA2 is known, and no SMA2 file was seen; nor any file from another

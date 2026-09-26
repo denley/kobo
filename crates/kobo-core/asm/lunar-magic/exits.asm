@@ -7,9 +7,10 @@
 ;
 ; An exit's second byte is 0000wush: in Lunar Magic's format (u), h is the
 ; destination's bit 8, s makes it a secondary exit, and w makes the
-; secondary entrance a water level; in the game's, bit 0 is kept and bit 1
+; secondary entrance a water level, or without s leads to the destination's
+; midway entrance (entrance.asm); in the game's, bit 0 is kept and bit 1
 ; is the level's secondary flag. A secondary entrance's destination has its
-; bit 8 in bit 3 of its $05FE00 byte (IPYXDAAA). An exit in the game's
+; bit 8 in bit 3 of its $05FE00 byte (IPXXDAAA). An exit in the game's
 ; format keeps the game's rule, the destination's bit 8 from the player's
 ; submap.
 ;
@@ -36,19 +37,22 @@ org $05D836
 freecode
 
 ; A (8-bit) = the player's submap, X = the exit's screen. Returns A = the
-; destination's bit 8; leaves the exit's flags in $02 for entrance_type.
+; destination's bit 8; leaves the exit's flags in $02 for entrance_type and
+; in $0BF8 for entrance.asm (w without s leads to the midway entrance).
 exit_high:
     XBA                         ; the submap
     LDA $19D8,x
     BIT #$04
     BNE .lunar_magic
     STZ $02
+    STZ $0BF8
     XBA                         ; the game's format: the submap
     BEQ +
     LDA #$01
 +   RTL
 .lunar_magic:
     STA $02
+    STA $0BF8
     AND #$02
     LSR A
     STA $1B93                   ; secondary, by this exit
@@ -56,9 +60,11 @@ exit_high:
     AND #$01
     RTL
 
-; A (8-bit) = the entrance's $05FE00 byte. Sets $0F to its destination's
-; bit 8 and $192A to its action, with $40 for an exit's water bit.
+; A (8-bit) = the entrance's $05FE00 byte, Y (16-bit) its number. Sets $0F
+; to its destination's bit 8 and $192A to its action, with $40 for an exit's
+; water bit, and leaves the number in $0BF6 for entrance.asm.
 entrance_type:
+    STY $0BF6
     PHA
     LSR A
     LSR A
