@@ -187,6 +187,13 @@ impl Project {
         !self.map16.is_empty()
             || !self.map16_bg.is_empty()
             || self.manifest.gps.is_some()
+            || self.levels.iter().any(|(number, level)| {
+                level.entrances.iter().any(|e| e.id >> 8 != number >> 8)
+                    || level
+                        .layer1
+                        .iter()
+                        .any(|o| matches!(o, Object::ScreenExit(e) if e.flags & 0x04 != 0))
+            })
             || self.levels.iter().any(|(_, level)| {
                 level.layer1.iter().any(handled)
                     || level.palette.is_some()
@@ -927,9 +934,19 @@ fn write_entrances(rom: &mut Rom, project: &Project) -> Result<(), BuildError> {
     let format = level::LevelFormat::of(rom);
     let mut entrances = level::read_entrances(rom)?;
     let defined: Vec<u16> = project.levels.iter().map(|(n, _)| *n).collect();
+    // With the exit hook installed, every entrance keeps its destination's
+    // bit 8 in bit 3 of `$05FE00`, as Lunar Magic's first save sets them.
+    let from_clean = level::LevelFormat {
+        entrances: false,
+        ..format
+    };
     for (id, bytes) in (0..).zip(entrances.iter_mut()) {
-        if bytes.in_use(format) && defined.contains(&bytes.destination(id, format)) {
+        if bytes.in_use(from_clean) && defined.contains(&bytes.destination(id, from_clean)) {
             *bytes = level::EntranceBytes::default();
+        } else if format.entrances {
+            // Unused ones too, from `100` on, as Lunar Magic leaves them.
+            let high = bytes.destination(id, from_clean) >> 8 & 1;
+            bytes.0[3] = bytes.0[3] & !0x08 | (high as u8) << 3;
         }
     }
     let mut owner: Vec<Option<u16>> = vec![None; entrances.len()];
@@ -942,7 +959,7 @@ fn write_entrances(rom: &mut Rom, project: &Project) -> Result<(), BuildError> {
                     format!("entrance {:03X} is also level {other:03X}'s", entrance.id),
                 ));
             }
-            if entrance.id >> 8 != number >> 8 {
+            if !format.entrances && entrance.id >> 8 != number >> 8 {
                 return Err(level_error(
                     *number,
                     format!(
@@ -951,7 +968,10 @@ fn write_entrances(rom: &mut Rom, project: &Project) -> Result<(), BuildError> {
                     ),
                 ));
             }
-            let [fa, fc, fe] = entrance.to_bytes();
+            let [fa, fc, mut fe] = entrance.to_bytes();
+            if format.entrances {
+                fe = fe & !0x08 | ((number >> 8) as u8 & 1) << 3;
+            }
             entrances[id] = level::EntranceBytes([*number as u8, fa, fc, fe]);
         }
     }

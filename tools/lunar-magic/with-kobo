@@ -24,7 +24,8 @@ $K asm $A/actslike.asm $t/1b.sfc -r $t/1.sfc >/dev/null
 $K asm $A/objects.asm $t/1c.sfc -r $t/1b.sfc >/dev/null
 $K asm $A/level.asm $t/1d.sfc -r $t/1c.sfc >/dev/null
 $K asm $A/background.asm $t/1e.sfc -r $t/1d.sfc >/dev/null
-$K asm $A/palette.asm $t/2.sfc -r $t/1e.sfc >/dev/null
+$K asm $A/palette.asm $t/1f.sfc -r $t/1e.sfc >/dev/null
+$K asm $A/exits.asm $t/2.sfc -r $t/1f.sfc >/dev/null
 python3 - "$1" $t/2.sfc "$2" <<'PY'
 import sys
 def ld(p):

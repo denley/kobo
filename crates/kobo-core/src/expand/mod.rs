@@ -35,8 +35,8 @@ mod tiles;
 pub use diagnostics::{Diagnostic, Pass, summarize};
 pub(crate) use load::expand_controlled;
 pub use load::{
-    ENTRY_FRAME_COUNTER, ReadTrace, decompress_gfx_file, expand_level, expand_level_traced,
-    expand_level_with_control, play_level, resolve_map16,
+    ENTRY_FRAME_COUNTER, ReadTrace, decompress_gfx_file, enter_by_exit, expand_level,
+    expand_level_traced, expand_level_with_control, play_level, resolve_map16,
 };
 pub use loaded::LoadedLevel;
 pub use map16::{FG_PAGES, PAGE_TILES};

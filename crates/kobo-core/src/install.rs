@@ -38,6 +38,7 @@ pub const LUNAR_MAGIC: &[(&str, &str)] = &[
         "palette.asm",
         include_str!("../asm/lunar-magic/palette.asm"),
     ),
+    ("exits.asm", include_str!("../asm/lunar-magic/exits.asm")),
 ];
 
 /// Applies the Lunar Magic layout patches to a ROM.

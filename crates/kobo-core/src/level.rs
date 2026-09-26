@@ -48,6 +48,9 @@ pub mod tables {
     /// [`SPRITE_BANKS`] (`JSL` over the game's `LDA #$07 : STA $D0`): its
     /// own check for that table (docs/lunar-magic-install.md).
     pub const SPRITE_BANK_HOOK: SnesAddr = SnesAddr::new(0x05D8F5);
+    /// Lunar Magic's exit hook, over the game's `BEQ : LDA #$01` choosing
+    /// a destination's bit 8.
+    pub const EXIT_HOOK: SnesAddr = SnesAddr::new(0x05D7CE);
     /// Lunar Magic's background hook, which reads [`LEVEL_FLAGS`].
     pub const BACKGROUND_HOOK: SnesAddr = SnesAddr::new(0x05803B);
     /// Lunar Magic's per-level flags, `bbBBVFCT`: `V` a background in the
@@ -66,6 +69,10 @@ pub struct LevelFormat {
     /// Whether screen jumps carry a vertical part: only the loader
     /// Lunar Magic 3 installs reads one.
     pub jumps: Jumps,
+    /// Secondary entrances keep their destination's bit 8 in bit 3 of
+    /// `$05FE00`, which the exit hook at `$05D7CE` reads, Lunar Magic's or
+    /// Kobo's; the game's own code takes it from the entrance's number.
+    pub entrances: bool,
 }
 
 impl LevelFormat {
@@ -82,6 +89,7 @@ impl LevelFormat {
         Self {
             lunar_magic,
             jumps: if tall { Jumps::Tall } else { Jumps::Vanilla },
+            entrances: byte(tables::EXIT_HOOK) == Some(0x22),
         }
     }
 }
@@ -573,7 +581,7 @@ impl EntranceBytes {
     /// tables with the destination's high byte), or from bit 3 of
     /// `$05FE00` where Lunar Magic keeps it.
     pub fn destination(self, id: u16, format: LevelFormat) -> u16 {
-        let high = if format.lunar_magic {
+        let high = if format.entrances {
             (self.0[3] >> 3) as u16 & 1
         } else {
             id >> 8 & 1
@@ -586,7 +594,7 @@ impl EntranceBytes {
     /// entrance from `100` on, used or not, so that bit does not count.
     pub fn in_use(self, format: LevelFormat) -> bool {
         let mut bytes = self.0;
-        if format.lunar_magic {
+        if format.entrances {
             bytes[3] &= !0x08;
         }
         bytes != [0; 4]
