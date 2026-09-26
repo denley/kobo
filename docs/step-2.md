@@ -341,6 +341,20 @@ on the built ROM.
   builds whole, entrances included, and `kobo diff` finds every level the same as the
   hack's. Still to carry: the per-level tables (`$05DE00`, `$06FC00`, `$06FE00`), which
   hold main entrance and midway settings.
+- Remaining in 2b, each Lunar Magic runtime code reimplemented from observation, by the
+  method the pieces above used (a probe that runs the ROM's own code with chosen state,
+  then an A/B comparison with Kobo's code swapped in; `examples/*_probe.rs`,
+  `tools/lunar-magic/with-kobo`, `install-gate.py` for the save's checks):
+  - Per-level settings and taller levels together: `$05DE00`/`$06FA00`/`$06FC00`/`$06FE00`
+    (mapped bit by bit, docs/lunar-magic-install.md), separate midway entrances, and the
+    level size byte. Lunar Magic's `$05DA17` code, the per-level tables' check, also sets
+    what its taller levels piece leaves (`$5B` bit 7, `$0BE7`, the RAM tables from
+    `$0BF6`), so the two go in as one piece.
+  - The VRAM patch and the graphics loader (the group a save checks at `$00A5A2`), for
+    PIXI, ExGFX, 4bpp GFX, per-level graphics lists, and the graphics bypass objects `24`
+    and `25`. Kobo's goes at the group's own sites and leaves `$00A5A2` to Lunar Magic.
+  - The sprite loader (new sprite system, 255 sprites) and ExAnimation.
+  - The time limit bypass (`28`), and LC_LZ3 set before SA-1 Pack.
 - 2b then takes Lunar Magic-layout features one at a time, each through its source format,
   import from MWL and ROM, build, the Lunar Magic check, and the corpus check together, so
   neither direction anchors the format: Map16 pages 2 and up and background Map16, custom
