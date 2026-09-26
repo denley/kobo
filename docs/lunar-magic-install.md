@@ -62,7 +62,7 @@ not met is installed by the save, over whatever is at its sites, and its tables 
 | The game loop hook (`$008072`) | the restored group checked at `$00A5A2` |
 | Extended objects (`$0DA10F`) | a `JSL` at `$0583C7` (restored) |
 | The level number hook (`$05D8E2`) | `$0EF550`-`$0EF56B` not all `$FF` |
-| The background hook (`$05803B`) | Lunar Magic's own code at `$0EF510`: zeros there do not count, and which bytes it checks is not looked for, since matching them would copy its code |
+| The background hook (`$05803B`) and the level flags (`$0EF310`) | the byte at `$0EF519` is `$5C` (`JML`); `$00`, `$01`, `$80`, `$FE` do not count |
 
 - Hooks into the areas a save always rewrites (`$05D7CE` to `$05DC50`, `$05DBC2` to
   `$03BB00`, `$05DB5B`, `$04E5F1`) are pointed back at Lunar Magic's code by every save.
@@ -381,6 +381,34 @@ All assume 27 rows (`$1B0` bytes a screen).
   leaves the vanilla state in `$1BE6`-`$1DE7` (the layer VRAM buffers), `$0695`-`$06B6`
   (VRAM addresses and buffer pointers, inside `DynPaletteTable`), `$7F819F`, and nothing
   in `$7FBC00`/`$7FC300`.
+
+Observed (examples/bg_survey.rs over five hacks and a Lunar Magic-saved Kaizo Kindergarten,
+the hook's outputs as the ROM's code leaves them) and implemented by Kobo
+(`asm/lunar-magic/background.asm`, `level.asm`):
+
+- The `$058DA4` hook: `$0A`-`$0C` = pointer `n` of `$0EFD50`, where `n` is the flags' high
+  nibble for Lunar Magic's own format (`C`) and 0 for any other background (flags `08`,
+  `18`, `00`); `$05` = `$0200` with `F`, else `$01B0`. A background's tile numbers count
+  from its table's pointer. Lunar Magic's background code at `$0EF510` (which every save
+  writes) calls the routine at `$0EFD00`, the hook's target in its layout, with A 8-bit,
+  so Kobo's routine is reached there and keeps the caller's register sizes.
+- The `$05803B` hook: `$7FC00B` = the level's flags; `C` with `F` decodes the stream
+  (2048 bytes: low bytes of both halves, then high bytes) to `$7EB900`; `C` alone and `V`
+  decode 864 low bytes there, and every tile's high byte (`$7EBD00`) is the flags' high
+  nibble; neither is layer 2 objects. Kobo's decodes through the game's own decoder (from
+  `$058064`). The level number comes from `$010B`, which the `$05D8E2` hook sets before
+  the background load runs (`$010B` = level, `$00FE` = level + 1, Y = level * 2, A, X,
+  and Y 16-bit; Kobo's is at `$0EF550`, where Lunar Magic's layout has it).
+- A save rewrites `$0EF510`-`$0EF54F` with its own code and frees the RATS block that the
+  `JML` at `$0EF519` leads to (its own code's, in its layout). Kobo's `$05803B` jumps to
+  `$0EF510` as Lunar Magic's does, and its entry there has its `JML` at `$0EF519` to a block
+  holding only the background code, which Lunar Magic's replaces after a save.
+- BG Map16 tables, like the foreground's, end at the last tile used: Kaizo
+  Kindergarten's table 1 is `$950` bytes, page 0 and 42 tiles of page 1.
+- Kaizo Kindergarten's content through Kobo's code draws all 512 levels as through Lunar
+  Magic's; imported and built by Kobo, with its backgrounds and 16 BG Map16 pages, every
+  level resolves the same grid, background tilemap, Map16, and BG Map16 as the hack
+  (examples/tiles_diff.rs), before and after Lunar Magic saves the build (2026-09-26).
 
 ### Entrances, exits, and midway points
 

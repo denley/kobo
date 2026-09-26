@@ -283,6 +283,24 @@ pub mod pages {
         }
     }
 
+    /// 16 3-byte pointers to the BG Map16 tables, each tile 0 of its 16
+    /// pages; `$000000` for none. A fresh install has the game's table,
+    /// `$0D9100`, first.
+    pub const BG_TABLES: SnesAddr = SnesAddr::new(0x0EFD50);
+    /// Lunar Magic's hook in the background column upload that reads
+    /// [`BG_TABLES`]: a `JSL` when its BG Map16 piece is installed.
+    pub const BG_MAP16_HOOK: SnesAddr = SnesAddr::new(0x058DA4);
+
+    /// BG Map16 table `table`'s address, if it has one and the ROM has the
+    /// piece that reads them.
+    pub fn bg_table(rom: &Rom, table: u8) -> Result<Option<SnesAddr>, RomError> {
+        if rom.read_u8(BG_MAP16_HOOK)? != 0x22 {
+            return Ok(None);
+        }
+        let at = rom.read_u24(BG_TABLES.add(3 * table as u32))?;
+        Ok((at != 0).then_some(SnesAddr::new(at)))
+    }
+
     /// Whether the ROM has Lunar Magic's layout for pages past 1.
     pub fn installed(rom: &Rom) -> bool {
         rom.read_u8(INSTALLED).is_ok_and(|b| b != 0xFF)

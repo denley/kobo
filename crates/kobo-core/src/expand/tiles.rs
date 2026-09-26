@@ -168,6 +168,9 @@ pub struct LevelTiles {
     /// Vanilla has 0x200 definitions; Lunar Magic backgrounds can use
     /// higher indices. Empty when the level has no decoded background.
     pub bg_map16: Vec<Map16Tile>,
+    /// Where `bg_map16` starts, the address of background tile 0's
+    /// definition as the upload reads it.
+    pub bg_map16_at: Option<u32>,
     /// Layer 2 background tilemap planes, when the level uses a
     /// pre-built background instead of layer 2 objects. Raw tile numbers
     /// index `bg_map16`; `layer2_bg_tile` adds the legacy 0x200 display base.

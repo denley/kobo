@@ -96,9 +96,12 @@ pub(crate) fn expand_controlled(
         )
     };
     let lunar_magic = rom.lunar_magic_version().is_some();
-    let (bg_map16, layer2_screen_len) = match &expanded.layer2_tilemap {
-        Some(planes) => map16::read_bg_map16(&mut machine, planes)?,
-        None => (Vec::new(), SCREEN_LEN),
+    let (bg_map16, bg_map16_at, layer2_screen_len) = match &expanded.layer2_tilemap {
+        Some(planes) => {
+            let (tiles, at, len) = map16::read_bg_map16(&mut machine, planes)?;
+            (tiles, Some(at), len)
+        }
+        None => (Vec::new(), None, SCREEN_LEN),
     };
     // The uploads go through the Map16 routine in Lunar Magic's ROMs and
     // in Kobo's builds that install it, which have no marker.
@@ -127,6 +130,7 @@ pub(crate) fn expand_controlled(
         map16,
         pipe_map16,
         bg_map16,
+        bg_map16_at,
     };
     let level = LoadedLevel {
         tiles,

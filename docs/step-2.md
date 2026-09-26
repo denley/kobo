@@ -91,8 +91,12 @@ on the built ROM.
 - Map16 pages past 1 are one file per page, listed in the manifest's `[map16]` table like
   levels, one tile per line keyed by its number: what it acts like, and its four 8x8
   tiles in reading order as `"TTT P xyp"` (`source::map16`). A tile a file does not list
-  is empty and acts like `$130`, as a fresh Lunar Magic install has it. Import writes
-  every tile of a page, since Lunar Magic fills unused tiles with no one value.
+  is empty and acts like `$130`, as a fresh Lunar Magic install has it; import leaves
+  empty tiles out. BG Map16 pages are the same without `acts`, in `[map16_bg]`, page
+  `P` being page `P % 16` of table `P / 16`.
+- A background of the level's own is `[layer2]` `table`, `rows` (32 for Lunar Magic's own
+  format, 27 for the game's behind a full pointer), and `tiles`, one line per row of the
+  left half's 16 tiles then the right half's.
 - Round-trip fidelity is semantic: decoding, encoding, and decoding again gives the same
   objects in the same order, and the level renders the same. Kobo's encoder chooses its own
   new-screen bits and screen jumps.
@@ -314,6 +318,12 @@ on the built ROM.
   graphics bypasses (`24`, `25`, which Invictus and Super Dram World 2 use by the
   hundred), the time limit bypass (`28`), and long screen exits, which come with their
   features.
+- 2b progress, backgrounds and BG Map16: level files hold backgrounds, import reads Lunar
+  Magic's formats and BG Map16 tables, and builds write them with Kobo's level number,
+  background, and BG Map16 code, meeting Lunar Magic's checks so that its save keeps the
+  flags and tables. Kaizo Kindergarten built by Kobo resolves every level as the hack does,
+  before and after Lunar Magic saves the build; the pictures still need its graphics and
+  palettes. An import keeps the ROM's size when it is over the default.
 - 2b then takes Lunar Magic-layout features one at a time, each through its source format,
   import from MWL and ROM, build, the Lunar Magic check, and the corpus check together, so
   neither direction anchors the format: Map16 pages 2 and up and background Map16, custom

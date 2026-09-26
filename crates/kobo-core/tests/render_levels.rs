@@ -42,6 +42,7 @@ fn scene() -> (LoadedLevel, LayerTiles, Palette) {
         map16: HashMap::from([(0, solid_tile(0)), (0x200, solid_tile(1))]),
         pipe_map16: None,
         bg_map16: vec![solid_tile(2); BG_TILE_COUNT],
+        bg_map16_at: None,
         layer2_tilemap: Some((vec![0; LAYER2_TILEMAP_LEN], vec![0; LAYER2_TILEMAP_LEN])),
         layer2_screen_len: SCREEN_COLS * SCREEN_ROWS,
     };

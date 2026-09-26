@@ -14,7 +14,7 @@ use kobo_core::build::{self, Project};
 use kobo_core::import;
 use kobo_core::level::{self, tables};
 use kobo_core::render::{self, RenderOptions};
-use kobo_core::source::level::{Comments, Level};
+use kobo_core::source::level::{Comments, Layer2, Level};
 use kobo_core::{Rom, SnesAddr};
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -112,6 +112,7 @@ fn an_empty_project_builds_the_clean_rom() {
         manifest: Default::default(),
         levels: Vec::new(),
         map16: Vec::new(),
+        map16_bg: Vec::new(),
     };
     assert_eq!(build::build(&clean, &project).unwrap().data(), clean.data());
 }
@@ -131,6 +132,7 @@ fn edits_reach_the_rom() {
         manifest: Default::default(),
         levels: vec![(0x105, level.clone())],
         map16: Vec::new(),
+        map16_bg: Vec::new(),
     };
     let built = build::build(&clean, &project).unwrap();
     assert_eq!(import::read_level(&built, 0x105).unwrap().0, level);
@@ -179,6 +181,7 @@ fn lunar_magic_objects_build() {
         manifest: Default::default(),
         levels: vec![(0x105, level.clone())],
         map16: Vec::new(),
+        map16_bg: Vec::new(),
     };
     let built = build::build(&clean, &project).unwrap();
     assert_eq!(import::read_level(&built, 0x105).unwrap().0, level);
@@ -216,6 +219,70 @@ fn lunar_magic_objects_build() {
 }
 
 #[test]
+fn lunar_magic_backgrounds_build() {
+    let Some(clean) = common::vanilla() else {
+        return;
+    };
+    if common::asar().is_none() {
+        return;
+    }
+    use kobo_core::source::level::{BACKGROUND_ROWS, BackgroundTiles};
+    let (level, _) = import::read_level(&clean, 0x105).unwrap();
+    // Tiles from the game's BG Map16, made up from their place.
+    let tile = |i: usize| ((i * 7) % 0x200) as u16;
+    for rows in [32, 27] {
+        let high = |i: usize| {
+            if rows == 27 {
+                0x100 | tile(i) & 0xFF
+            } else {
+                tile(i)
+            }
+        };
+        let tiles: Vec<u16> = (0..BACKGROUND_ROWS * 32)
+            .map(|i| if i / 32 < rows { high(i) } else { 0 })
+            .collect();
+        let mut level = level.clone();
+        level.layer2 = Layer2::Background(BackgroundTiles {
+            table: 0,
+            rows,
+            tiles: tiles.clone(),
+        });
+        let project = Project {
+            root: std::path::PathBuf::from("."),
+            manifest: Default::default(),
+            levels: vec![(0x105, level.clone())],
+            map16: Vec::new(),
+            map16_bg: Vec::new(),
+        };
+        let built = build::build(&clean, &project).unwrap();
+        assert_eq!(
+            import::read_level(&built, 0x105).unwrap().0,
+            level,
+            "{rows} rows"
+        );
+        let loaded = kobo_core::expand::expand_level(&built, 0x105)
+            .unwrap()
+            .tiles;
+        let (low, high_plane) = loaded.layer2_tilemap.clone().unwrap();
+        let screen = loaded.layer2_screen_len;
+        assert_eq!(screen, if rows == 32 { 0x200 } else { 0x1B0 });
+        for row in 0..rows {
+            for half in 0..2 {
+                for col in 0..16 {
+                    let at = half * screen + row * 16 + col;
+                    let got = u16::from_le_bytes([low[at], high_plane[at]]);
+                    assert_eq!(
+                        got,
+                        tiles[row * 32 + half * 16 + col],
+                        "{rows} rows: {row},{half},{col}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn cached_builds_equal_clean_ones() {
     let Some(clean) = common::vanilla() else {
         return;
@@ -228,6 +295,7 @@ fn cached_builds_equal_clean_ones() {
         manifest: Default::default(),
         levels: vec![(0x105, level)],
         map16: Vec::new(),
+        map16_bg: Vec::new(),
     };
     let uncached = build::build(&clean, &project).unwrap();
     let cold = build::build_cached(&clean, &project, Some(&cache)).unwrap();
@@ -266,6 +334,7 @@ fn a_synthetic_build_is_the_same_everywhere() {
         manifest: Default::default(),
         levels: vec![(0x105, level.clone()), (0x0C7, level)],
         map16: Vec::new(),
+        map16_bg: Vec::new(),
     };
     let built = build::build_on(&base, &project, None).unwrap();
     assert_eq!(

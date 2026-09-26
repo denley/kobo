@@ -52,6 +52,7 @@ fn patches_apply_early_and_late_in_order() {
         },
         levels: Vec::new(),
         map16: Vec::new(),
+        map16_bg: Vec::new(),
     };
     let built = build::build_on(&base, &project, None).unwrap();
     // The late patch wrote over the early one's second byte.
@@ -110,6 +111,7 @@ fn addmusick_inserts_the_music() {
         },
         levels: Vec::new(),
         map16: Vec::new(),
+        map16_bg: Vec::new(),
     };
     let built = build::build(&clean, &project).unwrap();
     assert_eq!(built.read(SnesAddr::new(0x0E8000), 4).unwrap(), b"@AMK");
@@ -193,6 +195,7 @@ fn uberasm_inserts_level_code() {
         },
         levels: Vec::new(),
         map16: Vec::new(),
+        map16_bg: Vec::new(),
     };
     let built = build::build(&clean, &project).unwrap();
     let base = build::base_image(&clean, &project.manifest).unwrap();

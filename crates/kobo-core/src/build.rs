@@ -25,6 +25,7 @@ use thiserror::Error;
 
 use crate::addr::SnesAddr;
 use crate::asar::{Asar, AsarError, Patch};
+use crate::compress::rle1;
 use crate::config::{self, ConfigError};
 use crate::install;
 use crate::level::objects::{self, Jumps, Layout, Object, ObjectError};
@@ -33,8 +34,8 @@ use crate::map16::pages as map16_pages;
 use crate::rats::{Contents, FreeSpace, FreeSpaceError};
 use crate::rom::{Rom, RomError, RomIdentity};
 use crate::source::SourceError;
-use crate::source::level::{Layer2, Level};
-use crate::source::map16::{self as page_source, Map16Page};
+use crate::source::level::{BACKGROUND_ROWS, BackgroundTiles, Layer2, Level};
+use crate::source::map16::{self as page_source, Map16Page, PageKind};
 use crate::source::project::{MANIFEST, Manifest};
 use crate::sprites::{self, SpriteEncodeError};
 use crate::tools::{self, ToolError};
@@ -113,6 +114,8 @@ pub struct Project {
     pub levels: Vec<(u16, Level)>,
     /// Map16 pages 2 to `$7F`.
     pub map16: Vec<(u8, Map16Page)>,
+    /// BG Map16 pages, `$00` to `$FF` (table * 16 + page).
+    pub map16_bg: Vec<(u8, Map16Page)>,
 }
 
 impl Project {
@@ -134,29 +137,38 @@ impl Project {
                 .map_err(|source| BuildError::Source { path, source })?;
             levels.push((number, level));
         }
-        let mut map16 = Vec::new();
-        for (&page, file) in &manifest.map16 {
-            let path = dir.join(file);
-            let (tiles, _) = Map16Page::from_toml(page, &read(path.clone())?)
-                .map_err(|source| BuildError::Source { path, source })?;
-            map16.push((page, tiles));
-        }
+        let pages = |list: &std::collections::BTreeMap<u8, PathBuf>, kind| {
+            let mut out = Vec::new();
+            for (&page, file) in list {
+                let path = dir.join(file);
+                let (tiles, _) = Map16Page::from_toml(kind, page, &read(path.clone())?)
+                    .map_err(|source| BuildError::Source { path, source })?;
+                out.push((page, tiles));
+            }
+            Ok::<_, BuildError>(out)
+        };
+        let map16 = pages(&manifest.map16, PageKind::Foreground)?;
+        let map16_bg = pages(&manifest.map16_bg, PageKind::Background)?;
         Ok(Self {
             root: dir.to_path_buf(),
             manifest,
             levels,
             map16,
+            map16_bg,
         })
     }
 
     /// Whether the project has anything only Lunar Magic's layout holds,
     /// which needs Kobo's code for it installed: Map16 pages past 1, or
-    /// Lunar Magic's objects in a level.
+    /// Lunar Magic's objects or a background of its own in a level.
     pub fn lunar_magic_layout(&self) -> bool {
-        !self.map16.is_empty() || self.levels.iter().any(|(_, level)| {
-            level.layer1.iter().any(places_tiles)
-                || matches!(&level.layer2, Layer2::Objects(list) if list.iter().any(places_tiles))
-        })
+        !self.map16.is_empty()
+            || !self.map16_bg.is_empty()
+            || self.levels.iter().any(|(_, level)| {
+                level.layer1.iter().any(handled)
+                    || matches!(&level.layer2, Layer2::Background(_))
+                    || matches!(&level.layer2, Layer2::Objects(list) if list.iter().any(handled))
+            })
     }
 }
 
@@ -253,9 +265,20 @@ impl Stage {
             }
             Stage::Map16 => {
                 let mut bytes = Vec::new();
-                for (page, tiles) in &project.map16 {
+                for (kind, page, tiles) in project
+                    .map16
+                    .iter()
+                    .map(|(p, t)| (PageKind::Foreground, p, t))
+                    .chain(
+                        project
+                            .map16_bg
+                            .iter()
+                            .map(|(p, t)| (PageKind::Background, p, t)),
+                    )
+                {
                     bytes.push(*page);
-                    let text = tiles.to_toml(&Default::default());
+                    bytes.push(kind as u8);
+                    let text = tiles.to_toml(kind, &Default::default());
                     bytes.extend((text.len() as u64).to_le_bytes());
                     bytes.extend(text.as_bytes());
                 }
@@ -325,7 +348,10 @@ impl Stage {
                         .map_err(|e| BuildError::Asar(Box::new(e)))?;
                 }
             }
-            Stage::Map16 => write_map16(rom, project)?,
+            Stage::Map16 => {
+                write_map16(rom, project)?;
+                write_map16_bg(rom, clean, project)?;
+            }
             Stage::EarlyPatches | Stage::LatePatches => {
                 let patches = self.patches(project);
                 if patches.is_empty() {
@@ -487,6 +513,7 @@ pub fn base_image(clean: &Rom, manifest: &Manifest) -> Result<Rom, BuildError> {
         manifest: manifest.clone(),
         levels: Vec::new(),
         map16: Vec::new(),
+        map16_bg: Vec::new(),
     };
     let mut rom = Rom::from_bytes(clean.data().to_vec())?;
     Stage::Base.run(&mut rom, clean, &project)?;
@@ -596,6 +623,45 @@ fn write_map16(rom: &mut Rom, project: &Project) -> Result<(), BuildError> {
     Ok(())
 }
 
+/// Writes the project's BG Map16 pages into a table of their own, all 16
+/// pages, for each BG Map16 table they are in, and points `$0EFD50` at
+/// them. Pages 0 and 1 of the first table keep the game's tiles unless the
+/// project lists them; any other page it does not list is empty, as Lunar
+/// Magic leaves a table's unused pages.
+fn write_map16_bg(rom: &mut Rom, clean: &Rom, project: &Project) -> Result<(), BuildError> {
+    if project.map16_bg.is_empty() {
+        return Ok(());
+    }
+    let mut space = FreeSpace::scan(rom);
+    let pages: std::collections::BTreeMap<u8, &Map16Page> =
+        project.map16_bg.iter().map(|(n, p)| (*n, p)).collect();
+    for table in 0..16u8 {
+        if !pages.keys().any(|&p| p >> 4 == table) {
+            continue;
+        }
+        let mut bytes = Vec::with_capacity(16 * 0x800);
+        for page in 0..16 {
+            let number = table * 16 + page;
+            match pages.get(&number) {
+                Some(tiles) => {
+                    let first = number as u16 * page_source::PAGE_TILES;
+                    for tile in first..first + page_source::PAGE_TILES {
+                        bytes.extend(tiles.tile(tile).gfx.to_bytes());
+                    }
+                }
+                None if table == 0 && page < 2 => {
+                    let at = crate::map16::tables::MAP16_BG_TILES.add(page as u32 * 0x800);
+                    bytes.extend_from_slice(clean.read(at, 0x800)?);
+                }
+                None => bytes.extend([0; 0x800]),
+            }
+        }
+        let at = place(rom, &mut space, &bytes)?;
+        rom.write_u24(map16_pages::BG_TABLES.add(3 * table as u32), at.raw())?;
+    }
+    Ok(())
+}
+
 /// First-fit placement in [`BANK_07_FREE`].
 struct Bank07 {
     free: Vec<(u32, u32)>,
@@ -681,6 +747,13 @@ fn write_level(
             }
             rom.write_ptr(layer2_ptr, SnesAddr::from_bank_offset(0xFF, addr.offset()))?;
         }
+        Layer2::Background(bg) => {
+            let (data, flags) = background_stream(bg).map_err(|e| err(&format_args!("{e}")))?;
+            let stream = rle1::compress(&data).map_err(|e| err(&format_args!("{e}")))?;
+            let at = place(rom, space, &stream)?;
+            rom.write_ptr(layer2_ptr, at)?;
+            rom.write_u8(tables::LEVEL_FLAGS.add(number as u32), flags)?;
+        }
     }
 
     for (table, byte) in tables::SECONDARY_HEADERS
@@ -754,6 +827,34 @@ fn write_entrances(rom: &mut Rom, project: &Project) -> Result<(), BuildError> {
         rom.write(*table, &column)?;
     }
     Ok(())
+}
+
+/// A background as its stream holds it, and the level flags that say
+/// how: 32 rows in Lunar Magic's own format (`C` and `F`, the table in the
+/// high nibble), low bytes then high bytes, each two halves of 32 rows of
+/// 16; 27 rows in the game's format behind a full pointer (`V`, the tiles'
+/// one high byte in the high nibble), low bytes, two halves of 27 rows.
+fn background_stream(bg: &BackgroundTiles) -> Result<(Vec<u8>, u8), String> {
+    let rows = bg.rows;
+    let tile = |half: usize, row: usize, col: usize| bg.tiles[row * 32 + half * 16 + col];
+    let cells = || {
+        (0..2).flat_map(move |half| {
+            (0..rows).flat_map(move |row| (0..16).map(move |col| (half, row, col)))
+        })
+    };
+    if rows == BACKGROUND_ROWS {
+        let low = cells().map(|(h, r, c)| tile(h, r, c) as u8);
+        let high = cells().map(|(h, r, c)| (tile(h, r, c) >> 8) as u8);
+        return Ok((low.chain(high).collect(), bg.table << 4 | 0x06));
+    }
+    let high = tile(0, 0, 0) >> 8;
+    if bg.table != 0 || high > 0xF || cells().any(|(h, r, c)| tile(h, r, c) >> 8 != high) {
+        return Err(format!(
+            "a {rows}-row background has table 0 and one high byte, 0 to F, for all its tiles"
+        ));
+    }
+    let low = cells().map(|(h, r, c)| tile(h, r, c) as u8).collect();
+    Ok((low, 0x08 | (high as u8) << 4))
 }
 
 /// Lunar Magic's objects that place tiles (`22`, `23`, `27`, `29`), which

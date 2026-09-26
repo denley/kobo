@@ -112,7 +112,26 @@ pub enum Layer2 {
     Objects(Vec<Object>),
     /// A background tilemap already in the clean ROM, by address.
     VanillaBackground(SnesAddr),
+    /// A background of the level's own, in Lunar Magic's layout.
+    Background(BackgroundTiles),
 }
+
+/// A background's tiles: two halves of 16 columns side by side, as
+/// [`BACKGROUND_ROWS`] rows of 32 tiles, each the left half's row then the
+/// right half's.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct BackgroundTiles {
+    /// The BG Map16 table its tile numbers are in, 0 to 15.
+    pub table: u8,
+    /// 32 rows, Lunar Magic's own format; or 27, the game's, whose tiles
+    /// all share one high byte and whose table is 0.
+    pub rows: usize,
+    /// `BACKGROUND_ROWS * 32` tiles; past `rows` rows they are 0.
+    pub tiles: Vec<u16>,
+}
+
+/// Rows a background's tiles are written as.
+pub const BACKGROUND_ROWS: usize = 32;
 
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct Sprites {
@@ -275,6 +294,23 @@ impl Level {
                 out += "\n[layer2]\n";
                 out += &format!("background = {}\n", hex(addr.raw(), 6));
             }
+            Layer2::Background(bg) => {
+                out += "\n[layer2]\n";
+                out += &format!("table = {}\n", hex(bg.table as u32, 1));
+                out += &format!("rows = {}\n", bg.rows);
+                let digits = if bg.tiles.iter().any(|&t| t > 0xFFF) {
+                    4
+                } else {
+                    3
+                };
+                out += "tiles = \"\"\"\n";
+                for row in bg.tiles.chunks(32).take(bg.rows) {
+                    let cells: Vec<String> = row.iter().map(|t| format!("{t:0digits$X}")).collect();
+                    out += &cells.join(" ");
+                    out += "\n";
+                }
+                out += "\"\"\"\n";
+            }
         }
 
         let s = &self.sprites;
@@ -339,20 +375,33 @@ impl Level {
                 let t = item
                     .as_table()
                     .ok_or_else(|| invalid("layer2", "must be a table"))?;
-                check_keys(t, "layer2", &["objects", "background"])?;
-                match (t.get("objects"), t.get("background")) {
-                    (Some(_), None) => Layer2::Objects(read_list(
-                        t,
-                        "objects",
-                        "layer2",
-                        &mut comments,
-                        read_object,
-                    )?),
-                    (None, Some(bg)) => {
-                        let addr = int(bg, "layer2.background", 0xFF_FFFF)?;
-                        Layer2::VanillaBackground(SnesAddr::new(addr))
+                check_keys(
+                    t,
+                    "layer2",
+                    &["objects", "background", "table", "rows", "tiles"],
+                )?;
+                if t.contains_key("tiles") {
+                    Layer2::Background(read_background(t)?)
+                } else {
+                    match (t.get("objects"), t.get("background")) {
+                        (Some(_), None) => Layer2::Objects(read_list(
+                            t,
+                            "objects",
+                            "layer2",
+                            &mut comments,
+                            read_object,
+                        )?),
+                        (None, Some(bg)) => {
+                            let addr = int(bg, "layer2.background", 0xFF_FFFF)?;
+                            Layer2::VanillaBackground(SnesAddr::new(addr))
+                        }
+                        _ => {
+                            return Err(invalid(
+                                "layer2",
+                                "needs one of `objects`, `background`, and `tiles`",
+                            ));
+                        }
                     }
-                    _ => return Err(invalid("layer2", "needs one of `objects` and `background`")),
                 }
             }
         };
@@ -526,6 +575,49 @@ fn table<'a>(doc: &'a DocumentMut, key: &str) -> Result<&'a Table, SourceError> 
         .ok_or_else(|| invalid(key, "is missing"))?
         .as_table()
         .ok_or_else(|| invalid(key, "must be a table"))
+}
+
+fn read_background(t: &Table) -> Result<BackgroundTiles, SourceError> {
+    let table = t
+        .get("table")
+        .map(|v| int(v, "layer2.table", 15))
+        .transpose()?
+        .unwrap_or(0) as u8;
+    let rows = t
+        .get("rows")
+        .map(|v| int(v, "layer2.rows", 32))
+        .transpose()?
+        .unwrap_or(32) as usize;
+    if rows != 27 && rows != 32 {
+        return Err(invalid("layer2.rows", "a background has 27 rows or 32"));
+    }
+    let text = t
+        .get("tiles")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| invalid("layer2.tiles", "must be a string of rows of tiles"))?;
+    let mut tiles = Vec::with_capacity(BACKGROUND_ROWS * 32);
+    for (i, line) in text.lines().filter(|l| !l.trim().is_empty()).enumerate() {
+        let at = format!("layer2.tiles row {i}");
+        let row: Vec<u16> = line
+            .split_whitespace()
+            .map(|cell| {
+                u16::from_str_radix(cell, 16)
+                    .map_err(|_| invalid(&at, format!("{cell:?} is not a tile number")))
+            })
+            .collect::<Result<_, _>>()?;
+        if row.len() != 32 {
+            return Err(invalid(&at, format!("has {} tiles, not 32", row.len())));
+        }
+        tiles.extend(row);
+    }
+    if tiles.len() != rows * 32 {
+        return Err(invalid(
+            "layer2.tiles",
+            format!("has {} rows, not {rows}", tiles.len() / 32),
+        ));
+    }
+    tiles.resize(BACKGROUND_ROWS * 32, 0);
+    Ok(BackgroundTiles { table, rows, tiles })
 }
 
 fn check_keys<'a>(

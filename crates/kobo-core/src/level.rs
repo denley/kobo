@@ -48,6 +48,8 @@ pub mod tables {
     /// [`SPRITE_BANKS`] (`JSL` over the game's `LDA #$07 : STA $D0`): its
     /// own check for that table (docs/lunar-magic-install.md).
     pub const SPRITE_BANK_HOOK: SnesAddr = SnesAddr::new(0x05D8F5);
+    /// Lunar Magic's background hook, which reads [`LEVEL_FLAGS`].
+    pub const BACKGROUND_HOOK: SnesAddr = SnesAddr::new(0x05803B);
     /// Lunar Magic's per-level flags, `bbBBVFCT`: `V` a background in the
     /// game's format, `C` Lunar Magic's own, `F` with high bytes.
     pub const LEVEL_FLAGS: SnesAddr = SnesAddr::new(0x0EF310);
@@ -447,6 +449,13 @@ impl Background {
     }
 }
 
+/// Whether the ROM has Lunar Magic's per-level flags
+/// ([`tables::LEVEL_FLAGS`]): its background hook, a `JML` over the game's
+/// `CMP #$FF : BNE` at `$05803B`, reads them, Lunar Magic's or Kobo's.
+pub fn has_level_flags(rom: &Rom) -> bool {
+    rom.read_u8(tables::BACKGROUND_HOOK).ok() == Some(0x5C)
+}
+
 /// Reads and decompresses a level's background tilemap, if its level
 /// mode has one.
 pub fn read_background(rom: &Rom, level: u16) -> Result<Option<Background>, LevelError> {
@@ -469,8 +478,7 @@ pub fn read_background_at(
     };
     let unpacked = rle1::decompress(rom.read_tail(address)?)
         .map_err(|source| LevelError::Background { level, source })?;
-    let flags = LevelFormat::of(rom)
-        .lunar_magic
+    let flags = has_level_flags(rom)
         .then(|| rom.read_u8(tables::LEVEL_FLAGS.add(level as u32)))
         .transpose()?;
     Ok(Background {
