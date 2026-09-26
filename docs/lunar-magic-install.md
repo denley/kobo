@@ -488,6 +488,21 @@ Magic-saved ROM and diffing (data only), and by following pointers to what chang
   entrances numbered in the other bank. Kaizo Kindergarten built by Kobo sends every exit
   where the hack does. Main entrances that use the per-level tables (`$05DE00`,
   `$06FC00`-`$06FFFF`) still start the player elsewhere: those tables are not carried yet.
+- Main entrance settings, observed by flipping each bit of a level's eight settings bytes
+  in a Lunar Magic-saved ROM and running its entry (examples/entry_probe.rs `effects`;
+  formats in the smwspeedruns level data format page):
+  - `$05DE00` `IWPXXtTT`: `I` and `W` add `$80` and `$40` to `$192A` (the entrance
+    action, which `$05F200` bits 5-3 set); `P` (position method 2) puts the player at the
+    tile the full bits give, Y = `$06FC00` bits 5-0 then `$05F000` bits 3-0 and X = `XX`
+    then `$05F200` bits 2-0, where method 1 takes them from the game's tables; `tTT` goes
+    to `$0BF4` (`t` as bit 7).
+  - `$06FE00` `RL-ooooo`: the whole byte is copied to `$13CD` (the value earlier notes
+    called unknown); `R` sets the layers' starting positions from the player instead of
+    `$05F400`'s `ff`/`bb`, with `$06FC00`'s `O` and `F` and `ooooo` giving offsets
+    (`$1C`-`$21`, `$1417`-`$1418`); without `R` those have no effect at entry.
+  - `$06FA00` `S`: separate layer 2 scroll settings (`$1413`-`$1414`).
+  - Lunar Magic's code for this runs from its restorable hook at `$05D97D` (into
+    `$05DD30`, which every save rewrites) and the hooks at `$05D9A1` and `$05DA17`.
 - `DATA_05D710`/`DATA_05D720` (layer 2 vertical and horizontal scroll by the high nibble
   of `$05F000`; data): entries 8-11 become vertical settings 4-7 with horizontal 2.
   Lunar Magic's added layer 2 scroll speeds (3.40) are handled in its scroll code.
