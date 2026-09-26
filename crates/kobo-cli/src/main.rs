@@ -86,6 +86,10 @@ enum Command {
         /// Output ROM path.
         #[arg(long, short = 'o', default_value = "build.sfc")]
         out: PathBuf,
+        /// Also write the build as a BPS patch against the clean ROM
+        /// (headerless), for distribution.
+        #[arg(long)]
+        bps: Option<PathBuf>,
         /// Run every stage, without reading or keeping snapshots.
         #[arg(long)]
         no_cache: bool,
@@ -541,9 +545,10 @@ fn main() -> Result<()> {
         Command::Build {
             dir,
             out,
+            bps,
             no_cache,
             rom,
-        } => build(&dir, &out, no_cache, &rom.load()?),
+        } => build(&dir, &out, bps.as_deref(), no_cache, &rom.load()?),
         Command::Fmt { dir, check } => fmt(&dir, check),
         Command::Diff { a, b, project } => diff(&a, &b, project.as_deref()),
     }
@@ -1153,7 +1158,7 @@ fn import(from: &Path, dir: &Path, all: bool, level: Option<&str>, clean: &Rom) 
     Ok(())
 }
 
-fn build(dir: &Path, out: &Path, no_cache: bool, clean: &Rom) -> Result<()> {
+fn build(dir: &Path, out: &Path, patch: Option<&Path>, no_cache: bool, clean: &Rom) -> Result<()> {
     use kobo_core::build::{self, Cache, Project};
     let project = Project::load(dir)?;
     let cache = if no_cache { None } else { Cache::user() };
@@ -1166,6 +1171,11 @@ fn build(dir: &Path, out: &Path, no_cache: bool, clean: &Rom) -> Result<()> {
         project.levels.len(),
         rom.sha1_hex()
     );
+    if let Some(path) = patch {
+        let bytes = bps::create(clean.data(), rom.data());
+        fs::write(path, &bytes).with_context(|| format!("writing {}", path.display()))?;
+        println!("{}: {} bytes", path.display(), bytes.len());
+    }
     Ok(())
 }
 

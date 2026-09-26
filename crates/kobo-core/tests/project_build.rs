@@ -9,6 +9,7 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use kobo_core::bps;
 use kobo_core::build::{self, Project};
 use kobo_core::import;
 use kobo_core::level::{self, tables};
@@ -229,4 +230,7 @@ fn a_synthetic_build_is_the_same_everywhere() {
         "5f308245ae892ca5e8b2778540c220a03cf6b847",
         "the synthetic build's output changed"
     );
+    // Distributed as a patch (`kobo build --bps`), it gives the build back.
+    let patch = bps::create(base.data(), built.data());
+    assert_eq!(bps::apply(&patch, base.data()).unwrap(), built.data());
 }
