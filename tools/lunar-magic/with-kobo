@@ -1,8 +1,9 @@
 #!/bin/bash
 # A Lunar Magic-saved ROM with Kobo's code for Lunar Magic's layout (asm/lunar-magic/:
-# the Map16 routine, the acts-like chain, and the placed objects) in place of Lunar
-# Magic's, keeping the ROM's Map16 page tables and acts-like tables, so a hack's content
-# runs through both implementations:
+# the Map16 routine, the acts-like chain, the placed objects, the level number, and
+# backgrounds) in place of Lunar Magic's, keeping the ROM's Map16 page tables, acts-like
+# tables, level flags, and BG Map16 pointers, so a hack's content runs through both
+# implementations:
 #   with-kobo lm.smc out.sfc
 # then compare the two with examples/render_hashes and ramdiff.py. The operands Kobo's
 # patches autoclean are cleared first, so that Asar frees nothing of the ROM's.
@@ -20,14 +21,16 @@ open(sys.argv[2],'wb').write(d)
 PY
 $K asm $A/map16.asm $t/1.sfc -r $t/0.sfc >/dev/null
 $K asm $A/actslike.asm $t/1b.sfc -r $t/1.sfc >/dev/null
-$K asm $A/objects.asm $t/2.sfc -r $t/1b.sfc >/dev/null
+$K asm $A/objects.asm $t/1c.sfc -r $t/1b.sfc >/dev/null
+$K asm $A/level.asm $t/1d.sfc -r $t/1c.sfc >/dev/null
+$K asm $A/background.asm $t/2.sfc -r $t/1d.sfc >/dev/null
 python3 - "$1" $t/2.sfc "$2" <<'PY'
 import sys
 def ld(p):
   d=open(p,'rb').read(); return bytearray(d[len(d)%0x8000:])
 def pc(a): return ((a>>16)&0x7f)*0x8000+(a&0x7fff)
 a=ld(sys.argv[1]); k=ld(sys.argv[2])
-keep=[(0x06F547,1),(0x06F553,2),(0x06F557,1),(0x06F55C,2),(0x06F560,1),(0x06F567,2),(0x06F56B,1),(0x06F570,2),(0x06F574,1),(0x06F586,2),(0x06F58A,1),(0x06F594,2),(0x06F598,1),(0x06F59D,2),(0x06F5A1,1),(0x06F5A8,2),(0x06F5AC,1),(0x06F5B1,2),(0x06F5B5,1),(0x06F624,3),(0x06F63A,3)]
+keep=[(0x0EF310,512),(0x0EFD50,48),(0x06F547,1),(0x06F553,2),(0x06F557,1),(0x06F55C,2),(0x06F560,1),(0x06F567,2),(0x06F56B,1),(0x06F570,2),(0x06F574,1),(0x06F586,2),(0x06F58A,1),(0x06F594,2),(0x06F598,1),(0x06F59D,2),(0x06F5A1,1),(0x06F5A8,2),(0x06F5AC,1),(0x06F5B1,2),(0x06F5B5,1),(0x06F624,3),(0x06F63A,3)]
 for x,n in keep: k[pc(x):pc(x)+n]=a[pc(x):pc(x)+n]
 k[pc(0x00FFDC):pc(0x00FFE0)]=bytes([0xFF,0xFF,0,0]); s=sum(k)&0xFFFF
 k[pc(0x00FFDC):pc(0x00FFE0)]=bytes([(s^0xFFFF)&0xFF,(s^0xFFFF)>>8,s&0xFF,s>>8])

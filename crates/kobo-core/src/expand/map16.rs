@@ -49,11 +49,12 @@ fn bg_map16_base(machine: &mut Machine) -> Result<(u32, usize), ExpandError> {
 }
 
 /// Background Map16 definitions, including any Lunar Magic indices above
-/// the vanilla 0x200 tiles, and the background's bytes per screen.
+/// the vanilla 0x200 tiles, where they were read from, and the
+/// background's bytes per screen.
 pub(super) fn read_bg_map16(
     machine: &mut Machine,
     planes: &(Vec<u8>, Vec<u8>),
-) -> Result<(Vec<Map16Tile>, usize), ExpandError> {
+) -> Result<(Vec<Map16Tile>, u32, usize), ExpandError> {
     let (base, screen_len) = bg_map16_base(machine)?;
     let tile_count = planes
         .0
@@ -67,7 +68,7 @@ pub(super) fn read_bg_map16(
     let tiles = (0..tile_count as u32)
         .map(|n| read_map16(&mut machine.bus, base.wrapping_add(8 * n)))
         .collect();
-    Ok((tiles, screen_len))
+    Ok((tiles, base, screen_len))
 }
 
 /// Reads a Map16 definition from ROM.

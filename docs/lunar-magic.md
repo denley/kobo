@@ -13,8 +13,10 @@ executable. Vanilla behaviour is in [smw.md](smw.md).
   blocks are one per group of 16 pages, found through the pointers at `$06F553` and on
   ([lunar-magic-install.md](lunar-magic-install.md)), and a group's block holds its pages
   up to the last one used, so the next group's may start inside the space a whole group
-  would take; `map16::pages` and `import::read_map16` read them so. Super Dram World 2
-  (2.43) has other values there, which point at no block.
+  would take, and a block ends at the last tile used, so the last page may stop part way;
+  `map16::pages` and `import::read_map16` read them so. Super Dram World 2 (2.43) has other
+  values there, which point at no block. The BG Map16 tables at `$0EFD50` are allocated
+  the same way.
 - The BG Map16 pages (`200`-`3FF`, Lunar Magic's file index `8000+`) are a separate block from
   layer 1 pages 2-3 and `$06F540` does not find them. Lunar Magic 2.3+ replaces `STA $0A` at
   `$058DA4` in the layer 2 tilemap upload with a `JSL` (to `$0EFD00`) that leaves the level's BG

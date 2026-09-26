@@ -50,6 +50,8 @@ pub struct Manifest {
     pub music: Option<PathBuf>,
     /// Map16 page to file, relative to the project directory.
     pub map16: BTreeMap<u8, PathBuf>,
+    /// BG Map16 page (table * 16 + page) to file.
+    pub map16_bg: BTreeMap<u8, PathBuf>,
     /// Level number to file, relative to the project directory.
     pub levels: BTreeMap<u16, PathBuf>,
 }
@@ -85,10 +87,12 @@ impl Manifest {
         if let Some(uberasm) = &self.uberasm {
             out += &format!("\n[uberasm]\ndir = \"{}\"\n", slashes(uberasm));
         }
-        if !self.map16.is_empty() {
-            out += "\n[map16]\n";
-            for (page, path) in &self.map16 {
-                out += &format!("0x{page:02X} = \"{}\"\n", slashes(path));
+        for (name, pages) in [("map16", &self.map16), ("map16_bg", &self.map16_bg)] {
+            if !pages.is_empty() {
+                out += &format!("\n[{name}]\n");
+                for (page, path) in pages {
+                    out += &format!("0x{page:02X} = \"{}\"\n", slashes(path));
+                }
             }
         }
         out += "\n[levels]\n";
@@ -102,7 +106,7 @@ impl Manifest {
         let doc: DocumentMut = text.parse()?;
         for (key, _) in doc.iter() {
             if ![
-                "format", "rom", "patches", "music", "uberasm", "map16", "levels",
+                "format", "rom", "patches", "music", "uberasm", "map16", "map16_bg", "levels",
             ]
             .contains(&key)
             {
@@ -198,21 +202,36 @@ impl Manifest {
                 }
             }
         }
-        if let Some(pages) = doc.get("map16") {
+        for (name, range) in [("map16", map16::PAGES), ("map16_bg", 0x00..=0xFF)] {
+            let Some(pages) = doc.get(name) else { continue };
             let pages = pages
                 .as_table()
-                .ok_or_else(|| invalid("map16", "must be a table"))?;
+                .ok_or_else(|| invalid(name, "must be a table"))?;
             for (key, item) in pages.iter() {
-                let at = format!("map16.{key}");
+                let at = format!("{name}.{key}");
                 let page = key
                     .strip_prefix("0x")
                     .and_then(|hex| u8::from_str_radix(hex, 16).ok())
-                    .filter(|n| map16::PAGES.contains(n))
-                    .ok_or_else(|| invalid(&at, "a Map16 page is 0x02 to 0x7F"))?;
+                    .filter(|n| range.contains(n))
+                    .ok_or_else(|| {
+                        invalid(
+                            &at,
+                            format!(
+                                "a page here is 0x{:02X} to 0x{:02X}",
+                                range.start(),
+                                range.end()
+                            ),
+                        )
+                    })?;
                 let path = item
                     .as_str()
                     .ok_or_else(|| invalid(&at, "must be a file path"))?;
-                if manifest.map16.insert(page, PathBuf::from(path)).is_some() {
+                let list = if name == "map16" {
+                    &mut manifest.map16
+                } else {
+                    &mut manifest.map16_bg
+                };
+                if list.insert(page, PathBuf::from(path)).is_some() {
                     return Err(invalid(&at, "is listed twice"));
                 }
             }
@@ -278,6 +297,7 @@ mod tests {
             music: Some(PathBuf::from("music")),
             uberasm: Some(PathBuf::from("uberasm")),
             map16: BTreeMap::from([(0x10, PathBuf::from("map16/10.toml"))]),
+            map16_bg: BTreeMap::from([(0x01, PathBuf::from("map16/bg-01.toml"))]),
             levels: BTreeMap::from([
                 (0x105, PathBuf::from("world1/yoshis-island-1.toml")),
                 (0x0C7, PathBuf::from("title.toml")),
@@ -289,7 +309,8 @@ mod tests {
             "format = 1\n\n[rom]\nsize = \"1536K\"\nsa1 = true\n\n[patches]\n\
              early = [\"asm/fastrom.asm\"]\nlate = [\"asm/a.asm\", \"asm/b.asm\"]\n\n\
              [music]\ndir = \"music\"\n\n[uberasm]\ndir = \"uberasm\"\n\n\
-             [map16]\n0x10 = \"map16/10.toml\"\n\n[levels]\n\
+             [map16]\n0x10 = \"map16/10.toml\"\n\n[map16_bg]\n0x01 = \"map16/bg-01.toml\"\n\n\
+             [levels]\n\
              0x0C7 = \"title.toml\"\n0x105 = \"world1/yoshis-island-1.toml\"\n"
         );
         assert_eq!(Manifest::from_toml(&text).unwrap(), manifest);

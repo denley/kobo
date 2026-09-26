@@ -144,7 +144,7 @@ Early stage: roadmap step 1 is complete; step 2 is next, planned in `docs/step-2
   files); `import` reads a ROM into them and `build` writes them onto the clean ROM. Kobo
   owns their formatting: `Level::to_toml` of `from_toml` must give the same text back.
 - `kobo_core::map16::pages` is the one place that knows Lunar Magic's tables for Map16
-  pages past 1 and the acts-like tables; import reads and build writes through it. A
+  pages past 1, BG Map16, and the acts-like tables; import reads and build writes through it. A
   build that writes anything only Lunar Magic's layout holds installs Kobo's code for it
   first (`build::Stage::Install`, `kobo_core::install`).
 - `kobo_core::names` holds the names Kobo writes after ids (objects by object set, extended
@@ -195,6 +195,7 @@ cargo run -- bps apply hack.bps out.sfc [-r rom]   # patch the clean ROM, header
 cargo run -- bps create hack.sfc out.bps [-r rom]  # patch from the clean ROM to a modified one
 cargo run --release --example sprite_census -- rom.smc  # sprite numbers that draw nothing, by level
 cargo run --release --example render_hashes -- rom.smc  # a hash per level picture, to diff across a change
+cargo run --release --example tiles_diff -- a.sfc b.sfc  # levels whose load resolves differently, graphics aside
 cargo run --release --example sprite_oracle -- rom.smc dumpdir...  # per-sprite scores against emulator frames
 cargo run --release --example fuzz_inputs -- 10000      # seeded parser mutation cases, no ROM needed
 ```

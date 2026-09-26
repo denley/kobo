@@ -18,8 +18,10 @@ use crate::map16::pages::{self as map16_pages, PAGE_GROUPS};
 use crate::mwl::{self, Mwl, MwlFile};
 use crate::rats::{self, RatsBlock};
 use crate::rom::Rom;
-use crate::source::level::{Comments, Entrance, Layer2, Level, Sprites};
-use crate::source::map16::{Map16Entry, Map16Page, PAGE_TILES, PageComments};
+use crate::source::level::{
+    BACKGROUND_ROWS, BackgroundTiles, Comments, Entrance, Layer2, Level, Sprites,
+};
+use crate::source::map16::{Map16Entry, Map16Page, PAGE_TILES, PageComments, PageKind};
 use crate::source::project::{MANIFEST, Manifest};
 use crate::sprites::{self, SpriteError};
 
@@ -62,12 +64,19 @@ pub fn read_level(rom: &Rom, number: u16) -> Result<(Level, Vec<String>), Import
         level::Layer2::None => Layer2::None,
         level::Layer2::Objects(list) => Layer2::Objects(list.objects),
         level::Layer2::Background(addr) if addr.bank() == 0x0C => Layer2::VanillaBackground(addr),
-        level::Layer2::Background(addr) => {
-            notes.push(format!(
-                "its background at {addr} is Lunar Magic's own format, which is not imported yet"
-            ));
-            Layer2::None
-        }
+        level::Layer2::Background(addr) => match level::read_background(rom, number)? {
+            Some(bg) => match background_tiles(&bg) {
+                Some(tiles) => Layer2::Background(tiles),
+                None => {
+                    notes.push(format!(
+                        "its background at {addr} has flags {:02X?}, which Kobo does not read",
+                        bg.flags
+                    ));
+                    Layer2::None
+                }
+            },
+            None => Layer2::None,
+        },
     };
     let list = sprites::read_sprites_at(rom, level::sprite_ptr(rom, number)?)?;
     let vertical = header.level_mode.layer1_vertical();
@@ -147,8 +156,10 @@ pub fn import_rom(rom: &Rom, base: &Rom, dir: &Path, all: bool) -> Result<Report
         })
     };
     let mut report = Report::default();
+    // As large as the ROM, if that is more than a build's default.
     let mut manifest = Manifest {
         sa1: rom.mapping().is_sa1(),
+        rom_size: (rom.len() > crate::build::DEFAULT_ROM_SIZE).then_some(rom.len()),
         ..Manifest::default()
     };
     for number in 0..LEVEL_COUNT {
@@ -166,11 +177,24 @@ pub fn import_rom(rom: &Rom, base: &Rom, dir: &Path, all: bool) -> Result<Report
                 .map(|n| format!("level {number:03X}: {n}")),
         );
     }
+    let (pages, notes) = read_map16_bg(rom, base)?;
+    report.notes.extend(notes);
+    for (page, tiles) in pages {
+        let file = PathBuf::from("map16").join(format!("bg-{page:02X}.toml"));
+        write(
+            &dir.join(&file),
+            tiles.to_toml(PageKind::Background, &PageComments::default()),
+        )?;
+        manifest.map16_bg.insert(page, file);
+    }
     let (pages, notes) = read_map16(rom)?;
     report.notes.extend(notes);
     for (page, tiles) in pages {
         let file = PathBuf::from("map16").join(format!("{page:02X}.toml"));
-        write(&dir.join(&file), tiles.to_toml(&PageComments::default()))?;
+        write(
+            &dir.join(&file),
+            tiles.to_toml(PageKind::Foreground, &PageComments::default()),
+        )?;
         manifest.map16.insert(page, file);
         report.map16.push(page);
     }
@@ -202,14 +226,121 @@ pub fn import_rom(rom: &Rom, base: &Rom, dir: &Path, all: bool) -> Result<Report
     Ok(report)
 }
 
+/// A background in Lunar Magic's layout as a level file has it: 32 rows
+/// from its own format with high bytes (`C` and `F`), 27 from the game's
+/// behind a full pointer (`V`), whose tiles all take the flags' high nibble
+/// as their high byte. Its own format without high bytes (`C` alone, from
+/// older versions) comes through as 32 rows, the last five empty.
+fn background_tiles(bg: &level::Background) -> Option<BackgroundTiles> {
+    let flags = bg.flags?;
+    let byte = |i: usize| bg.data.get(i).copied().unwrap_or(0) as u16;
+    let mut tiles = vec![0; BACKGROUND_ROWS * 32];
+    let (table, rows) = match (flags & 0x02 != 0, flags & 0x04 != 0, flags & 0x08 != 0) {
+        (true, true, _) => {
+            for (i, tile) in tiles.iter_mut().enumerate() {
+                let (row, half, col) = (i / 32, i % 32 / 16, i % 16);
+                let at = half * 512 + row * 16 + col;
+                *tile = byte(1024 + at) << 8 | byte(at);
+            }
+            (flags >> 4, 32)
+        }
+        (custom, false, vanilla) if custom || vanilla => {
+            let high = (flags as u16 >> 4) << 8;
+            for row in 0..27 {
+                for half in 0..2 {
+                    for col in 0..16 {
+                        tiles[row * 32 + half * 16 + col] =
+                            high | byte(half * 432 + row * 16 + col);
+                    }
+                }
+            }
+            if custom { (flags >> 4, 32) } else { (0, 27) }
+        }
+        _ => return None,
+    };
+    Some(BackgroundTiles { table, rows, tiles })
+}
+
+/// BG Map16 pages from Lunar Magic's tables: the pages of each table that
+/// lie in the RATS block it starts in, the last as far as the block goes,
+/// but empty ones; and of the game's
+/// own table, when the first pointer is still it, the pages that differ
+/// from `clean`'s.
+pub fn read_map16_bg(rom: &Rom, clean: &Rom) -> Result<Map16Import, ImportError> {
+    const GAME_TABLE: u32 = 0x0D9100;
+    let (mut out, notes) = (Vec::new(), Vec::new());
+    let blocks: Vec<Range<usize>> = rats::blocks(rom)
+        .into_iter()
+        .filter_map(|b| {
+            rom.pc(b.start)
+                .ok()
+                .map(|s| s.as_usize()..s.as_usize() + b.len)
+        })
+        .collect();
+    let page_len = PAGE_TILES as usize * 8;
+    // A table ends at the tile after its last used one, so a page may end
+    // early: its tiles past the block are empty.
+    let read_page = |at: SnesAddr, number: u8, len: usize| -> Result<Map16Page, ImportError> {
+        let bytes = rom.read(at, len - len % 8)?;
+        let mut page = Map16Page::default();
+        for (i, def) in bytes.chunks(8).enumerate() {
+            let entry = Map16Entry {
+                gfx: Map16Tile::from_bytes(def.try_into().expect("8 bytes")),
+                ..Map16Entry::default()
+            };
+            if entry != Map16Entry::default() {
+                page.tiles
+                    .insert(number as u16 * PAGE_TILES + i as u16, entry);
+            }
+        }
+        Ok(page)
+    };
+    for table in 0..16u8 {
+        let Some(at) = map16_pages::bg_table(rom, table)? else {
+            continue;
+        };
+        if table == 0 && at.raw() == GAME_TABLE {
+            for page in 0..2u8 {
+                let start = at.add(page as u32 * page_len as u32);
+                if rom.read(start, page_len)? != clean.read(start, page_len)? {
+                    out.push((page, read_page(start, page, page_len)?));
+                }
+            }
+            continue;
+        }
+        let Some(block) = rom
+            .pc(at)
+            .ok()
+            .and_then(|pc| blocks.iter().find(|b| b.contains(&pc.as_usize())).cloned())
+        else {
+            continue;
+        };
+        for page in 0..16u8 {
+            let start = at.add(page as u32 * page_len as u32);
+            let Ok(pc) = rom.pc(start) else { break };
+            if pc.as_usize() >= block.end {
+                break;
+            }
+            let number = table * 16 + page;
+            let tiles = read_page(start, number, page_len.min(block.end - pc.as_usize()))?;
+            if !tiles.tiles.is_empty() {
+                out.push((number, tiles));
+            }
+        }
+    }
+    Ok((out, notes))
+}
+
 /// Map16 pages by number, and notes on what was left out.
 pub type Map16Import = (Vec<(u8, Map16Page)>, Vec<String>);
 
 /// Map16 pages 2 to `$7F` from Lunar Magic's tables: the pages of each
 /// group of 16 that lie in the RATS block its table starts in (Lunar Magic
-/// allocates a group's pages up to the last it uses), with what their tiles
-/// act like, but pages with every tile empty ([`Map16Entry::default`]),
-/// which a build writes for the pages of a group a project does not list.
+/// allocates a group up to the last tile it uses, so the last page may
+/// stop early, its other tiles empty), with what their tiles
+/// act like, but empty tiles ([`Map16Entry::default`]), which a page file
+/// leaves out, and pages with nothing else, which a build writes for the
+/// pages of a group a project does not list.
 /// A group whose table is in no RATS block is in an older Lunar Magic's
 /// layout (2.43 and before) and is left out, with a note.
 pub fn read_map16(rom: &Rom) -> Result<Map16Import, ImportError> {
@@ -250,22 +381,30 @@ pub fn read_map16(rom: &Rom) -> Result<Map16Import, ImportError> {
             let Some(span) = page_span(group, page) else {
                 break;
             };
-            if !(block.start <= span.start && span.end <= block.end) {
+            if !(block.start <= span.start && span.start < block.end) {
                 break;
             }
             let mut tiles = Map16Page::default();
             let first = page as u16 * PAGE_TILES;
             for tile in first..first + PAGE_TILES {
                 let at = group.definition(rom, tile)?.expect("the group has a table");
-                let bytes: [u8; 8] = rom.read(at, 8)?.try_into().expect("8 bytes");
+                // Past the block's end, where a group's last page may stop.
+                let inside = rom.pc(at).is_ok_and(|pc| pc.as_usize() + 8 <= block.end);
+                let gfx = if inside {
+                    Map16Tile::from_bytes(rom.read(at, 8)?.try_into().expect("8 bytes"))
+                } else {
+                    Map16Tile::default()
+                };
                 let entry = Map16Entry {
-                    gfx: Map16Tile::from_bytes(bytes),
+                    gfx,
                     acts: map16_pages::acts_like(rom, tile)?
                         .unwrap_or(crate::source::map16::DEFAULT_ACTS),
                 };
-                tiles.tiles.insert(tile, entry);
+                if entry != Map16Entry::default() {
+                    tiles.tiles.insert(tile, entry);
+                }
             }
-            if tiles.tiles.values().any(|t| *t != Map16Entry::default()) {
+            if !tiles.tiles.is_empty() {
                 out.push((page, tiles));
             }
         }
@@ -294,8 +433,10 @@ fn read_spans(rom: &Rom) -> Result<Vec<Range<usize>>, ImportError> {
     }
     if LevelFormat::of(rom).lunar_magic {
         add(tables::SPRITE_BANKS, count);
-        add(tables::LEVEL_FLAGS, count);
         add(LUNAR_MAGIC_MARKER, 64);
+    }
+    if level::has_level_flags(rom) {
+        add(tables::LEVEL_FLAGS, count);
     }
     if map16_pages::installed(rom) {
         for group in &PAGE_GROUPS {

@@ -14,6 +14,11 @@
 //! four references to 8x8 tile 0 in palette 0, acting like `$130`, as a
 //! fresh Lunar Magic install's acts-like table has every tile past page 1.
 //! The manifest's `[map16]` table says which page a file is.
+//!
+//! Background pages, in the manifest's `[map16_bg]` table, are the same
+//! without `acts`: page `P` is page `P % 16` of BG Map16 table `P / 16`,
+//! and a tile's key is its number in the table plus `$1000` times the
+//! table, so that the file names the table's pages as the table's number.
 
 use std::collections::BTreeMap;
 
@@ -29,6 +34,14 @@ pub const PAGE_TILES: u16 = 0x100;
 pub const PAGES: std::ops::RangeInclusive<u8> = 0x02..=0x7F;
 /// What a tile of a page acts like when its file does not say.
 pub const DEFAULT_ACTS: u16 = 0x130;
+
+/// Foreground pages, 2 to `$7F`, whose tiles act like others; or
+/// background pages, `$00` to `$FF`, whose tiles do not.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PageKind {
+    Foreground,
+    Background,
+}
 
 /// One tile: its graphics, and the tile it acts like.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -67,7 +80,7 @@ impl Map16Page {
     }
 
     /// Writes the page in Kobo's format.
-    pub fn to_toml(&self, comments: &PageComments) -> String {
+    pub fn to_toml(&self, kind: PageKind, comments: &PageComments) -> String {
         let mut out = String::new();
         for line in &comments.top {
             out += &format!("{line}\n");
@@ -85,10 +98,13 @@ impl Map16Page {
                 .iter()
                 .map(|r| format!("\"{}\"", tile8_text(*r)))
                 .collect();
+            let acts = match kind {
+                PageKind::Foreground => format!("acts = {}, ", hex(entry.acts as u32, 3)),
+                PageKind::Background => String::new(),
+            };
             out += &format!(
-                "{} = {{ acts = {}, gfx = [{}] }}\n",
+                "{} = {{ {acts}gfx = [{}] }}\n",
                 hex(number as u32, 3),
-                hex(entry.acts as u32, 3),
                 gfx.join(", ")
             );
         }
@@ -96,7 +112,11 @@ impl Map16Page {
     }
 
     /// Reads the file of page `page`.
-    pub fn from_toml(page: u8, text: &str) -> Result<(Self, PageComments), SourceError> {
+    pub fn from_toml(
+        kind: PageKind,
+        page: u8,
+        text: &str,
+    ) -> Result<(Self, PageComments), SourceError> {
         let doc: DocumentMut = text.parse()?;
         let mut comments = PageComments::default();
         for (key, _) in doc.iter() {
@@ -149,7 +169,7 @@ impl Map16Page {
                     comments.tiles.insert(number, own);
                 }
             }
-            let entry = read_entry(item, &at)?;
+            let entry = read_entry(item, &at, kind)?;
             if tiles.insert(number, entry).is_some() {
                 return Err(invalid(&at, "is listed twice"));
             }
@@ -158,12 +178,12 @@ impl Map16Page {
     }
 }
 
-fn read_entry(item: &Item, at: &str) -> Result<Map16Entry, SourceError> {
+fn read_entry(item: &Item, at: &str, kind: PageKind) -> Result<Map16Entry, SourceError> {
     let t = item
         .as_inline_table()
         .ok_or_else(|| invalid(at, "must be an inline table { acts, gfx }"))?;
     for (key, _) in t.iter() {
-        if key != "acts" && key != "gfx" {
+        if !(key == "gfx" || key == "acts" && kind == PageKind::Foreground) {
             return Err(invalid(at, format!("unknown key `{key}`")));
         }
     }
@@ -261,7 +281,7 @@ mod tests {
         let mut comments = PageComments::default();
         comments.top.push("# Castle tiles".into());
         comments.tiles.insert(0x2FF, vec!["# unused".into()]);
-        let text = page.to_toml(&comments);
+        let text = page.to_toml(PageKind::Foreground, &comments);
         assert_eq!(
             text,
             "# Castle tiles\n\n[tiles]\n\
@@ -269,15 +289,17 @@ mod tests {
              # unused\n\
              0x2FF = { acts = 0x025, gfx = [\"2FF 0 xy\", \"2FF 0 y\", \"2FF 0 xy\", \"2FF 0 y\"] }\n"
         );
-        let (back, back_comments) = Map16Page::from_toml(0x02, &text).unwrap();
+        let (back, back_comments) =
+            Map16Page::from_toml(PageKind::Foreground, 0x02, &text).unwrap();
         assert_eq!(back, page);
         assert_eq!(back_comments, comments);
-        assert_eq!(back.to_toml(&back_comments), text);
+        assert_eq!(back.to_toml(PageKind::Foreground, &back_comments), text);
     }
 
     #[test]
     fn a_missing_tile_is_empty() {
         let (page, _) = Map16Page::from_toml(
+            PageKind::Foreground,
             0x02,
             "[tiles]\n0x201 = { gfx = [\"001 1\", \"002 1\", \"003 1\", \"004 1\"] }\n",
         )
@@ -308,7 +330,10 @@ mod tests {
             ("[tiles]\n0x200 = { act = 0x25 }\n", "unknown key"),
             ("[pages]\n", "unknown table"),
         ] {
-            assert!(Map16Page::from_toml(0x02, text).is_err(), "{what}");
+            assert!(
+                Map16Page::from_toml(PageKind::Foreground, 0x02, text).is_err(),
+                "{what}"
+            );
         }
     }
 }

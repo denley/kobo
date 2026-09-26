@@ -53,6 +53,7 @@ fn project() -> Project {
         manifest: Default::default(),
         levels: Vec::new(),
         map16,
+        map16_bg: Vec::new(),
     }
 }
 
@@ -118,4 +119,47 @@ fn the_tilemap_upload_finds_them() {
         let b = kobo_core::render::render_level(&built, level, options).unwrap();
         assert!(a.image.pixels == b.image.pixels, "level {level:03X}");
     }
+}
+
+#[test]
+fn bg_pages_build_and_read_back() {
+    if common::asar().is_none() {
+        return;
+    }
+    let base = common::synthetic_base();
+    // A page of the first table, past the game's two, and one of table 3.
+    let mut map16_bg = Vec::new();
+    for page in [0x04u8, 0x32] {
+        let first = page as u16 * 0x100;
+        let mut tiles = Map16Page::default();
+        for tile in [first, first + 0x7F, first + 0xFF] {
+            tiles.tiles.insert(
+                tile,
+                Map16Entry {
+                    acts: DEFAULT_ACTS,
+                    ..entry(tile)
+                },
+            );
+        }
+        map16_bg.push((page, tiles));
+    }
+    let project = Project {
+        root: PathBuf::from("."),
+        manifest: Default::default(),
+        levels: Vec::new(),
+        map16: Vec::new(),
+        map16_bg,
+    };
+    let built = build::build_on(&base, &project, None).unwrap();
+    let (read, _) = import::read_map16_bg(&built, &base).unwrap();
+    // Pages 0 and 1 of the first table are the base's own, as the build
+    // keeps them; the rest are the ones written.
+    let back: Vec<&(u8, Map16Page)> = read.iter().filter(|(p, _)| *p > 1).collect();
+    assert_eq!(back.len(), 2);
+    for ((page, written), (read_page, back)) in project.map16_bg.iter().zip(back) {
+        assert_eq!(page, read_page);
+        assert_eq!(back, written, "page {page:02X}");
+    }
+    assert!(pages::bg_table(&built, 3).unwrap().is_some());
+    assert!(pages::bg_table(&built, 1).unwrap().is_none());
 }

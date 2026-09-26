@@ -249,8 +249,11 @@ how each oracle is produced, where its data lives, and what is known not to matc
   applied (`kobo rom expand 2M`, then `kobo asm`) must print the same, also with bank
   `$0D`'s steps (`$0DA900`-`$0DAA1F`) put back to vanilla.
 - **A hack built by Kobo**: `kobo import` Kaizo Kindergarten, leave out the levels the
-  build refuses, build, and compare `kobo level tiles` of every level with the hack's
-  (all 337 the same); `tools/lunar-magic/save-check out.sfc 105 project` passes.
+  build refuses, build, and `examples/tiles_diff.rs hack.smc out.sfc levels...`, which
+  compares what every level's load resolves (grid, background tilemap, Map16, BG Map16),
+  graphics aside: all 337 the same. `tools/lunar-magic/save-check out.sfc 105 project`
+  passes, and `tiles_diff` of the saved copy against the hack gives the same. Import, build,
+  and import again gives the same files.
 - **A hack's content through Kobo's code**: transfer a hack into a Lunar Magic-saved
   vanilla ROM with Lunar Magic's command line (`-ImportMultLevels` of its MWL exports,
   `-ImportAllMap16`, `-ImportAllGraphics` of its `-ExportGFX`/`-ExportExGFX`,

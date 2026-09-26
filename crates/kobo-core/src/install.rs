@@ -9,8 +9,10 @@
 //! piece's tables installs Kobo's code for that piece, with Lunar Magic's
 //! check for it met. So far that is the Map16 routine and the acts-like
 //! chain in bank `$06`, whose check is `$06F600`, for Map16 pages past 1;
-//! and the placed objects (`22`, `23`, `27`, `29`), whose check is on Lunar
-//! Magic's own code, so its first save puts its own in their place.
+//! the placed objects (`22`, `23`, `27`, `29`), whose check is on Lunar
+//! Magic's own code, so its first save puts its own in their place; the
+//! level number (`$0EF550` occupied); and backgrounds and BG Map16 (a `JML`
+//! at `$0EF519`, a `JSL` at `$058DA4`).
 
 use crate::asar::{Asar, AsarError, Patch, Patched};
 use crate::rom::Rom;
@@ -26,6 +28,11 @@ pub const LUNAR_MAGIC: &[(&str, &str)] = &[
     (
         "objects.asm",
         include_str!("../asm/lunar-magic/objects.asm"),
+    ),
+    ("level.asm", include_str!("../asm/lunar-magic/level.asm")),
+    (
+        "background.asm",
+        include_str!("../asm/lunar-magic/background.asm"),
     ),
 ];
 
