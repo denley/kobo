@@ -335,6 +335,12 @@ on the built ROM.
   4bpp, which only Lunar Magic's graphics loader reads; those, ExGFX, and per-level
   graphics lists come with that loader, the next piece (Kaizo Kindergarten: 2 of its
   files are in the game's formats, 47 are not).
+- 2b progress, exits and secondary entrances in Lunar Magic's format: Kobo's exit hooks,
+  installed when a level has an exit in that format or an entrance numbered in the other
+  bank; entrances then keep their destination's bit 8. Kaizo Kindergarten imports and
+  builds whole, entrances included, and `kobo diff` finds every level the same as the
+  hack's. Still to carry: the per-level tables (`$05DE00`, `$06FC00`, `$06FE00`), which
+  hold main entrance and midway settings.
 - 2b then takes Lunar Magic-layout features one at a time, each through its source format,
   import from MWL and ROM, build, the Lunar Magic check, and the corpus check together, so
   neither direction anchors the format: Map16 pages 2 and up and background Map16, custom

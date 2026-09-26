@@ -472,6 +472,22 @@ Magic-saved ROM and diffing (data only), and by following pointers to what chang
   screen-0 fix. Observed: `$13CD` after a sublevel load is `$1A` in 27-row levels and
   other values (`$93`, `$9A`, `$D3`, `$DA`) in taller ones; vanilla leaves 0 there on that
   path. Its meaning is unknown.
+- Exits, observed by running a Lunar Magic-saved ROM's entrance code (`CODE_05D796`) with
+  chosen exit state (`expand::enter_by_exit`, examples/exit_probe.rs): the screen exit
+  object keeps an exit's whole flags nibble (`0000wush`) in `$19D8` (vanilla keeps bit 0)
+  and sets `$1B93` to its `s` bit. For an exit with `u`, the destination's bit 8 is its
+  `h` bit and `s` alone makes it secondary; without `u`, bit 8 is 1 when the translevel
+  (`$13BF`) is `$25` or more, where vanilla takes it from the player's submap. A secondary
+  entrance's destination has its bit 8 in bit 3 of its `$05FE00` byte, and an exit's `w`
+  adds `$40` to `$192A` (the entrance's action).
+- Kobo's (`asm/lunar-magic/exits.asm`: `$0DA532`, `$0DA536`, `JSL`s at `$05D7CE` and
+  `$05D836`) resolves every exit with `u` as Lunar Magic's does, for two ROMs and any
+  destination, and keeps vanilla's submap rule for exits without `u`, so a build of vanilla
+  levels plays as vanilla. A build that installs it writes every entrance's bit 3 as
+  Lunar Magic's first save does, unused ones from `100` on included, and lets a level have
+  entrances numbered in the other bank. Kaizo Kindergarten built by Kobo sends every exit
+  where the hack does. Main entrances that use the per-level tables (`$05DE00`,
+  `$06FC00`-`$06FFFF`) still start the player elsewhere: those tables are not carried yet.
 - `DATA_05D710`/`DATA_05D720` (layer 2 vertical and horizontal scroll by the high nibble
   of `$05F000`; data): entries 8-11 become vertical settings 4-7 with horizontal 2.
   Lunar Magic's added layer 2 scroll speeds (3.40) are handled in its scroll code.

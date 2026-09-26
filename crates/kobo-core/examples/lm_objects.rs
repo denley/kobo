@@ -13,7 +13,10 @@
 //! out.mwl "40 60 0B"` adds one of Lunar Magic's settings objects, as its
 //! bytes, to the end of layer 1. `lm_objects exgfx in.mwl out.mwl slot
 //! file` sets one of the level's graphics slots (0 = AN2 to 15 = LG1, as
-//! the MWL file orders them) to a file number, in hex.
+//! the MWL file orders them) to a file number, in hex. `lm_objects exits
+//! in.mwl out.mwl` replaces a level's screen exits with five in Lunar
+//! Magic's format, on screens 0 to 4, destination `$20` plus the screen,
+//! with flags `u`, `uh`, `us`, `uw`, and `uswh`.
 
 use kobo_core::level::objects::Object;
 use kobo_core::mwl::MwlFile;
@@ -173,6 +176,7 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("make") => make(&args[1], &args[2], args[3].parse().unwrap()),
         Some("add") => add(&args[1], &args[2], &args[3]),
+        Some("exits") => exits(&args[1], &args[2]),
         Some("exgfx") => exgfx(
             &args[1],
             &args[2],
@@ -229,6 +233,24 @@ fn add(input: &str, output: &str, bytes: &str) {
         .map(|b| u8::from_str_radix(b, 16).unwrap())
         .collect();
     mwl.layer1.data.objects.push(Object::Unplaced(bytes));
+    std::fs::write(output, mwl.to_file(None).unwrap().to_bytes()).unwrap();
+}
+
+fn exits(input: &str, output: &str) {
+    use kobo_core::level::objects::ScreenExit;
+    let mut mwl = MwlFile::parse(&std::fs::read(input).unwrap())
+        .unwrap()
+        .decode(None)
+        .unwrap();
+    let objects = &mut mwl.layer1.data.objects;
+    objects.retain(|o| !matches!(o, Object::ScreenExit(_)));
+    for (screen, flags) in [0x4u8, 0x5, 0x6, 0xC, 0xF].into_iter().enumerate() {
+        objects.push(Object::ScreenExit(ScreenExit {
+            screen: screen as u8,
+            flags,
+            destination: 0x20 + screen as u8,
+        }));
+    }
     std::fs::write(output, mwl.to_file(None).unwrap().to_bytes()).unwrap();
 }
 

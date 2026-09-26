@@ -372,6 +372,39 @@ fn gfx_files_build() {
 }
 
 #[test]
+fn entrances_in_lunar_magic_format_build() {
+    let Some(clean) = common::vanilla() else {
+        return;
+    };
+    if common::asar().is_none() {
+        return;
+    }
+    // Level 105 given entrance 0CB, whose number says bank 0: only Lunar
+    // Magic's format, with the exit hook installed, can lead it there.
+    let (mut level, _) = import::read_level(&clean, 0x105).unwrap();
+    let mut entrance = level.entrances[0];
+    entrance.id = 0x0CB;
+    level.entrances = vec![entrance];
+    let project = Project {
+        root: std::path::PathBuf::from("."),
+        manifest: Default::default(),
+        levels: vec![(0x105, level.clone())],
+        map16: Vec::new(),
+        map16_bg: Vec::new(),
+        gfx: Vec::new(),
+    };
+    let built = build::build(&clean, &project).unwrap();
+    assert_eq!(import::read_level(&built, 0x105).unwrap().0, level);
+    // A secondary exit to 0CB, in either format, reaches 105.
+    for high in [0x06u8, 0x02] {
+        let ram =
+            kobo_core::expand::enter_by_exit(&built, 0xCB, high, high == 0x02, 0, |_| {}).unwrap();
+        let level = ram.u16(kobo_core::ram::RamAddr::new(0x7E_000E));
+        assert_eq!(level, 0x105, "flags {high:X}");
+    }
+}
+
+#[test]
 fn cached_builds_equal_clean_ones() {
     let Some(clean) = common::vanilla() else {
         return;

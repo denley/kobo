@@ -248,6 +248,9 @@ how each oracle is produced, where its data lives, and what is known not to matc
   prints the tiles each case left. The same ROM with `asm/lunar-magic/objects.asm`
   applied (`kobo rom expand 2M`, then `kobo asm`) must print the same, also with bank
   `$0D`'s steps (`$0DA900`-`$0DAA1F`) put back to vanilla.
+- **Exits**: `examples/exit_probe.rs rom [low...] [addr=value]` runs a ROM's entrance
+  code for every exit flags nibble, secondary flag, and submap, and prints where each
+  leads; two ROMs' outputs compare Kobo's exit code with Lunar Magic's.
 - **A hack built by Kobo**: `kobo import` Kaizo Kindergarten, leave out the levels the
   build refuses, build, and `examples/tiles_diff.rs hack.smc out.sfc levels...`, which
   compares what every level's load resolves (grid, background tilemap, Map16, BG Map16),
