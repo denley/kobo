@@ -7,6 +7,9 @@
 #   with-kobo lm.smc out.sfc
 # then compare the two with examples/render_hashes and ramdiff.py. The operands Kobo's
 # patches autoclean are cleared first, so that Asar frees nothing of the ROM's.
+# entrance.asm is left out: Lunar Magic's code at $05DA17 also sets up the RAM its
+# taller levels read, so Kobo's entrance code is checked against Kobo's builds instead
+# (examples/entry_probe.rs).
 # Needs `kobo` (KOBO, default on PATH) and Asar's library (KOBO_ASAR_LIB).
 set -euo pipefail
 here=$(dirname "$(realpath "$0")")

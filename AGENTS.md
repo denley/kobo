@@ -143,6 +143,9 @@ Early stage: roadmap step 1 is complete; step 2 is next, planned in `docs/step-2
 - `kobo_core::source` is the project's text formats (`kobo.toml`, level files, Map16 page
   files; graphics are indexed PNGs through `image::IndexedImage` and `gfx::tiles_to_image`); `import` reads a ROM into them and `build` writes them onto the clean ROM. Kobo
   owns their formatting: `Level::to_toml` of `from_toml` must give the same text back.
+- `kobo_core::entrance` is the one place that knows Lunar Magic's entrance settings: the
+  per-level tables, the midway tables, a secondary entrance's two further bytes, and how
+  older versions' convert; import reads and build writes through it.
 - `kobo_core::map16::pages` is the one place that knows Lunar Magic's tables for Map16
   pages past 1, BG Map16, and the acts-like tables; import reads and build writes through it. A
   build that writes anything only Lunar Magic's layout holds installs Kobo's code for it

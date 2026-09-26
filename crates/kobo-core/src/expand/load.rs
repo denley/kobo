@@ -205,7 +205,8 @@ pub fn play_level(
 /// `$19D8`: bit 0 the destination's bit 8, and in Lunar Magic's format bit
 /// 1 secondary and bit 2 the format itself), with `secondary` in `$1B93`
 /// as the game's format sets it and the player on submap `submap`, and
-/// whatever else `set` puts in RAM (the level being left, say), runs
+/// whatever else `set` puts in RAM last (the level being left, say, or a
+/// sublevel count of 0 and `$0109` for an entry from the overworld), runs
 /// `CODE_05D796` and returns the RAM it leaves: the level in `$0E`-`$0F`,
 /// an entrance's settings, the player's and layers' positions. For
 /// learning what an entrance hook does, and checking Kobo's against it.
@@ -220,13 +221,13 @@ pub fn enter_by_exit(
     let mut machine = Machine::new(rom, 0);
     boot(&mut machine)?;
     let ram = &mut machine.bus.ram;
-    set(ram);
     ram.set_u8(ram::SUBLEVEL_COUNT, 1);
     ram.set_u8(ram::EXIT_TABLE_LOW, low);
     ram.set_u8(ram::EXIT_TABLE_HIGH, high);
     ram.set_u8(ram::RamAddr::new(0x7E_1B93), secondary as u8);
     ram.set_u8(ram::OW_PLAYER_SUBMAP, submap);
     ram.set_u8(ram::GAME_MODE, 0x11);
+    set(ram);
     machine.call(Call::jsl(routines::LOAD_HEADER_POINTERS))?;
     Ok(machine.bus.ram)
 }

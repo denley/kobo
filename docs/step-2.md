@@ -341,15 +341,24 @@ on the built ROM.
   builds whole, entrances included, and `kobo diff` finds every level the same as the
   hack's. Still to carry: the per-level tables (`$05DE00`, `$06FC00`, `$06FE00`), which
   hold main entrance and midway settings.
+- 2b progress, entrance settings: level files hold Lunar Magic's per-level settings
+  (position method 2, layers relative to the player, the background's placement, slippery,
+  water, sprite spawning) in `[entrance]`, a separate midway entrance in `[midway]`, and a
+  secondary entrance's own; import reads them from ROMs of any Lunar Magic version,
+  converted as Lunar Magic 3.70 converts them, and from MWL files, and builds write them
+  with Kobo's entrance code (`kobo_core::entrance`, `entrance.asm`). Every corpus ROM's
+  settings read the same from the ROM as from its MWL export; Kaizo Kindergarten built by
+  Kobo enters every level as the hack does, from each kind of entrance, and Lunar Magic
+  saves the build keeping every setting. Builds refuse Lunar Magic's added layer 2 scroll
+  rates (settings 8 to 11 and separate vertical settings, which need its camera code) and
+  secondary entrances that exit to the overworld.
 - Remaining in 2b, each Lunar Magic runtime code reimplemented from observation, by the
   method the pieces above used (a probe that runs the ROM's own code with chosen state,
   then an A/B comparison with Kobo's code swapped in; `examples/*_probe.rs`,
   `tools/lunar-magic/with-kobo`, `install-gate.py` for the save's checks):
-  - Per-level settings and taller levels together: `$05DE00`/`$06FA00`/`$06FC00`/`$06FE00`
-    (mapped bit by bit, docs/lunar-magic-install.md), separate midway entrances, and the
-    level size byte. Lunar Magic's `$05DA17` code, the per-level tables' check, also sets
-    what its taller levels piece leaves (`$5B` bit 7, `$0BE7`, the RAM tables from
-    `$0BF6`), so the two go in as one piece.
+  - Taller levels and the level size byte (`$05DA8A`), with Lunar Magic's layer 2 scroll
+    rates and its camera code; its `$05DA17` code sets up their RAM (`$5B` bit 7, `$0BE7`,
+    the tables from `$0BF6`), which Kobo's will do as well.
   - The VRAM patch and the graphics loader (the group a save checks at `$00A5A2`), for
     PIXI, ExGFX, 4bpp GFX, per-level graphics lists, and the graphics bypass objects `24`
     and `25`. Kobo's goes at the group's own sites and leaves `$00A5A2` to Lunar Magic.

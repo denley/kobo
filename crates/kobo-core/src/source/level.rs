@@ -32,6 +32,9 @@
 //! ([`Settings`]): `width` and `height` in tiles, `type`, `length`, or,
 //! for the tileset-specific objects, `settings`. `lm` entries are Lunar
 //! Magic's placed objects, `raw` its unplaced ones, with their bytes.
+//! `[entrance]` holds the game's secondary header and Lunar Magic's
+//! per-level settings ([`LevelSettings`]), `[midway]` a midway entrance
+//! with settings of its own.
 
 use std::collections::BTreeMap;
 
@@ -39,6 +42,10 @@ use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
 
 use super::{SourceError, hex, hex_bytes, invalid, own_line_comments, parse_hex_bytes};
 use crate::addr::SnesAddr;
+use crate::entrance::{
+    Background, EntranceSettings, LevelSettings, MidwayEntrance, SeparateMidway, offset_bits,
+    offset_rows,
+};
 use crate::level::objects::{Object, ScreenExit, Settings};
 use crate::level::{LevelMode, PrimaryHeader, SecondaryHeader};
 use crate::names;
@@ -50,6 +57,9 @@ use crate::sprites::{SpriteEntry, SpriteHeader};
 pub struct Level {
     pub header: PrimaryHeader,
     pub entrance: SecondaryHeader,
+    /// Lunar Magic's settings for the main and midway entrances and the
+    /// level's layers, which a build writes with Kobo's code for them.
+    pub settings: LevelSettings,
     pub layer1: Vec<Object>,
     pub layer2: Layer2,
     pub sprites: Sprites,
@@ -72,19 +82,21 @@ pub struct Entrance {
     pub y: u8,
     /// Entrance action, 0 to 7.
     pub action: u8,
-    /// Foreground and background initial positions, 0 to 3 each.
+    /// Foreground and background initial positions, 0 to 3 each; with a
+    /// relative camera, the offset's low bits.
     pub fg_position: u8,
     pub bg_position: u8,
-    /// Bits 4-7 of its `$05FE00` byte, which the game does not read and
-    /// Lunar Magic uses. Bit 3, Lunar Magic's copy of the destination's
-    /// bit 8, is the level's and is not kept; it is written clear, as the
-    /// game's tables have it, and Lunar Magic sets it when it saves.
-    pub flags: u8,
+    /// Lunar Magic's settings: bits 4-7 of its `$05FE00` byte and its two
+    /// further tables. Bit 3, Lunar Magic's copy of the destination's bit
+    /// 8, is the level's and is not kept; builds write it where Kobo's
+    /// exit code reads it.
+    pub settings: EntranceSettings,
 }
 
 impl Entrance {
-    /// From its bytes in the tables (the first, the destination, aside).
-    pub fn from_bytes(id: u16, bytes: [u8; 3]) -> Self {
+    /// From its bytes in the tables (the first, the destination, aside),
+    /// and its Lunar Magic settings, read from those and further tables.
+    pub fn from_bytes(id: u16, bytes: [u8; 3], settings: EntranceSettings) -> Self {
         let [fa, fc, fe] = bytes;
         Self {
             id,
@@ -94,17 +106,25 @@ impl Entrance {
             action: fe & 0x07,
             fg_position: (fa >> 4) & 0x03,
             bg_position: fa >> 6,
-            flags: fe >> 4,
+            settings,
         }
     }
 
-    /// Its bytes in the tables at `$05FA00`, `$05FC00`, and `$05FE00`.
-    pub fn to_bytes(self) -> [u8; 3] {
-        [
-            self.bg_position << 6 | (self.fg_position & 0x03) << 4 | (self.y & 0x0F),
-            self.x << 5 | (self.screen & 0x1F),
-            self.flags << 4 | (self.action & 0x07),
-        ]
+    /// Its bytes in the tables at `$05FA00`, `$05FC00`, and `$05FE00`, and
+    /// in Lunar Magic's two further ones.
+    pub fn to_bytes(self) -> ([u8; 3], [u8; 2]) {
+        let (flags, extra) = self.settings.to_bytes();
+        if let Some(bytes) = self.settings.overworld {
+            return (bytes, extra);
+        }
+        (
+            [
+                self.bg_position << 6 | (self.fg_position & 0x03) << 4 | (self.y & 0x0F),
+                self.x << 5 | (self.screen & 0x1F),
+                flags | (self.action & 0x07),
+            ],
+            extra,
+        )
     }
 }
 
@@ -264,20 +284,75 @@ impl Level {
         out += &format!("layer3_priority = {}\n", h.layer3_priority);
 
         let e = &self.entrance;
+        let lm = &self.settings;
         out += "\n[entrance]\n";
         out += &format!("screen = {}\n", e.entrance_screen);
-        out += &format!("x = {}\n", e.entrance_x);
-        out += &format!("y = {}\n", e.entrance_y);
+        let (x_high, y_high) = lm.tile_position.unwrap_or((0, 0));
+        out += &format!("x = {}\n", x_high << 3 | e.entrance_x);
+        out += &format!("y = {}\n", (y_high as u16) << 4 | e.entrance_y as u16);
+        if lm.tile_position.is_some() {
+            out += "method = 2\n";
+        }
         out += &format!("action = {}\n", e.entrance_action);
-        out += &format!("midway_screen = {}\n", e.midway_screen);
-        out += &format!("fg_position = {}\n", e.fg_position);
-        out += &format!("bg_position = {}\n", e.bg_position);
+        out += &format!(
+            "midway_screen = {}\n",
+            (lm.midway.screen_high as u8) << 4 | e.midway_screen
+        );
+        out += &camera_lines(e.fg_position, e.bg_position, lm.relative);
         out += &format!("layer2_scroll = {}\n", e.layer2_scroll);
+        if let Some(v) = lm.layer2_vertical_scroll {
+            out += &format!("layer2_vertical_scroll = {v}\n");
+        }
         out += &format!("layer3 = {}\n", e.layer3);
         out += &format!("no_yoshi_intro = {}\n", e.no_yoshi_intro);
         out += &format!("vertical_position = {}\n", e.vertical_position);
         if e.unknown {
             out += "unknown = true\n";
+        }
+        for (key, value) in [
+            ("slippery", lm.slippery),
+            ("water", lm.water),
+            ("face_left", lm.face_left),
+            ("smart_spawn", lm.smart_spawn),
+        ] {
+            if value {
+                out += &format!("{key} = true\n");
+            }
+        }
+        if lm.spawn_range != 0 {
+            out += &format!("spawn_range = {}\n", lm.spawn_range);
+        }
+        if !lm.auto_screens {
+            out += "auto_screens = false\n";
+        }
+        match lm.background {
+            Background::Height(27) => {}
+            Background::Height(rows) => out += &format!("bg_height = {rows}\n"),
+            Background::Offset(rows) => out += &format!("bg_offset = {rows}\n"),
+            Background::Absolute => out += "bg_offset = \"absolute\"\n",
+        }
+        match lm.midway.separate {
+            None => {}
+            Some(SeparateMidway::Redirect(level)) => {
+                out += "\n[midway]\n";
+                out += &format!("redirect = {}\n", hex(level as u32, 3));
+            }
+            Some(SeparateMidway::Entrance(m)) => {
+                out += "\n[midway]\n";
+                out += &format!("x = {}\n", m.x);
+                out += &format!("y = {}\n", m.y);
+                out += &format!("action = {}\n", m.action);
+                out += &camera_lines(m.fg_position, m.bg_position, m.relative);
+                for (key, value) in [
+                    ("slippery", m.slippery),
+                    ("water", m.water),
+                    ("face_left", m.face_left),
+                ] {
+                    if value {
+                        out += &format!("{key} = true\n");
+                    }
+                }
+            }
         }
 
         let tileset = h.object_tileset;
@@ -370,6 +445,7 @@ impl Level {
             &[
                 "header",
                 "entrance",
+                "midway",
                 "layer1",
                 "layer2",
                 "sprites",
@@ -379,7 +455,14 @@ impl Level {
         )?;
 
         let header = read_header(table(&doc, "header")?)?;
-        let entrance = read_entrance(table(&doc, "entrance")?)?;
+        let midway = match doc.get("midway") {
+            None => None,
+            Some(item) => Some(
+                item.as_table()
+                    .ok_or_else(|| invalid("midway", "must be a table"))?,
+            ),
+        };
+        let (entrance, settings) = read_entrance(table(&doc, "entrance")?, midway)?;
         let layer1 = table(&doc, "layer1")?;
         check_keys(layer1, "layer1", &["objects"])?;
         let layer1 = read_list(layer1, "objects", "layer1", &mut comments, read_object)?;
@@ -452,6 +535,7 @@ impl Level {
             Self {
                 header,
                 entrance,
+                settings,
                 layer1,
                 layer2,
                 sprites,
@@ -606,19 +690,60 @@ fn object_line(object: &Object, tileset: u8) -> (String, Option<String>) {
     (text, names::object(object, tileset).map(str::to_owned))
 }
 
+/// `fg_position` and `bg_position`, or with a relative camera the offset
+/// in rows they make with `F` (`Fffbb`).
+fn camera_lines(fg: u8, bg: u8, relative: Option<bool>) -> String {
+    match relative {
+        None => format!("fg_position = {fg}\nbg_position = {bg}\n"),
+        Some(high) => format!("relative = {}\n", offset_rows(high, fg << 2 | bg)),
+    }
+}
+
 fn entrance_line(e: &Entrance) -> (String, Option<String>) {
+    let s = &e.settings;
+    if let Some(bytes) = s.overworld {
+        let text = format!(
+            "{{ id = {}, overworld = {} }}",
+            hex(e.id as u32, 3),
+            hex_bytes(&bytes)
+        );
+        return (text, None);
+    }
+    let (x_high, y_high) = s.tile_position.unwrap_or((0, 0));
     let mut text = format!(
-        "{{ id = {}, screen = {}, x = {}, y = {}, action = {}, fg_position = {}, bg_position = {}",
+        "{{ id = {}, screen = {}, x = {}, y = {}",
         hex(e.id as u32, 3),
         e.screen,
-        e.x,
-        e.y,
-        e.action,
-        e.fg_position,
-        e.bg_position
+        x_high << 3 | e.x,
+        (y_high as u16) << 4 | e.y as u16,
     );
-    if e.flags != 0 {
-        text += &format!(", flags = {}", hex(e.flags as u32, 1));
+    if s.tile_position.is_some() {
+        text += ", method = 2";
+    }
+    text += &format!(", action = {}", e.action);
+    // A secondary entrance's offset is `Fbbff`.
+    match s.relative {
+        None => {
+            text += &format!(
+                ", fg_position = {}, bg_position = {}",
+                e.fg_position, e.bg_position
+            )
+        }
+        Some(high) => {
+            text += &format!(
+                ", relative = {}",
+                offset_rows(high, e.bg_position << 2 | e.fg_position)
+            )
+        }
+    }
+    for (key, value) in [
+        ("slippery", s.slippery),
+        ("water", s.water),
+        ("face_left", s.face_left),
+    ] {
+        if value {
+            text += &format!(", {key} = true");
+        }
     }
     (text + " }", None)
 }
@@ -791,7 +916,115 @@ fn read_header(t: &Table) -> Result<PrimaryHeader, SourceError> {
     })
 }
 
-fn read_entrance(t: &Table) -> Result<SecondaryHeader, SourceError> {
+/// An entrance's X and Y settings' low bits, and with position method 2
+/// the high ones.
+type Position = (u8, u16, Option<(u8, u8)>);
+
+/// A table's values by key, for readers that inline tables and tables
+/// share.
+struct Fields<'a> {
+    at: &'a str,
+    get: &'a dyn Fn(&str) -> Option<&'a Value>,
+}
+
+impl Fields<'_> {
+    fn path(&self, key: &str) -> String {
+        format!("{}.{key}", self.at)
+    }
+
+    fn uint(&self, key: &str, max: u32) -> Result<Option<u32>, SourceError> {
+        (self.get)(key)
+            .map(|v| int_value(v, &self.path(key), max))
+            .transpose()
+    }
+
+    fn required(&self, key: &str, max: u32) -> Result<u32, SourceError> {
+        self.uint(key, max)?
+            .ok_or_else(|| invalid(self.path(key), "is missing"))
+    }
+
+    fn int(&self, key: &str, min: i64, max: i64) -> Result<Option<i64>, SourceError> {
+        (self.get)(key)
+            .map(|v| {
+                v.as_integer()
+                    .filter(|n| (min..=max).contains(n))
+                    .ok_or_else(|| {
+                        invalid(
+                            self.path(key),
+                            format!("must be an integer from {min} to {max}"),
+                        )
+                    })
+            })
+            .transpose()
+    }
+
+    fn flag(&self, key: &str) -> Result<bool, SourceError> {
+        (self.get)(key)
+            .map(|v| {
+                v.as_bool()
+                    .ok_or_else(|| invalid(self.path(key), "must be true or false"))
+            })
+            .transpose()
+            .map(|b| b.unwrap_or(false))
+    }
+
+    /// An entrance's position: `x` and `y`, which position method 2
+    /// (`method = 2`) lets go past the game's settings to a tile, 0 to 31
+    /// and 0 to 1023. Returns the low bits and, with method 2, the high.
+    fn position(&self) -> Result<Position, SourceError> {
+        match self.uint("method", 2)?.unwrap_or(1) {
+            1 => Ok((
+                self.required("x", 7)? as u8,
+                self.required("y", 15)? as u16,
+                None,
+            )),
+            2 => {
+                let (x, y) = (self.required("x", 31)?, self.required("y", 1023)?);
+                Ok((
+                    (x & 7) as u8,
+                    (y & 15) as u16,
+                    Some(((x >> 3) as u8, (y >> 4) as u8)),
+                ))
+            }
+            _ => Err(invalid(self.path("method"), "must be 1 or 2")),
+        }
+    }
+
+    /// `fg_position` and `bg_position`, or `relative`: the offset in rows
+    /// of layer 1 from the player, whose low four bits the two positions
+    /// hold, `ff` above `bb` (or, `bb_above`, `bb` above `ff`). Returns
+    /// the positions and `F` for a relative camera.
+    fn camera(&self, bb_above: bool) -> Result<(u8, u8, Option<bool>), SourceError> {
+        match self.int("relative", -16, 15)? {
+            Some(rows) => {
+                if (self.get)("fg_position").is_some() || (self.get)("bg_position").is_some() {
+                    return Err(invalid(
+                        self.path("relative"),
+                        "replaces `fg_position` and `bg_position`",
+                    ));
+                }
+                let (high, low) = offset_bits(rows as i8);
+                let (upper, lower) = (low >> 2, low & 3);
+                Ok(if bb_above {
+                    (lower, upper, Some(high))
+                } else {
+                    (upper, lower, Some(high))
+                })
+            }
+            None => Ok((
+                self.required("fg_position", 3)? as u8,
+                self.required("bg_position", 3)? as u8,
+                None,
+            )),
+        }
+    }
+}
+
+/// The `[entrance]` table and the `[midway]` one, if the level has it.
+fn read_entrance(
+    t: &Table,
+    midway: Option<&Table>,
+) -> Result<(SecondaryHeader, LevelSettings), SourceError> {
     check_keys(
         t,
         "entrance",
@@ -799,32 +1032,122 @@ fn read_entrance(t: &Table) -> Result<SecondaryHeader, SourceError> {
             "screen",
             "x",
             "y",
+            "method",
             "action",
             "midway_screen",
             "fg_position",
             "bg_position",
+            "relative",
             "layer2_scroll",
+            "layer2_vertical_scroll",
             "layer3",
             "no_yoshi_intro",
             "vertical_position",
             "unknown",
+            "slippery",
+            "water",
+            "face_left",
+            "smart_spawn",
+            "spawn_range",
+            "auto_screens",
+            "bg_height",
+            "bg_offset",
         ],
     )?;
-    let f = |key, max| field(t, "entrance", key, max).map(|n| n as u8);
-    Ok(SecondaryHeader {
-        layer2_scroll: f("layer2_scroll", 15)?,
-        entrance_y: f("y", 15)?,
-        layer3: f("layer3", 3)?,
-        entrance_action: f("action", 7)?,
-        entrance_x: f("x", 7)?,
-        midway_screen: f("midway_screen", 15)?,
-        fg_position: f("fg_position", 3)?,
-        bg_position: f("bg_position", 3)?,
-        no_yoshi_intro: flag(t, "entrance", "no_yoshi_intro")?,
-        unknown: flag(t, "entrance", "unknown")?,
-        vertical_position: flag(t, "entrance", "vertical_position")?,
-        entrance_screen: f("screen", 31)?,
-    })
+    let get = |key: &str| t.get(key).and_then(Item::as_value);
+    let f = Fields {
+        at: "entrance",
+        get: &get,
+    };
+    let (x, y, tile_position) = f.position()?;
+    let (fg_position, bg_position, relative) = f.camera(false)?;
+    let midway_screen = f.required("midway_screen", 31)? as u8;
+    let header = SecondaryHeader {
+        layer2_scroll: f.required("layer2_scroll", 15)? as u8,
+        entrance_y: y as u8,
+        layer3: f.required("layer3", 3)? as u8,
+        entrance_action: f.required("action", 7)? as u8,
+        entrance_x: x,
+        midway_screen: midway_screen & 0x0F,
+        fg_position,
+        bg_position,
+        no_yoshi_intro: f.flag("no_yoshi_intro")?,
+        unknown: f.flag("unknown")?,
+        vertical_position: f.flag("vertical_position")?,
+        entrance_screen: f.required("screen", 31)? as u8,
+    };
+    let background = match (t.get("bg_height"), t.get("bg_offset")) {
+        (Some(_), Some(_)) => {
+            return Err(invalid("entrance.bg_offset", "replaces `bg_height`"));
+        }
+        (None, Some(item)) if item.as_str() == Some("absolute") => Background::Absolute,
+        (None, Some(_)) => Background::Offset(f.int("bg_offset", -15, 15)?.unwrap_or(0) as i8),
+        (_, None) => match f.int("bg_height", 1, 32)? {
+            Some(rows) => Background::Height(rows as u8),
+            None => Background::Height(27),
+        },
+    };
+    let settings = LevelSettings {
+        slippery: f.flag("slippery")?,
+        water: f.flag("water")?,
+        tile_position,
+        smart_spawn: f.flag("smart_spawn")?,
+        spawn_range: f.uint("spawn_range", 3)?.unwrap_or(0) as u8,
+        layer2_vertical_scroll: f.uint("layer2_vertical_scroll", 31)?.map(|v| v as u8),
+        auto_screens: match t.get("auto_screens") {
+            None => true,
+            Some(_) => f.flag("auto_screens")?,
+        },
+        relative,
+        face_left: f.flag("face_left")?,
+        background,
+        midway: crate::entrance::Midway {
+            screen_high: midway_screen & 0x10 != 0,
+            separate: midway.map(read_midway).transpose()?,
+        },
+    };
+    Ok((header, settings))
+}
+
+fn read_midway(t: &Table) -> Result<SeparateMidway, SourceError> {
+    let get = |key: &str| t.get(key).and_then(Item::as_value);
+    let f = Fields {
+        at: "midway",
+        get: &get,
+    };
+    if t.contains_key("redirect") {
+        check_keys(t, "midway", &["redirect"])?;
+        return Ok(SeparateMidway::Redirect(
+            f.required("redirect", 0x1FF)? as u16
+        ));
+    }
+    check_keys(
+        t,
+        "midway",
+        &[
+            "x",
+            "y",
+            "action",
+            "fg_position",
+            "bg_position",
+            "relative",
+            "slippery",
+            "water",
+            "face_left",
+        ],
+    )?;
+    let (fg_position, bg_position, relative) = f.camera(false)?;
+    Ok(SeparateMidway::Entrance(MidwayEntrance {
+        slippery: f.flag("slippery")?,
+        water: f.flag("water")?,
+        action: f.required("action", 7)? as u8,
+        x: f.required("x", 31)? as u8,
+        y: f.required("y", 1023)? as u16,
+        fg_position,
+        bg_position,
+        relative,
+        face_left: f.flag("face_left")?,
+    }))
 }
 
 fn read_list<T>(
@@ -1026,6 +1349,19 @@ fn read_object(t: &InlineTable, at: &str) -> Result<Object, SourceError> {
 }
 
 fn read_entrance_entry(t: &InlineTable, at: &str) -> Result<Entrance, SourceError> {
+    let id = req(t, at, "id", 0x1FF)? as u16;
+    if t.contains_key("overworld") {
+        keys_of(t, at, &["id", "overworld"])?;
+        let raw = bytes(t, at, "overworld")?;
+        let bytes: [u8; 3] = raw
+            .try_into()
+            .map_err(|_| invalid(format!("{at}.overworld"), "must be three bytes"))?;
+        let settings = EntranceSettings {
+            overworld: Some(bytes),
+            ..EntranceSettings::default()
+        };
+        return Ok(Entrance::from_bytes(id, bytes, settings));
+    }
     keys_of(
         t,
         at,
@@ -1034,21 +1370,36 @@ fn read_entrance_entry(t: &InlineTable, at: &str) -> Result<Entrance, SourceErro
             "screen",
             "x",
             "y",
+            "method",
             "action",
             "fg_position",
             "bg_position",
-            "flags",
+            "relative",
+            "slippery",
+            "water",
+            "face_left",
         ],
     )?;
+    let get = |key: &str| t.get(key);
+    let f = Fields { at, get: &get };
+    let (x, y, tile_position) = f.position()?;
+    let (fg_position, bg_position, relative) = f.camera(true)?;
     Ok(Entrance {
-        id: req(t, at, "id", 0x1FF)? as u16,
+        id,
         screen: req(t, at, "screen", 0x1F)? as u8,
-        x: req(t, at, "x", 7)? as u8,
-        y: req(t, at, "y", 15)? as u8,
+        x,
+        y: y as u8,
         action: req(t, at, "action", 7)? as u8,
-        fg_position: req(t, at, "fg_position", 3)? as u8,
-        bg_position: req(t, at, "bg_position", 3)? as u8,
-        flags: opt(t, at, "flags", 0x0F)?.unwrap_or(0) as u8,
+        fg_position,
+        bg_position,
+        settings: EntranceSettings {
+            slippery: f.flag("slippery")?,
+            tile_position,
+            relative,
+            face_left: f.flag("face_left")?,
+            water: f.flag("water")?,
+            overworld: None,
+        },
     })
 }
 
@@ -1166,22 +1517,42 @@ list = [
 
     #[test]
     fn entrance_bytes() {
-        let e = Entrance::from_bytes(0x1BC, [0xAA, 0x24, 0xDB]);
+        let bytes = [0xAA, 0x24, 0xDB];
+        let e = Entrance::from_bytes(0x1BC, bytes, EntranceSettings::from_bytes(bytes, [0, 0]));
         assert_eq!(
-            (
-                e.y,
-                e.fg_position,
-                e.bg_position,
-                e.screen,
-                e.x,
-                e.action,
-                e.flags
-            ),
-            (10, 2, 2, 4, 1, 3, 0x0D)
+            (e.y, e.fg_position, e.bg_position, e.screen, e.x, e.action),
+            (10, 2, 2, 4, 1, 3)
         );
+        assert!(e.settings.slippery);
+        assert_eq!(e.settings.tile_position, Some((1, 0)));
         // Bit 3 of the last byte, Lunar Magic's copy of the destination's
         // bit 8, is not kept.
-        assert_eq!(e.to_bytes(), [0xAA, 0x24, 0xD3]);
+        assert_eq!(e.to_bytes(), ([0xAA, 0x24, 0xD3], [0, 0]));
+    }
+
+    #[test]
+    fn lunar_magic_entrance_settings() {
+        let text = TEXT
+            .replace("x = 0\ny = 11\n", "x = 9\ny = 22\nmethod = 2\n")
+            .replace("fg_position = 2\nbg_position = 2\n", "relative = -10\n")
+            .replace(
+                "vertical_position = false\n",
+                "vertical_position = false\nslippery = true\nbg_offset = \"absolute\"\n\n\
+                 [midway]\nx = 17\ny = 22\naction = 0\nfg_position = 1\nbg_position = 2\n",
+            );
+        let (level, comments) = Level::from_toml(&text).unwrap();
+        assert_eq!(level.settings.tile_position, Some((1, 1)));
+        assert_eq!(level.settings.relative, Some(true));
+        assert_eq!(
+            (level.entrance.fg_position, level.entrance.bg_position),
+            (1, 2)
+        );
+        assert_eq!(level.settings.background, Background::Absolute);
+        let Some(SeparateMidway::Entrance(midway)) = level.settings.midway.separate else {
+            panic!("{:?}", level.settings.midway)
+        };
+        assert_eq!((midway.x, midway.y), (17, 22));
+        assert_eq!(level.to_toml(&comments), text);
     }
 
     #[test]

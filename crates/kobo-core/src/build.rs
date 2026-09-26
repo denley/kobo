@@ -28,6 +28,7 @@ use crate::asar::{Asar, AsarError, Patch};
 use crate::compress::lz2;
 use crate::compress::rle1;
 use crate::config::{self, ConfigError};
+use crate::entrance::{self, LevelSettings};
 use crate::gfx;
 use crate::image::IndexedImage;
 use crate::install;
@@ -96,6 +97,8 @@ pub enum BuildError {
     Config(#[from] ConfigError),
     #[error("{path}: {message}")]
     Gfx { path: PathBuf, message: String },
+    #[error("Kobo's code for Lunar Magic's layout: {message}")]
+    Install { message: String },
     #[error("the build cache at {path}: {source}")]
     Cache {
         path: PathBuf,
@@ -182,13 +185,19 @@ impl Project {
 
     /// Whether the project has anything only Lunar Magic's layout holds,
     /// which needs Kobo's code for it installed: Map16 pages past 1, or
-    /// Lunar Magic's objects or a background of its own in a level.
+    /// Lunar Magic's objects, a background of its own, entrance settings,
+    /// or exits in its format in a level.
     pub fn lunar_magic_layout(&self) -> bool {
         !self.map16.is_empty()
             || !self.map16_bg.is_empty()
             || self.manifest.gps.is_some()
             || self.levels.iter().any(|(number, level)| {
                 level.entrances.iter().any(|e| e.id >> 8 != number >> 8)
+                    || level.settings != LevelSettings::default()
+                    || level
+                        .entrances
+                        .iter()
+                        .any(|e| e.settings != Default::default())
                     || level
                         .layer1
                         .iter()
@@ -462,6 +471,9 @@ impl Stage {
                     write_level(rom, &before, &mut space, &mut bank07, *number, level)?;
                 }
                 write_entrances(rom, project)?;
+                if project.lunar_magic_layout() {
+                    write_level_settings(rom, project)?;
+                }
             }
         }
         Ok(())
@@ -950,6 +962,7 @@ fn write_entrances(rom: &mut Rom, project: &Project) -> Result<(), BuildError> {
         }
     }
     let mut owner: Vec<Option<u16>> = vec![None; entrances.len()];
+    let mut extras = vec![[0u8; 2]; entrances.len()];
     for (number, level) in &project.levels {
         for entrance in &level.entrances {
             let id = entrance.id as usize;
@@ -968,16 +981,83 @@ fn write_entrances(rom: &mut Rom, project: &Project) -> Result<(), BuildError> {
                     ),
                 ));
             }
-            let [fa, fc, mut fe] = entrance.to_bytes();
+            if entrance.settings.overworld.is_some() {
+                return Err(level_error(
+                    *number,
+                    format!(
+                        "entrance {:03X} exits to the overworld, which builds do not carry yet",
+                        entrance.id
+                    ),
+                ));
+            }
+            let ([fa, fc, mut fe], extra) = entrance.to_bytes();
             if format.entrances {
                 fe = fe & !0x08 | ((number >> 8) as u8 & 1) << 3;
             }
             entrances[id] = level::EntranceBytes([*number as u8, fa, fc, fe]);
+            extras[id] = extra;
         }
     }
     for (i, table) in tables::ENTRANCES.iter().enumerate() {
         let column: Vec<u8> = entrances.iter().map(|e| e.0[i]).collect();
         rom.write(*table, &column)?;
+    }
+    // Lunar Magic's two further tables, where Kobo's entrance code has
+    // them; the defaults for the entrances no level names.
+    if let Some(tables) = entrance::Layout::of(rom).extra {
+        for (i, table) in tables.into_iter().enumerate() {
+            let column: Vec<u8> = extras.iter().map(|e| e[i]).collect();
+            rom.write(table, &column)?;
+        }
+    }
+    Ok(())
+}
+
+/// Writes Lunar Magic's per-level settings and midway tables for every
+/// level, a fresh install's defaults for those the project does not
+/// define, where Kobo's entrance code reads them (`asm/lunar-magic/
+/// entrance.asm`). Layer 2 scroll settings of Lunar Magic's own need its
+/// camera code, which Kobo does not have yet.
+fn write_level_settings(rom: &mut Rom, project: &Project) -> Result<(), BuildError> {
+    let layout = entrance::Layout::of(rom);
+    let midway = layout.midway.ok_or_else(|| BuildError::Install {
+        message: "the midway tables are not where Kobo's entrance code keeps them".into(),
+    })?;
+    let count = level::LEVEL_COUNT as usize;
+    let (defaults, _) = LevelSettings::default().to_bytes();
+    let mut settings: Vec<[u8; 4]> = vec![defaults; count];
+    let mut midways = vec![[0u8; 4]; count];
+    for (number, level) in &project.levels {
+        if let Some(v) = level.settings.layer2_vertical_scroll {
+            return Err(level_error(
+                *number,
+                format!(
+                    "its separate layer 2 vertical scroll setting ({v}) is Lunar Magic's, which builds do not carry yet"
+                ),
+            ));
+        }
+        // Settings 8 to 11 are Lunar Magic's added vertical rates; 12 to
+        // 15 are no scrolling in both its tables and the game's.
+        if (8..12).contains(&level.entrance.layer2_scroll) {
+            return Err(level_error(
+                *number,
+                format!(
+                    "its layer 2 scroll setting {} is one of Lunar Magic's, which builds do not carry yet",
+                    level.entrance.layer2_scroll
+                ),
+            ));
+        }
+        let (bytes, midway) = level.settings.to_bytes();
+        settings[*number as usize] = bytes;
+        midways[*number as usize] = midway;
+    }
+    for (i, table) in entrance::tables::SETTINGS.into_iter().enumerate() {
+        let column: Vec<u8> = settings.iter().map(|b| b[i]).collect();
+        rom.write(table, &column)?;
+    }
+    for i in 0..4 {
+        let column: Vec<u8> = midways.iter().map(|b| b[i]).collect();
+        rom.write(midway.add(i as u32 * 0x200), &column)?;
     }
     Ok(())
 }

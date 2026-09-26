@@ -251,6 +251,18 @@ how each oracle is produced, where its data lives, and what is known not to matc
 - **Exits**: `examples/exit_probe.rs rom [low...] [addr=value]` runs a ROM's entrance
   code for every exit flags nibble, secondary flag, and submap, and prints where each
   leads; two ROMs' outputs compare Kobo's exit code with Lunar Magic's.
+- **Entrances**: `examples/entry_probe.rs` runs a ROM's entrance code (`effects`: each
+  settings bit flipped; `compare a b level [ignore]`: every value of every byte in two
+  ROMs; `batch`: chosen settings from stdin; `levels a b`: every level as it stands), by a
+  screen exit, from the overworld (`KOBO_ENTRY_OW=translevel[,midway]`), by an exit with
+  `w` (`KOBO_ENTRY_FLAGS=8`), or into a secondary entrance (`KOBO_ENTRY_SECONDARY`), and
+  after the whole load with `KOBO_ENTRY_FULL`. Leave out of a comparison with a Lunar
+  Magic ROM the RAM its taller levels set (`005B:80 0BE7 0BEE-0D75 13D7-13D8 1936-1937`)
+  and scratch and pointers (`0065-006A 008A-008F 00CE-00D0 1BB2-1BBA 0BF6-0BF8`); against
+  the hack itself, also `00D1-00D4` and `1DEA`. Kaizo Kindergarten's `levels` against
+  Kobo's build: every level the same by a screen exit, by `w`, and from the overworld with
+  and without the midway point, but for the level the build leaves out (and those the
+  overworld override maps onto it, and one vertical "No Yoshi" intro).
 - **A hack built by Kobo**: `kobo import` Kaizo Kindergarten, leave out the levels the
   build refuses, build, and `examples/tiles_diff.rs hack.smc out.sfc levels...`, which
   compares what every level's load resolves (grid, background tilemap, Map16, BG Map16),
@@ -307,7 +319,9 @@ how each oracle is produced, where its data lives, and what is known not to matc
   it refuses. Every file must come back byte for byte from `MwlFile`, decode with the
   ROM's PIXI size table, encode to a file that decodes the same, and agree with the level
   in the ROM section by section, apart from the rewrites Lunar Magic makes on export
-  ([lunar-magic.md](lunar-magic.md#mwl-files)), which the test counts per ROM. A ROM
+  ([lunar-magic.md](lunar-magic.md#mwl-files)), which the test counts per ROM; Lunar
+  Magic's entrance settings, read from the ROM by `kobo_core::entrance` in any version,
+  must equal the file's. A ROM
   whose headerless SHA-1 is in `fixtures/lunar_magic_mwl_export.txt` must also have
   exactly the files recorded there (a SHA-1 of the 512 concatenated in level order); the
   test prints the line for one that is not. The export in `~/.local/share/kobo/mwl/`
