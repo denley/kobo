@@ -11,11 +11,12 @@
 //! key, the stage and its version, Kobo's version, and the stage's inputs.
 //! A build starts again from the last stage whose key has a snapshot.
 //!
-//! This is the build of step 2a, in the game's own formats, so it writes
-//! nothing in Lunar Magic's layout: layer data goes in RATS blocks in the
-//! expanded ROM, and sprite lists, which the game reads from bank `$07`
+//! Levels are in the game's own formats: layer data goes in RATS blocks in
+//! the expanded ROM, and sprite lists, which the game reads from bank `$07`
 //! only, stay where the clean ROM has them when unchanged and go in bank
-//! `$07`'s unused space otherwise.
+//! `$07`'s unused space otherwise. What only Lunar Magic's layout has, Map16
+//! pages past 1, is written in that layout, with Kobo's own code for it
+//! ([`crate::install`]) installed first.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -25,12 +26,15 @@ use thiserror::Error;
 use crate::addr::SnesAddr;
 use crate::asar::{Asar, AsarError, Patch};
 use crate::config::{self, ConfigError};
+use crate::install;
 use crate::level::objects::{self, Jumps, Layout, Object, ObjectError};
 use crate::level::{self, LevelError, tables};
+use crate::map16::pages as map16_pages;
 use crate::rats::{Contents, FreeSpace, FreeSpaceError};
 use crate::rom::{Rom, RomError, RomIdentity};
 use crate::source::SourceError;
 use crate::source::level::{Layer2, Level};
+use crate::source::map16::{self as page_source, Map16Page};
 use crate::source::project::{MANIFEST, Manifest};
 use crate::sprites::{self, SpriteEncodeError};
 use crate::tools::{self, ToolError};
@@ -107,6 +111,8 @@ pub struct Project {
     pub root: PathBuf,
     pub manifest: Manifest,
     pub levels: Vec<(u16, Level)>,
+    /// Map16 pages 2 to `$7F`.
+    pub map16: Vec<(u8, Map16Page)>,
 }
 
 impl Project {
@@ -128,11 +134,25 @@ impl Project {
                 .map_err(|source| BuildError::Source { path, source })?;
             levels.push((number, level));
         }
+        let mut map16 = Vec::new();
+        for (&page, file) in &manifest.map16 {
+            let path = dir.join(file);
+            let (tiles, _) = Map16Page::from_toml(page, &read(path.clone())?)
+                .map_err(|source| BuildError::Source { path, source })?;
+            map16.push((page, tiles));
+        }
         Ok(Self {
             root: dir.to_path_buf(),
             manifest,
             levels,
+            map16,
         })
+    }
+
+    /// Whether the project has anything only Lunar Magic's layout holds,
+    /// which needs Kobo's code for it installed.
+    pub fn lunar_magic_layout(&self) -> bool {
+        !self.map16.is_empty()
     }
 }
 
@@ -142,10 +162,15 @@ impl Project {
 pub enum Stage {
     /// The clean ROM, expanded to the project's size.
     Base,
+    /// Kobo's code for Lunar Magic's layout, if the project uses it.
+    Install,
     /// The project's early Asar patches.
     EarlyPatches,
     /// AddmusicK, with the project's music.
     Music,
+    /// Map16 pages past 1 and the acts-like tables. GPS, which will run
+    /// after it, rewrites the acts-like table.
+    Map16,
     /// UberASM Tool, with the project's UberASM files. PIXI and GPS will
     /// run before it, as it reads what PIXI leaves (docs/toolchain.md).
     UberAsm,
@@ -156,10 +181,12 @@ pub enum Stage {
 }
 
 impl Stage {
-    pub const ALL: [Stage; 6] = [
+    pub const ALL: [Stage; 8] = [
         Stage::Base,
+        Stage::Install,
         Stage::EarlyPatches,
         Stage::Music,
+        Stage::Map16,
         Stage::UberAsm,
         Stage::LatePatches,
         Stage::Levels,
@@ -168,8 +195,10 @@ impl Stage {
     pub fn name(self) -> &'static str {
         match self {
             Stage::Base => "base",
+            Stage::Install => "install",
             Stage::EarlyPatches => "early patches",
             Stage::Music => "music",
+            Stage::Map16 => "map16",
             Stage::UberAsm => "uberasm",
             Stage::LatePatches => "late patches",
             Stage::Levels => "levels",
@@ -204,6 +233,29 @@ impl Stage {
                     tools::hash_tree(&mut hash, &config::asar_library_path()?)?;
                 }
                 hash.finalize().to_vec()
+            }
+            Stage::Install => {
+                if !project.lunar_magic_layout() {
+                    return Ok(Vec::new());
+                }
+                let mut hash = Sha1::new();
+                tools::hash_tree(&mut hash, &config::asar_library_path()?)?;
+                for (name, source) in install::LUNAR_MAGIC {
+                    hash.update(name.as_bytes());
+                    hash.update([0]);
+                    hash.update(source.as_bytes());
+                }
+                hash.finalize().to_vec()
+            }
+            Stage::Map16 => {
+                let mut bytes = Vec::new();
+                for (page, tiles) in &project.map16 {
+                    bytes.push(*page);
+                    let text = tiles.to_toml(&Default::default());
+                    bytes.extend((text.len() as u64).to_le_bytes());
+                    bytes.extend(text.as_bytes());
+                }
+                bytes
             }
             Stage::EarlyPatches | Stage::LatePatches => {
                 let patches = self.patches(project);
@@ -262,6 +314,14 @@ impl Stage {
                 }
                 rom.expand(rom_size(clean, project))?;
             }
+            Stage::Install => {
+                if project.lunar_magic_layout() {
+                    let asar = Asar::configured().map_err(|e| BuildError::Asar(Box::new(e)))?;
+                    *rom = install::apply_lunar_magic(&asar, rom)
+                        .map_err(|e| BuildError::Asar(Box::new(e)))?;
+                }
+            }
+            Stage::Map16 => write_map16(rom, project)?,
             Stage::EarlyPatches | Stage::LatePatches => {
                 let patches = self.patches(project);
                 if patches.is_empty() {
@@ -340,6 +400,7 @@ fn apply_sa1pack(rom: &Rom, size: usize) -> Result<Rom, BuildError> {
 fn rom_size(clean: &Rom, project: &Project) -> usize {
     let m = &project.manifest;
     let writes = !project.levels.is_empty()
+        || project.lunar_magic_layout()
         || m.sa1
         || !m.early_patches.is_empty()
         || !m.late_patches.is_empty()
@@ -421,6 +482,7 @@ pub fn base_image(clean: &Rom, manifest: &Manifest) -> Result<Rom, BuildError> {
         root: PathBuf::from("."),
         manifest: manifest.clone(),
         levels: Vec::new(),
+        map16: Vec::new(),
     };
     let mut rom = Rom::from_bytes(clean.data().to_vec())?;
     Stage::Base.run(&mut rom, clean, &project)?;
@@ -468,6 +530,66 @@ pub fn build_on(base: &Rom, project: &Project, cache: Option<&Cache>) -> Result<
     }
     rom.fix_checksum()?;
     Ok(rom)
+}
+
+/// Writes the project's Map16 pages into tables of their own, one for each
+/// group of 16 pages the project uses, and what their tiles act like into the acts-like tables: the
+/// one Kobo's install made for tiles below `$4000`, and one made here for
+/// the rest when a page needs it.
+fn write_map16(rom: &mut Rom, project: &Project) -> Result<(), BuildError> {
+    if project.map16.is_empty() {
+        return Ok(());
+    }
+    let mut space = FreeSpace::scan(rom);
+    let pages: std::collections::BTreeMap<u8, &Map16Page> =
+        project.map16.iter().map(|(n, p)| (*n, p)).collect();
+    let tiles_of = |page: u8| {
+        let first = page as u16 * page_source::PAGE_TILES;
+        first..first + page_source::PAGE_TILES
+    };
+    let lower = SnesAddr::new(rom.read_u24(map16_pages::ACTS_LIKE)?);
+    let mut upper = None;
+    for (&page, tiles) in &pages {
+        for tile in tiles_of(page) {
+            let acts = tiles.tile(tile).acts;
+            let at = if tile < 0x4000 {
+                lower.add(2 * tile as u32)
+            } else {
+                let table = match upper {
+                    Some(table) => table,
+                    None => {
+                        let table = space.alloc(rom, 0x8000, Contents::Data)?;
+                        let default = page_source::DEFAULT_ACTS.to_le_bytes();
+                        rom.write(table, &default.repeat(0x4000))?;
+                        rom.write_u24(map16_pages::ACTS_LIKE_UPPER, table.raw() - 0x8000)?;
+                        upper = Some(table);
+                        table
+                    }
+                };
+                table.add(2 * (tile - 0x4000) as u32)
+            };
+            rom.write_u16(at, acts)?;
+        }
+    }
+    // A group's table is whole, as Lunar Magic allocates it: its editor
+    // shows every page of a group with a table, and reads them all.
+    for group in &map16_pages::PAGE_GROUPS {
+        if !group.pages().any(|p| pages.contains_key(&p)) {
+            continue;
+        }
+        let mut bytes = Vec::with_capacity(group.pages().count() * 0x800);
+        for page in group.pages() {
+            for tile in tiles_of(page) {
+                let entry = pages.get(&page).map(|p| p.tile(tile)).unwrap_or_default();
+                bytes.extend(entry.gfx.to_bytes());
+            }
+        }
+        let table = place(rom, &mut space, &bytes)?;
+        let (pointer, bank) = group.stored_for(tiles_of(*group.pages().start()).start, table);
+        rom.write_u16(group.pointer, pointer)?;
+        rom.write_u8(group.bank, bank)?;
+    }
+    Ok(())
 }
 
 /// First-fit placement in [`BANK_07_FREE`].

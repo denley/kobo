@@ -44,9 +44,10 @@ pub mod tables {
     pub const ENTRANCE_COUNT: u16 = 0x200;
     /// Lunar Magic's bank bytes for the sprite pointers, one per level.
     pub const SPRITE_BANKS: SnesAddr = SnesAddr::new(0x0EF100);
-    /// Lunar Magic's one-time install gate: `$FF` in the game, anything
-    /// else once installed (see docs/lunar-magic.md).
-    pub const LUNAR_MAGIC_GATE: SnesAddr = SnesAddr::new(0x06F600);
+    /// Lunar Magic's hook that takes a sprite list's bank from
+    /// [`SPRITE_BANKS`] (`JSL` over the game's `LDA #$07 : STA $D0`): its
+    /// own check for that table (docs/lunar-magic-install.md).
+    pub const SPRITE_BANK_HOOK: SnesAddr = SnesAddr::new(0x05D8F5);
     /// Lunar Magic's per-level flags, `bbBBVFCT`: `V` a background in the
     /// game's format, `C` Lunar Magic's own, `F` with high bytes.
     pub const LEVEL_FLAGS: SnesAddr = SnesAddr::new(0x0EF310);
@@ -66,11 +67,15 @@ pub struct LevelFormat {
 }
 
 impl LevelFormat {
-    /// Read from the ROM: every Lunar Magic ROM of the corpus, from 1.62
-    /// on, has its gate set, and exactly the 3.x ones have the hook.
+    /// Read from the ROM: Lunar Magic decides piece by piece what it has
+    /// installed, and every Lunar Magic ROM of the corpus, from 1.62 on,
+    /// has the sprite bank hook along with the rest of its level tables
+    /// (per-level flags, entrances in its format); exactly the 3.x ones
+    /// have the tall level hook. Map16 pages past 1 are another piece
+    /// ([`crate::map16::pages`]).
     pub fn of(rom: &Rom) -> Self {
         let byte = |addr| rom.read_u8(addr).ok();
-        let lunar_magic = byte(tables::LUNAR_MAGIC_GATE).is_some_and(|b| b != 0xFF);
+        let lunar_magic = byte(tables::SPRITE_BANK_HOOK) == Some(0x22);
         let tall = lunar_magic && byte(tables::TALL_LEVEL_HOOK) == Some(0x22);
         Self {
             lunar_magic,

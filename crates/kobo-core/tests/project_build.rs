@@ -111,6 +111,7 @@ fn an_empty_project_builds_the_clean_rom() {
         root: std::path::PathBuf::from("."),
         manifest: Default::default(),
         levels: Vec::new(),
+        map16: Vec::new(),
     };
     assert_eq!(build::build(&clean, &project).unwrap().data(), clean.data());
 }
@@ -129,6 +130,7 @@ fn edits_reach_the_rom() {
         root: std::path::PathBuf::from("."),
         manifest: Default::default(),
         levels: vec![(0x105, level.clone())],
+        map16: Vec::new(),
     };
     let built = build::build(&clean, &project).unwrap();
     assert_eq!(import::read_level(&built, 0x105).unwrap().0, level);
@@ -165,6 +167,7 @@ fn lunar_magic_objects_are_refused_for_now() {
         root: std::path::PathBuf::from("."),
         manifest: Default::default(),
         levels: vec![(0x105, level)],
+        map16: Vec::new(),
     };
     let error = build::build(&clean, &project).unwrap_err().to_string();
     assert!(error.contains("Lunar Magic"), "{error}");
@@ -182,6 +185,7 @@ fn cached_builds_equal_clean_ones() {
         root: std::path::PathBuf::from("."),
         manifest: Default::default(),
         levels: vec![(0x105, level)],
+        map16: Vec::new(),
     };
     let uncached = build::build(&clean, &project).unwrap();
     let cold = build::build_cached(&clean, &project, Some(&cache)).unwrap();
@@ -219,6 +223,7 @@ fn a_synthetic_build_is_the_same_everywhere() {
         root: std::path::PathBuf::from("."),
         manifest: Default::default(),
         levels: vec![(0x105, level.clone()), (0x0C7, level)],
+        map16: Vec::new(),
     };
     let built = build::build_on(&base, &project, None).unwrap();
     assert_eq!(

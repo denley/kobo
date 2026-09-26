@@ -1,4 +1,5 @@
-//! A project's source files: the manifest and the level files, in TOML.
+//! A project's source files: the manifest, the level files, and the Map16
+//! page files, in TOML.
 //!
 //! Kobo owns the formatting. Every file is written the same way from the
 //! same content, one object or sprite per line in data order, numbers the
@@ -10,6 +11,7 @@
 use thiserror::Error;
 
 pub mod level;
+pub mod map16;
 pub mod project;
 
 #[derive(Debug, Error)]

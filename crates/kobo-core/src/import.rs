@@ -13,10 +13,13 @@ use thiserror::Error;
 use crate::addr::{PcAddr, SnesAddr};
 use crate::level::objects::Object;
 use crate::level::{self, LEVEL_COUNT, LevelError, LevelFormat, tables};
+use crate::map16::Map16Tile;
+use crate::map16::pages::{self as map16_pages, PAGE_GROUPS};
 use crate::mwl::{self, Mwl, MwlFile};
 use crate::rats::{self, RatsBlock};
 use crate::rom::Rom;
 use crate::source::level::{Comments, Entrance, Layer2, Level, Sprites};
+use crate::source::map16::{Map16Entry, Map16Page, PAGE_TILES, PageComments};
 use crate::source::project::{MANIFEST, Manifest};
 use crate::sprites::{self, SpriteError};
 
@@ -29,6 +32,8 @@ pub enum ImportError {
     Level(#[from] LevelError),
     #[error(transparent)]
     Sprites(#[from] SpriteError),
+    #[error(transparent)]
+    Rom(#[from] crate::rom::RomError),
     #[error("failed to write {path}: {source}")]
     Io {
         path: PathBuf,
@@ -107,6 +112,8 @@ pub fn read_level(rom: &Rom, number: u16) -> Result<(Level, Vec<String>), Import
 pub struct Report {
     /// Levels written.
     pub levels: Vec<u16>,
+    /// Map16 pages written.
+    pub map16: Vec<u8>,
     /// Notes, each naming its level.
     pub notes: Vec<String>,
     /// Ranges of the clean ROM's space the imported ROM changed, outside
@@ -159,6 +166,24 @@ pub fn import_rom(rom: &Rom, base: &Rom, dir: &Path, all: bool) -> Result<Report
                 .map(|n| format!("level {number:03X}: {n}")),
         );
     }
+    for (page, tiles) in read_map16(rom)? {
+        let file = PathBuf::from("map16").join(format!("{page:02X}.toml"));
+        write(&dir.join(&file), tiles.to_toml(&PageComments::default()))?;
+        manifest.map16.insert(page, file);
+        report.map16.push(page);
+    }
+    let mut changed_acts = 0;
+    if map16_pages::installed(rom) {
+        for tile in 0..0x200u16 {
+            changed_acts +=
+                usize::from(map16_pages::acts_like(rom, tile)?.is_some_and(|a| a != tile));
+        }
+    }
+    if changed_acts > 0 {
+        report.notes.push(format!(
+            "{changed_acts} tiles of pages 0 and 1 act like another tile; not imported"
+        ));
+    }
     write(&manifest_path, manifest.to_toml())?;
     let read = read_spans(rom)?;
     report.unmodelled = unmodelled(rom, base, &read);
@@ -173,6 +198,40 @@ pub fn import_rom(rom: &Rom, base: &Rom, dir: &Path, all: bool) -> Result<Report
         })
         .collect();
     Ok(report)
+}
+
+/// Map16 pages 2 to `$7F` from Lunar Magic's tables: every page of each
+/// group of 16 that has a table, with what its tiles act like, but pages
+/// with every tile empty ([`Map16Entry::default`]), which a build writes
+/// for the pages of a group a project does not list.
+pub fn read_map16(rom: &Rom) -> Result<Vec<(u8, Map16Page)>, ImportError> {
+    let mut out = Vec::new();
+    if !map16_pages::installed(rom) {
+        return Ok(out);
+    }
+    for group in &PAGE_GROUPS {
+        if group.definition(rom, 0)?.is_none() {
+            continue;
+        }
+        for page in group.pages() {
+            let mut tiles = Map16Page::default();
+            let first = page as u16 * PAGE_TILES;
+            for tile in first..first + PAGE_TILES {
+                let at = group.definition(rom, tile)?.expect("the group has a table");
+                let bytes: [u8; 8] = rom.read(at, 8)?.try_into().expect("8 bytes");
+                let entry = Map16Entry {
+                    gfx: Map16Tile::from_bytes(bytes),
+                    acts: map16_pages::acts_like(rom, tile)?
+                        .unwrap_or(crate::source::map16::DEFAULT_ACTS),
+                };
+                tiles.tiles.insert(tile, entry);
+            }
+            if tiles.tiles.values().any(|t| *t != Map16Entry::default()) {
+                out.push((page, tiles));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The file ranges of everything [`read_level`] reads for every level,
@@ -198,6 +257,22 @@ fn read_spans(rom: &Rom) -> Result<Vec<Range<usize>>, ImportError> {
         add(tables::SPRITE_BANKS, count);
         add(tables::LEVEL_FLAGS, count);
         add(LUNAR_MAGIC_MARKER, 64);
+    }
+    if map16_pages::installed(rom) {
+        for group in &PAGE_GROUPS {
+            add(group.pointer, 2);
+            add(group.bank, 1);
+            if let Some(start) = group.definition(rom, *group.pages().start() as u16 * 0x100)? {
+                add(start, group.pages().count() * 0x800);
+            }
+        }
+        add(map16_pages::ACTS_LIKE, 3);
+        add(map16_pages::ACTS_LIKE_UPPER, 3);
+        add(SnesAddr::new(rom.read_u24(map16_pages::ACTS_LIKE)?), 0x8000);
+        let upper = rom.read_u24(map16_pages::ACTS_LIKE_UPPER)?;
+        if upper >> 16 != 0xFF {
+            add(SnesAddr::new(upper + 0x8000), 0x8000);
+        }
     }
     // The ROM size code, and the checksum and its complement.
     add(SnesAddr::new(0x00FFD7), 1);

@@ -226,6 +226,13 @@ how each oracle is produced, where its data lives, and what is known not to matc
   game's, pages past 1 from tables written where Lunar Magic's layout points, and a few
   levels drawn as vanilla. After a change to a patch, compare `render_hashes` of all 512
   levels with vanilla's by hand (`kobo rom expand 1M`, then `kobo asm` each patch).
+- **Map16 pages**: `tests/map16_pages.rs` builds pages in three groups of 16, one past
+  `$40`, onto the synthetic base (Asar needed) and reads them back as written; with the
+  vanilla ROM it also resolves them through the ROM's own tilemap upload and draws two
+  vanilla levels as vanilla does. By hand: `kobo import` Kaizo Kindergarten, keep only
+  `[map16]` in the manifest, build, import the build, and `diff -r` the `map16` folders
+  (identical); `tools/lunar-magic/save-check` the build and import the saved copy: the
+  pages must come back the same.
 - **Block contact probe**: `tools/lunar-magic/block-probe/make-rom out/` builds vanilla
   saved once by Lunar Magic with GPS's logging probe block in level `105` (needs Wine,
   Lunar Magic, and GPS 1.4.4 built for the system in `KOBO_GPS`;
