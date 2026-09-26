@@ -31,6 +31,7 @@ use crate::install;
 use crate::level::objects::{self, Jumps, Layout, Object, ObjectError};
 use crate::level::{self, LevelError, tables};
 use crate::map16::pages as map16_pages;
+use crate::palette;
 use crate::rats::{Contents, FreeSpace, FreeSpaceError};
 use crate::rom::{Rom, RomError, RomIdentity};
 use crate::source::SourceError;
@@ -166,6 +167,7 @@ impl Project {
             || !self.map16_bg.is_empty()
             || self.levels.iter().any(|(_, level)| {
                 level.layer1.iter().any(handled)
+                    || level.palette.is_some()
                     || matches!(&level.layer2, Layer2::Background(_))
                     || matches!(&level.layer2, Layer2::Objects(list) if list.iter().any(handled))
             })
@@ -754,6 +756,18 @@ fn write_level(
             rom.write_ptr(layer2_ptr, at)?;
             rom.write_u8(tables::LEVEL_FLAGS.add(number as u32), flags)?;
         }
+    }
+
+    if let Some(palette) = &level.palette {
+        let mut bytes = palette.back_area.0.to_le_bytes().to_vec();
+        for color in palette.palette.colors {
+            bytes.extend(color.0.to_le_bytes());
+        }
+        let at = place(rom, space, &bytes)?;
+        rom.write_u24(
+            palette::LM_LEVEL_PALETTE_PTRS.add(3 * number as u32),
+            at.raw(),
+        )?;
     }
 
     for (table, byte) in tables::SECONDARY_HEADERS

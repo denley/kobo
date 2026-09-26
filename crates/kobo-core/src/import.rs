@@ -16,6 +16,7 @@ use crate::level::{self, LEVEL_COUNT, LevelError, LevelFormat, tables};
 use crate::map16::Map16Tile;
 use crate::map16::pages::{self as map16_pages, PAGE_GROUPS};
 use crate::mwl::{self, Mwl, MwlFile};
+use crate::palette::{self, CustomPalette};
 use crate::rats::{self, RatsBlock};
 use crate::rom::Rom;
 use crate::source::level::{
@@ -97,7 +98,11 @@ pub fn read_level(rom: &Rom, number: u16) -> Result<(Level, Vec<String>), Import
         layer2,
         sprites: Sprites::from_entries(list.header, &list.sprites, vertical),
         entrances,
+        palette: palette::lm_level_palette(rom, number)?,
     };
+    if level.palette.as_ref().is_some_and(high_bits) {
+        notes.push("its palette has colours with bit 15 set, which is not kept".into());
+    }
     let lunar = level
         .layer1
         .iter()
@@ -554,6 +559,7 @@ pub fn diff_levels(a: &Rom, b: &Rom) -> Vec<LevelDiff> {
                 ("layer2", x.layer2 != y.layer2),
                 ("sprites", x.sprites != y.sprites),
                 ("entrances", x.entrances != y.entrances),
+                ("palette", x.palette != y.palette),
             ]
             .into_iter()
             .filter(|(_, differs)| *differs)
@@ -607,8 +613,12 @@ pub fn level_from_mwl(mwl: &Mwl, clean: &Rom) -> Result<(Level, Vec<String>), Im
         }
         _ => Layer2::None,
     };
-    if mwl.layer1.custom_palette() {
-        notes.push("its custom palette is not imported yet".into());
+    let palette = mwl.layer1.custom_palette().then(|| CustomPalette {
+        back_area: mwl.palette.back_area,
+        palette: mwl.palette.colors.clone(),
+    });
+    if palette.as_ref().is_some_and(high_bits) {
+        notes.push("its palette has colours with bit 15 set, which is not kept".into());
     }
     let lunar = mwl
         .entrances
@@ -634,8 +644,17 @@ pub fn level_from_mwl(mwl: &Mwl, clean: &Rom) -> Result<(Level, Vec<String>), Im
             .iter()
             .map(|e| Entrance::from_bytes(e.id, e.tables))
             .collect(),
+        palette,
     };
     Ok((level, notes))
+}
+
+/// Whether a palette has a colour with bit 15 set, which the SNES ignores
+/// and a level file does not keep.
+fn high_bits(p: &CustomPalette) -> bool {
+    std::iter::once(p.back_area)
+        .chain(p.palette.colors)
+        .any(|c| c.0 & 0x8000 != 0)
 }
 
 /// Imports an MWL file into the project in `dir`, as `level` or the level

@@ -42,6 +42,7 @@ use crate::addr::SnesAddr;
 use crate::level::objects::{Object, ScreenExit, Settings};
 use crate::level::{LevelMode, PrimaryHeader, SecondaryHeader};
 use crate::names;
+use crate::palette::{Color15, CustomPalette, Palette};
 use crate::sprites::{SpriteEntry, SpriteHeader};
 
 /// A level as its source file has it.
@@ -54,6 +55,8 @@ pub struct Level {
     pub sprites: Sprites,
     /// The secondary entrances that lead here.
     pub entrances: Vec<Entrance>,
+    /// The level's own palette, in Lunar Magic's layout, if it has one.
+    pub palette: Option<CustomPalette>,
 }
 
 /// A secondary entrance, in the level it leads to.
@@ -333,6 +336,16 @@ impl Level {
                 entrance_line,
             );
         }
+        if let Some(palette) = &self.palette {
+            out += "\n[palette]\n";
+            out += &format!("back_area = \"{}\"\n", color_text(palette.back_area));
+            out += "colors = [\n";
+            for (row, colors) in palette.palette.colors.chunks(16).enumerate() {
+                let cells: Vec<String> = colors.iter().map(|&c| color_text(c)).collect();
+                out += &format!("    \"{}\",  # row {row:X}\n", cells.join(" "));
+            }
+            out += "]\n";
+        }
         out
     }
 
@@ -361,6 +374,7 @@ impl Level {
                 "layer2",
                 "sprites",
                 "entrances",
+                "palette",
             ],
         )?;
 
@@ -427,6 +441,13 @@ impl Level {
                 read_list(t, "list", "entrances", &mut comments, read_entrance_entry)?
             }
         };
+        let palette = match doc.get("palette") {
+            None => None,
+            Some(item) => Some(read_palette(
+                item.as_table()
+                    .ok_or_else(|| invalid("palette", "must be a table"))?,
+            )?),
+        };
         Ok((
             Self {
                 header,
@@ -435,10 +456,66 @@ impl Level {
                 layer2,
                 sprites,
                 entrances,
+                palette,
             },
             comments,
         ))
     }
+}
+
+/// `#RRGGBB`, each channel the SNES 5-bit value times 8.
+fn color_text(c: Color15) -> String {
+    format!("#{:02X}{:02X}{:02X}", c.r() * 8, c.g() * 8, c.b() * 8)
+}
+
+fn parse_color(at: &str, text: &str) -> Result<Color15, SourceError> {
+    let bad = || {
+        invalid(
+            at,
+            format!("{text:?} is not a colour #RRGGBB of multiples of 8"),
+        )
+    };
+    let hex = text
+        .strip_prefix('#')
+        .filter(|h| h.len() == 6)
+        .ok_or_else(bad)?;
+    let channel = |i: usize| {
+        u8::from_str_radix(&hex[i..i + 2], 16)
+            .ok()
+            .filter(|v| v % 8 == 0)
+            .map(|v| v / 8)
+            .ok_or_else(bad)
+    };
+    Ok(Color15::from_rgb5(channel(0)?, channel(2)?, channel(4)?))
+}
+
+fn read_palette(t: &Table) -> Result<CustomPalette, SourceError> {
+    check_keys(t, "palette", &["back_area", "colors"])?;
+    let back_area = t
+        .get("back_area")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| invalid("palette.back_area", "must be a colour \"#RRGGBB\""))?;
+    let back_area = parse_color("palette.back_area", back_area)?;
+    let rows = t
+        .get("colors")
+        .and_then(|v| v.as_array())
+        .filter(|a| a.len() == 16)
+        .ok_or_else(|| invalid("palette.colors", "must be 16 rows of 16 colours"))?;
+    let mut palette = Palette::default();
+    for (row, value) in rows.iter().enumerate() {
+        let at = format!("palette.colors[{row}]");
+        let text = value
+            .as_str()
+            .ok_or_else(|| invalid(&at, "must be a string of 16 colours"))?;
+        let cells: Vec<&str> = text.split_whitespace().collect();
+        if cells.len() != 16 {
+            return Err(invalid(&at, format!("has {} colours, not 16", cells.len())));
+        }
+        for (i, cell) in cells.iter().enumerate() {
+            palette.colors[row * 16 + i] = parse_color(&at, cell)?;
+        }
+    }
+    Ok(CustomPalette { back_area, palette })
 }
 
 fn list<T>(

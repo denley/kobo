@@ -1,7 +1,7 @@
 #!/bin/bash
 # A Lunar Magic-saved ROM with Kobo's code for Lunar Magic's layout (asm/lunar-magic/:
-# the Map16 routine, the acts-like chain, the placed objects, the level number, and
-# backgrounds) in place of Lunar Magic's, keeping the ROM's Map16 page tables, acts-like
+# the Map16 routine, the acts-like chain, the placed objects, the level number,
+# backgrounds, and custom palettes) in place of Lunar Magic's, keeping the ROM's Map16 page tables, acts-like
 # tables, level flags, and BG Map16 pointers, so a hack's content runs through both
 # implementations:
 #   with-kobo lm.smc out.sfc
@@ -23,7 +23,8 @@ $K asm $A/map16.asm $t/1.sfc -r $t/0.sfc >/dev/null
 $K asm $A/actslike.asm $t/1b.sfc -r $t/1.sfc >/dev/null
 $K asm $A/objects.asm $t/1c.sfc -r $t/1b.sfc >/dev/null
 $K asm $A/level.asm $t/1d.sfc -r $t/1c.sfc >/dev/null
-$K asm $A/background.asm $t/2.sfc -r $t/1d.sfc >/dev/null
+$K asm $A/background.asm $t/1e.sfc -r $t/1d.sfc >/dev/null
+$K asm $A/palette.asm $t/2.sfc -r $t/1e.sfc >/dev/null
 python3 - "$1" $t/2.sfc "$2" <<'PY'
 import sys
 def ld(p):

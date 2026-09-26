@@ -12,7 +12,7 @@
 //! the placed objects (`22`, `23`, `27`, `29`), whose check is on Lunar
 //! Magic's own code, so its first save puts its own in their place; the
 //! level number (`$0EF550` occupied); and backgrounds and BG Map16 (a `JML`
-//! at `$0EF519`, a `JSL` at `$058DA4`).
+//! at `$0EF519`, a `JSL` at `$058DA4`); and custom palettes.
 
 use crate::asar::{Asar, AsarError, Patch, Patched};
 use crate::rom::Rom;
@@ -33,6 +33,10 @@ pub const LUNAR_MAGIC: &[(&str, &str)] = &[
     (
         "background.asm",
         include_str!("../asm/lunar-magic/background.asm"),
+    ),
+    (
+        "palette.asm",
+        include_str!("../asm/lunar-magic/palette.asm"),
     ),
 ];
 

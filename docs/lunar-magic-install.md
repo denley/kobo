@@ -410,6 +410,23 @@ the hook's outputs as the ROM's code leaves them) and implemented by Kobo
   level resolves the same grid, background tilemap, Map16, and BG Map16 as the hack
   (examples/tiles_diff.rs), before and after Lunar Magic saves the build (2026-09-26).
 
+### Custom palettes
+
+- A level's palette at `$0EF600` (docs/lunar-magic.md) is loaded by the `JSL CODE_05BE8A` at
+  `$00A5BF`, in the level's setup just after the game's `LoadPalette`, retargeted to
+  `$0EF570`: found by putting Lunar Magic's changes back to vanilla in halves until Kaizo
+  Kindergarten's level `001` lost its colours. The palette goes over `$0701` (back area)
+  and `$0703` (the 256 colours) before the game uploads them. The hook also clears
+  `$00FE`-`$00FF` (the level number plus one, from the `$05D8E2` hook) wherever it runs,
+  palette or not; boss arenas and a few special levels (`198`-`19B`, `1C7`, `1DE`, `1EB`,
+  `1F6` in Kaizo Kindergarten) never reach it and keep the value.
+- Kobo's (`asm/lunar-magic/palette.asm`, at the same site, its code elsewhere) gives the
+  same pictures, VRAM, CGRAM, and RAM but for direct-page scratch on all 512 levels of
+  Kaizo Kindergarten's content. A save kept every `$0EF600` pointer a build wrote.
+- Levels with ExAnimation (Kaizo Kindergarten: 34, using level or global animations)
+  change colours across Lunar Magic's first save of a build, which carries no ExAnimation
+  yet; the others keep every colour.
+
 ### Entrances, exits, and midway points
 
 - Secondary entrances (data): exits `0CE`, `0CF`, `0D0`, `0D9`, `0DB`, `0DE`, `0E1`,
