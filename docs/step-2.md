@@ -324,6 +324,10 @@ on the built ROM.
   flags and tables. Kaizo Kindergarten built by Kobo resolves every level as the hack does,
   before and after Lunar Magic saves the build; the pictures still need its graphics and
   palettes. An import keeps the ROM's size when it is over the default.
+- 2b progress, custom palettes: a level file's `[palette]` (`back_area` and 16 rows of 16
+  colours), from ROMs and MWL files, built with Kobo's palette hook. Kaizo Kindergarten's
+  334 palettes build to the hack's CGRAM but where ExAnimation changes colours, and survive
+  Lunar Magic's save.
 - 2b then takes Lunar Magic-layout features one at a time, each through its source format,
   import from MWL and ROM, build, the Lunar Magic check, and the corpus check together, so
   neither direction anchors the format: Map16 pages 2 and up and background Map16, custom

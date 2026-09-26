@@ -283,6 +283,47 @@ fn lunar_magic_backgrounds_build() {
 }
 
 #[test]
+fn custom_palettes_build() {
+    let Some(clean) = common::vanilla() else {
+        return;
+    };
+    if common::asar().is_none() {
+        return;
+    }
+    use kobo_core::palette::{Color15, CustomPalette, Palette};
+    let (mut level, _) = import::read_level(&clean, 0x105).unwrap();
+    let mut palette = Palette::default();
+    for (i, color) in palette.colors.iter_mut().enumerate() {
+        *color = Color15::from_rgb5(i as u8 % 32, (i / 8) as u8 % 32, 31 - i as u8 % 32);
+    }
+    let custom = CustomPalette {
+        back_area: Color15::from_rgb5(3, 5, 7),
+        palette,
+    };
+    level.palette = Some(custom.clone());
+    let text = level.to_toml(&Comments::default());
+    assert_eq!(Level::from_toml(&text).unwrap().0, level);
+    let project = Project {
+        root: std::path::PathBuf::from("."),
+        manifest: Default::default(),
+        levels: vec![(0x105, level.clone())],
+        map16: Vec::new(),
+        map16_bg: Vec::new(),
+    };
+    let built = build::build(&clean, &project).unwrap();
+    assert_eq!(import::read_level(&built, 0x105).unwrap().0, level);
+    let loaded = kobo_core::expand::expand_level(&built, 0x105).unwrap();
+    let cgram = &loaded.video.cgram;
+    // The load uploads the palette, as the game then changes a few colours.
+    let same = (0..256)
+        .filter(|&i| {
+            u16::from_le_bytes([cgram[2 * i], cgram[2 * i + 1]]) == custom.palette.colors[i].0
+        })
+        .count();
+    assert!(same > 240, "{same} of 256 colours are the level's");
+}
+
+#[test]
 fn cached_builds_equal_clean_ones() {
     let Some(clean) = common::vanilla() else {
         return;
