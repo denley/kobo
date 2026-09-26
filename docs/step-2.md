@@ -159,9 +159,11 @@ on the built ROM.
 1. Development environment: Wine with the current Lunar Magic release (for its
    command-line exports and the Lunar Magic checks) and Asar.
 2. The hook spike. Done: [lunar-magic.md](lunar-magic.md) has what Lunar Magic installs
-   and how it decides. Lunar Magic keeps Kobo's code behind any hook site that jumps to
-   it, but its one-time install is gated by `$06F600` alone and wipes its tables when it
-   runs, and a save never adds the 15 one-time hooks to a ROM whose gate is set.
+   and how it decides. Lunar Magic keeps Kobo's code behind a one-time hook site that
+   jumps to it, but decides piece by piece whether its install is there, mostly by a
+   `JSL` at one hook site per piece, and a piece it installs resets that piece's tables
+   ([lunar-magic-install.md](lunar-magic-install.md#how-a-save-decides-what-to-install)).
+   The spike first read this as one gate at `$06F600`, which covers bank `$06` only.
 3. Write-side research. The tools are done ([toolchain.md](toolchain.md)). For Lunar
    Magic, [lunar-magic.md](lunar-magic.md) has the footprint and the hook sites, and
    [lunar-magic-install.md](lunar-magic-install.md) the one-time set piece by piece: the
@@ -276,24 +278,31 @@ on the built ROM.
   Lunar Magic-saved ROM by playing it against a logging GPS block
   (`examples/contact_probe.rs`), and matches it in every scenario tried; vanilla with both
   pieces renders all 512 levels as vanilla does.
-- 2b starts with the one-time set. The first Lunar Magic-layout table Kobo writes needs the
-  gate set, or Lunar Magic's install wipes it, and with the gate set Lunar Magic never
-  installs the 15 one-time hooks and 95 one-time ranges itself. So Kobo provides all of
-  them, clean-room, before any feature: the Map16 routine at `$06F540` and its four call
-  sites, the BG Map16 and per-level flag hooks, and the rest of that list. The acts-like
-  table pointer at `$06F624` is part of it, and GPS also patches the code around it (the
-  entry slots from `$06F690`, the compare chain at `$06F67B` and `$06F717`, the exit at
-  `$06F602`), so Kobo's code there has to have the shape GPS expects. This is the
-  largest piece of 2b. The 32 hooks a save reinstalls need Kobo's own code only for the
-  features Kobo supports.
+- 2b does not start with the whole one-time set. A save decides piece by piece whether
+  Lunar Magic's install is there and installs each missing piece over whatever is at its
+  sites, resetting its tables. So a feature brings the pieces whose tables it writes, as
+  Kobo's clean-room code with the check for each met (a `JSL` at the piece's hook site,
+  `$06F600` for bank `$06`), and leaves the rest for Lunar Magic's first save to install:
+  per-level tables and midway points need `$05DA17`, sprite data banks `$05D8F5`, BG
+  Map16 `$058DA4`, taller levels `$05DA8A`. Where a check is on Lunar Magic's own code
+  (`$05803B`'s, on `$0EF510`) or a save always retargets the hook, Kobo's code runs
+  until the first save and Lunar Magic's after it, reading the same data. Bank `$06` is
+  done: Kobo's Map16 routine and acts-like chain give the same pictures and RAM as Lunar
+  Magic's on every level of Kaizo Kindergarten's content. The acts-like table pointer at
+  `$06F624` is part of it, and GPS also patches the code around it (the entry slots from
+  `$06F690`, the compare chain at `$06F67B` and `$06F717`, the exit at `$06F602`), so
+  Kobo's code there has the shape GPS expects.
 - 2b then takes Lunar Magic-layout features one at a time, each through its source format,
   import from MWL and ROM, build, the Lunar Magic check, and the corpus check together, so
   neither direction anchors the format: Map16 pages 2 and up and background Map16, custom
   palettes, ExGFX, expanded level sizes, the sprite data formats (new sprite system, 255
-  sprites, PIXI extension bytes), secondary entrances and exits.
+  sprites, PIXI extension bytes), secondary entrances and exits. Each is checked with Lunar
+  Magic saving the build, and with a hack's content transferred by Lunar Magic's command
+  line into a Lunar Magic ROM with Kobo's pieces swapped in (`tools/lunar-magic/with-kobo`).
 - 2c: running the tools (user Asar patches, PIXI, GPS, UberASM Tool, AddmusicK), the
   companion build repository, and SA-1 builds with SA-1 Pack. PIXI and GPS need the
-  one-time set, and PIXI Lunar Magic's VRAM patch at `$00F6E4`, so 2c follows 2b's start.
+  acts-like chain, which is done, and PIXI Lunar Magic's VRAM patch at `$00F6E4`, a hook
+  a save restores.
 
 ## Risks
 

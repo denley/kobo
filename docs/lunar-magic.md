@@ -259,9 +259,13 @@ after a save and by changing bytes and saving again (the hook spike of
 - The marker is not what Lunar Magic reads to decide what is installed. With it removed, a
   save writes it back and changes nothing else, and a ROM with no hooks gets the full
   install whether or not it carries the marker.
-- The one-time install is gated by one byte: `$06F600` other than `$FF` (vanilla's fill)
-  means it has been done. Found by putting Lunar Magic's regions back to vanilla in halves
-  until the install ran again; `$00`, `$42`, and `$5C` there all count as installed.
+- There is no single gate. A save decides piece by piece whether its install is there,
+  each piece by a check of its own: `$06F600` other than `$FF` for the Map16 routine and
+  the acts-like chain in bank `$06` (`$00`, `$42`, and `$5C` there all count), a `JSL` at
+  one of its hook sites for most others, some of them hooks a save restores
+  ([lunar-magic-install.md](lunar-magic-install.md#how-a-save-decides-what-to-install)
+  has the map). The spike found only `$06F600` because it put a whole Lunar Magic ROM
+  back to vanilla in halves, where every other check was still met.
 - With the gate set, a save repairs only part of what is missing. It reinstalls 32 of the
   52 hooks as new copies of its code in fresh space, with the jumps retargeted, and puts 5
   back in place (`$00A6B8`, `$00A6CC`, `$0583C7`, `$05D8F5`, `$05D97D`); of the other
@@ -274,9 +278,8 @@ after a save and by changing bytes and saving again (the hook spike of
 - It never checks the code behind a hook. Foreign bytes at all 46 hook targets survive a
   save, and all 52 sites retargeted to a foreign RATS block count as installed, with the
   block kept.
-- With the gate clear, the install reinitialises Lunar Magic's tables over whatever is
-  there: a custom palette imported for level `105` lost its pointer at `$0EF600` and its
-  space was reused. Vanilla-format data elsewhere survives it: level `105`'s layer 1 moved
+- A piece that a save installs reinitialises its tables over whatever is there: a custom
+  palette imported for level `105` lost its pointer at `$0EF600` and its space was reused. Vanilla-format data elsewhere survives it: level `105`'s layer 1 moved
   into a RATS block at `$118000`, with its pointer at `$05E000` retargeted, kept both.
 - Lunar Magic warns "The ROM may be Corrupt!" when the internal checksum is wrong, and
   "This isn't a fresh ROM!" when it is right but the image is not vanilla. The command
