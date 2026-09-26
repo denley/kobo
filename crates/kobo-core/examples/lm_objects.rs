@@ -11,7 +11,9 @@
 //! horizontal level (`105`), group 2 for a vertical one (`1CE`), whose
 //! screens are 16 rows of two 16-column halves. `lm_objects add in.mwl
 //! out.mwl "40 60 0B"` adds one of Lunar Magic's settings objects, as its
-//! bytes, to the end of layer 1.
+//! bytes, to the end of layer 1. `lm_objects exgfx in.mwl out.mwl slot
+//! file` sets one of the level's graphics slots (0 = AN2 to 15 = LG1, as
+//! the MWL file orders them) to a file number, in hex.
 
 use kobo_core::level::objects::Object;
 use kobo_core::mwl::MwlFile;
@@ -171,6 +173,12 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("make") => make(&args[1], &args[2], args[3].parse().unwrap()),
         Some("add") => add(&args[1], &args[2], &args[3]),
+        Some("exgfx") => exgfx(
+            &args[1],
+            &args[2],
+            args[3].parse().unwrap(),
+            u16::from_str_radix(&args[4], 16).unwrap(),
+        ),
         Some("grid") => grid(
             &args[1],
             u16::from_str_radix(&args[2], 16).unwrap(),
@@ -221,6 +229,15 @@ fn add(input: &str, output: &str, bytes: &str) {
         .map(|b| u8::from_str_radix(b, 16).unwrap())
         .collect();
     mwl.layer1.data.objects.push(Object::Unplaced(bytes));
+    std::fs::write(output, mwl.to_file(None).unwrap().to_bytes()).unwrap();
+}
+
+fn exgfx(input: &str, output: &str, slot: usize, file: u16) {
+    let mut mwl = MwlFile::parse(&std::fs::read(input).unwrap())
+        .unwrap()
+        .decode(None)
+        .unwrap();
+    mwl.exgfx.0[slot] = file;
     std::fs::write(output, mwl.to_file(None).unwrap().to_bytes()).unwrap();
 }
 
