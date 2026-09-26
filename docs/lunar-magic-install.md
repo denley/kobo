@@ -252,6 +252,52 @@ call site of `$00F44D` whose return address the chain sees (the low byte GPS com
   leave the same RAM after every load but `$0B`, a direct-page scratch byte that no code
   reads before writing (2026-09-26).
 
+### Placed objects
+
+Lunar Magic's objects `22`, `23`, `27`, and `29` (formats in the smwspeedruns level data
+format page) are drawn by code of its own, which each object set's dispatch (the
+`ExecutePtrLong` table ten bytes into `OBJTS*`, entry `n - 1` for object `n`) reaches:
+a save points those four entries, in all five object sets, at code in bank `$0D`'s free
+space (`$0DF08A`-`$0DFF66`), so that the routines return with `RTS` as the game's do. The
+settings objects (`24`-`26`, `28`) and `2D` never reach the dispatch in a Lunar Magic
+ROM: its restorable hook in `LoadLevelData` (`$0586F7`) takes them first (inferred).
+Lunar Magic's check for the piece is its own code at `$0DFF50`-`$0DFF66` (zeros there
+do not count), so its first save puts its code in place of Kobo's.
+
+Observed (examples/lm_objects.rs: every form at several sizes, on horizontal level `105`
+and vertical level `1CE`, imported by Lunar Magic into vanilla, and the grid its load
+leaves):
+
+- A size is the stored value plus one. `22`/`23` draw one tile of page 0 or 1 (the
+  object number's low bit); `29` is `27` with `$4000` added to the base tile.
+- A selection is Map16 tiles laid out 16 to a row: the tile at selection column `x`, row
+  `y` is the base plus `y * 16`, with `x` added to the low byte alone (a block from `$2FE`
+  four wide is `2FE 2FF 200 201`). A rectangle larger than its selection repeats it; a
+  smaller one shows its top left.
+- Cells are placed from the object's position right and down through the game's own
+  steps: past row 26 of a horizontal level a column goes on at the next screen's top
+  (the vanilla `AdvanceDownOneTile`). In a vertical level a step right past column 15
+  goes into the screen's right half, `$100` bytes on, and a step down past row 15 into the
+  next screen, `$200` bytes on, where the game's steps go `$1B0` and `$100` on.
+- Conditional objects (help file, "Conditional Direct Map16"): flag `C` is bit `C % 8` of
+  `$7FC060 + C / 8`. Without `A`, nothing is drawn unless the flag is set; with `A`, the
+  tiles are drawn, `$100` added to each when it is set.
+- `26` (music bypass): `$0DDA` = the third byte less one; the second byte's low nibble is
+  ignored. `28` (time limit): with `R` set the load leaves the timer (`$0F31`-`$0F33`,
+  hundreds first) and the status bar's copy (`$0F25`-`$0F27`); without it the load leaves
+  nothing, so Lunar Magic applies it later (not yet observed). The format page's layout
+  for `28` gives the wrong object number: its second byte is `1000AAAA`.
+
+Kobo's code (`asm/lunar-magic/objects.asm`): the dispatch entries for `22`, `23`, `27`,
+`29`, `26`, and `2D` point at stubs at `$0DFF70`, past Lunar Magic's area and free in every
+corpus ROM, which call Kobo's code and return with `RTS`; tiles go through the game's
+steps, reached through gates there too, so a tall level's own steps are followed, with
+the vertical level steps above done by Kobo's code. It gives the same grid as Lunar
+Magic's for every case, with the game's steps as Lunar Magic's install patches them and
+as vanilla has them, and for all 512 levels of Kaizo Kindergarten's content (RAM after
+load differs at `$5A` in two levels, the last object's number); Kaizo Kindergarten
+imported and built by Kobo gives every level's grid as the hack has it (2026-09-26).
+
 ### Kobo's set against Lunar Magic's, after a save
 
 The first acceptance check: Kobo's install, saved by Lunar Magic (which, as found later,

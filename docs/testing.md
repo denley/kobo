@@ -242,6 +242,15 @@ how each oracle is produced, where its data lives, and what is known not to matc
   the same block must print the same. `contact_probe -- stand rom level x y tile...
   [addr=value...]` drops the player onto each tile and prints whether they landed and
   `$1693`, in any ROM.
+- **Lunar Magic's objects**: `examples/lm_objects.rs make` writes MWL files with every form
+  of objects `22`, `23`, `27`, and `29` (groups 0 and 1 for level `105`, group 2 for the
+  vertical level `1CE`); Lunar Magic imports them into vanilla, and `lm_objects grid`
+  prints the tiles each case left. The same ROM with `asm/lunar-magic/objects.asm`
+  applied (`kobo rom expand 2M`, then `kobo asm`) must print the same, also with bank
+  `$0D`'s steps (`$0DA900`-`$0DAA1F`) put back to vanilla.
+- **A hack built by Kobo**: `kobo import` Kaizo Kindergarten, leave out the levels the
+  build refuses, build, and compare `kobo level tiles` of every level with the hack's
+  (all 337 the same); `tools/lunar-magic/save-check out.sfc 105 project` passes.
 - **A hack's content through Kobo's code**: transfer a hack into a Lunar Magic-saved
   vanilla ROM with Lunar Magic's command line (`-ImportMultLevels` of its MWL exports,
   `-ImportAllMap16`, `-ImportAllGraphics` of its `-ExportGFX`/`-ExportExGFX`,
@@ -250,6 +259,11 @@ how each oracle is produced, where its data lives, and what is known not to matc
   `ramdiff.py --summary` compare the two over all 512 levels. Do not import into a Kobo
   install instead: Lunar Magic's save then installs most of its own code over it
   ([lunar-magic-install.md](lunar-magic-install.md)). Kaizo Kindergarten passes.
+  `with-kobo` also works on a hack itself, for its Lunar Magic 2.52-and-later layout:
+  Grand Poo World 2, Invictus, Luminescent, Baby Kaizo World 3, and SMW_2022-4-9 draw every
+  level alike, but for Grand Poo World 2's `09F` (no background table) and 3 to 9 levels
+  each whose pictures differ only with sprites, most likely because the swap drops the
+  hack's GPS blocks (not yet confirmed; 2026-09-26).
 - **Tool stages**: `tests/tool_stages.rs` builds two Asar patches, early and late, one
   including a file, onto the synthetic base when Asar's library is configured (no ROM):
   they apply in order, the output repeats, and changing the included file changes the

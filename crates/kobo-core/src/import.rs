@@ -166,7 +166,9 @@ pub fn import_rom(rom: &Rom, base: &Rom, dir: &Path, all: bool) -> Result<Report
                 .map(|n| format!("level {number:03X}: {n}")),
         );
     }
-    for (page, tiles) in read_map16(rom)? {
+    let (pages, notes) = read_map16(rom)?;
+    report.notes.extend(notes);
+    for (page, tiles) in pages {
         let file = PathBuf::from("map16").join(format!("{page:02X}.toml"));
         write(&dir.join(&file), tiles.to_toml(&PageComments::default()))?;
         manifest.map16.insert(page, file);
@@ -200,20 +202,57 @@ pub fn import_rom(rom: &Rom, base: &Rom, dir: &Path, all: bool) -> Result<Report
     Ok(report)
 }
 
-/// Map16 pages 2 to `$7F` from Lunar Magic's tables: every page of each
-/// group of 16 that has a table, with what its tiles act like, but pages
-/// with every tile empty ([`Map16Entry::default`]), which a build writes
-/// for the pages of a group a project does not list.
-pub fn read_map16(rom: &Rom) -> Result<Vec<(u8, Map16Page)>, ImportError> {
+/// Map16 pages by number, and notes on what was left out.
+pub type Map16Import = (Vec<(u8, Map16Page)>, Vec<String>);
+
+/// Map16 pages 2 to `$7F` from Lunar Magic's tables: the pages of each
+/// group of 16 that lie in the RATS block its table starts in (Lunar Magic
+/// allocates a group's pages up to the last it uses), with what their tiles
+/// act like, but pages with every tile empty ([`Map16Entry::default`]),
+/// which a build writes for the pages of a group a project does not list.
+/// A group whose table is in no RATS block is in an older Lunar Magic's
+/// layout (2.43 and before) and is left out, with a note.
+pub fn read_map16(rom: &Rom) -> Result<Map16Import, ImportError> {
     let mut out = Vec::new();
+    let mut notes = Vec::new();
     if !map16_pages::installed(rom) {
-        return Ok(out);
+        return Ok((out, notes));
     }
+    let blocks: Vec<Range<usize>> = rats::blocks(rom)
+        .into_iter()
+        .filter_map(|b| {
+            rom.pc(b.start)
+                .ok()
+                .map(|s| s.as_usize()..s.as_usize() + b.len)
+        })
+        .collect();
+    let page_span = |group: &map16_pages::PageGroup, page: u8| -> Option<Range<usize>> {
+        let at = group.definition(rom, page as u16 * PAGE_TILES).ok()??;
+        let pc = rom.pc(at).ok()?.as_usize();
+        Some(pc..pc + PAGE_TILES as usize * 8)
+    };
     for group in &PAGE_GROUPS {
-        if group.definition(rom, 0)?.is_none() {
+        let first = *group.pages().start();
+        let Some(start) = group.definition(rom, first as u16 * PAGE_TILES)? else {
             continue;
-        }
+        };
+        let block = page_span(group, first)
+            .and_then(|span| blocks.iter().find(|b| b.contains(&span.start)).cloned());
+        let Some(block) = block else {
+            notes.push(format!(
+                "Map16 pages {first:02X}-{:02X}: their table at {start} is in no RATS block, \
+                 an older Lunar Magic's layout; not imported",
+                group.pages().end()
+            ));
+            continue;
+        };
         for page in group.pages() {
+            let Some(span) = page_span(group, page) else {
+                break;
+            };
+            if !(block.start <= span.start && span.end <= block.end) {
+                break;
+            }
             let mut tiles = Map16Page::default();
             let first = page as u16 * PAGE_TILES;
             for tile in first..first + PAGE_TILES {
@@ -231,7 +270,7 @@ pub fn read_map16(rom: &Rom) -> Result<Vec<(u8, Map16Page)>, ImportError> {
             }
         }
     }
-    Ok(out)
+    Ok((out, notes))
 }
 
 /// The file ranges of everything [`read_level`] reads for every level,
@@ -262,13 +301,15 @@ fn read_spans(rom: &Rom) -> Result<Vec<Range<usize>>, ImportError> {
         for group in &PAGE_GROUPS {
             add(group.pointer, 2);
             add(group.bank, 1);
-            if let Some(start) = group.definition(rom, *group.pages().start() as u16 * 0x100)? {
+            if let Ok(Some(start)) = group.definition(rom, *group.pages().start() as u16 * 0x100) {
                 add(start, group.pages().count() * 0x800);
             }
         }
         add(map16_pages::ACTS_LIKE, 3);
         add(map16_pages::ACTS_LIKE_UPPER, 3);
-        add(SnesAddr::new(rom.read_u24(map16_pages::ACTS_LIKE)?), 0x8000);
+        if let Ok(table) = rom.read_u24(map16_pages::ACTS_LIKE) {
+            add(SnesAddr::new(table), 0x8000);
+        }
         let upper = rom.read_u24(map16_pages::ACTS_LIKE_UPPER)?;
         if upper >> 16 != 0xFF {
             add(SnesAddr::new(upper + 0x8000), 0x8000);
@@ -341,13 +382,26 @@ pub struct LevelDiff {
 pub fn diff_levels(a: &Rom, b: &Rom) -> Vec<LevelDiff> {
     let mut diffs = Vec::new();
     for level in 0..LEVEL_COUNT {
+        // Screen exits in one format, apart from the other objects, by
+        // screen: the game keeps one per screen whatever their place among
+        // the objects, and Lunar Magic's save moves and sorts them.
         let read = |rom| {
             read_level(rom, level).map(|(mut l, _)| {
-                for object in &mut l.layer1 {
+                let (mut exits, others): (Vec<Object>, Vec<Object>) = l
+                    .layer1
+                    .into_iter()
+                    .partition(|o| matches!(o, Object::ScreenExit(_)));
+                for object in &mut exits {
                     if let Object::ScreenExit(exit) = object {
                         *exit = exit.in_lunar_magic_format(level);
                     }
                 }
+                exits.sort_by_key(|o| match o {
+                    Object::ScreenExit(exit) => exit.screen,
+                    _ => 0,
+                });
+                l.layer1 = others;
+                l.layer1.extend(exits);
                 l
             })
         };

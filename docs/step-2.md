@@ -305,6 +305,15 @@ on the built ROM.
   text, and Lunar Magic saves the build keeping all of them (2026-09-26). The levels that
   place those tiles use Lunar Magic's objects, which builds still refuse: they come next.
   Pages 0 and 1, page 2 per tileset (`$06F547`), and BG Map16 are not in yet.
+- 2b progress, Lunar Magic's objects: builds take `22`, `23`, `27`, `29` (tiles), `26`
+  (music), and `2D` (user), with Kobo's code for them (`objects.asm`), whose behaviour was
+  learned case by case from the grids Lunar Magic's code leaves. Kaizo Kindergarten
+  imported (337 levels, 89 pages; one level with a time limit bypass and some secondary
+  entrances in Lunar Magic's format left out) builds to the same tile grid on every level
+  as the hack, and Lunar Magic saves the build keeping every level. Still refused: the
+  graphics bypasses (`24`, `25`, which Invictus and Super Dram World 2 use by the
+  hundred), the time limit bypass (`28`), and long screen exits, which come with their
+  features.
 - 2b then takes Lunar Magic-layout features one at a time, each through its source format,
   import from MWL and ROM, build, the Lunar Magic check, and the corpus check together, so
   neither direction anchors the format: Map16 pages 2 and up and background Map16, custom
