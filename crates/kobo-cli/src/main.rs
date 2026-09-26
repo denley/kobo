@@ -1154,7 +1154,12 @@ fn import(from: &Path, dir: &Path, all: bool, level: Option<&str>, clean: &Rom) 
             report.unread_blocks.len()
         );
     }
-    println!("{}: {} levels imported", dir.display(), report.levels.len());
+    println!(
+        "{}: {} levels and {} Map16 pages imported",
+        dir.display(),
+        report.levels.len(),
+        report.map16.len()
+    );
     Ok(())
 }
 

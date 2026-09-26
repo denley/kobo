@@ -6,20 +6,24 @@
 //! [rom]
 //! size = "1M"
 //!
+//! [map16]
+//! 0x02 = "map16/02.toml"
+//!
 //! [levels]
 //! 0x105 = "levels/yoshis-island-1.toml"
 //! ```
 //!
 //! The level table is the only place level numbers live; file names and
 //! folders are free. A level the table does not list keeps the clean
-//! ROM's content.
+//! ROM's content. The Map16 table does the same for pages 2 to `$7F`; a
+//! page it does not list does not exist.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use toml_edit::DocumentMut;
 
-use super::{SourceError, invalid};
+use super::{SourceError, invalid, map16};
 use crate::level::LEVEL_COUNT;
 
 /// The manifest format this version of Kobo writes. A newer one is
@@ -44,6 +48,8 @@ pub struct Manifest {
     /// A folder of AddmusicK's input files (`Addmusic_list.txt`, `music/`,
     /// `samples/`, ...), laid over the user's AddmusicK folder.
     pub music: Option<PathBuf>,
+    /// Map16 page to file, relative to the project directory.
+    pub map16: BTreeMap<u8, PathBuf>,
     /// Level number to file, relative to the project directory.
     pub levels: BTreeMap<u16, PathBuf>,
 }
@@ -79,6 +85,12 @@ impl Manifest {
         if let Some(uberasm) = &self.uberasm {
             out += &format!("\n[uberasm]\ndir = \"{}\"\n", slashes(uberasm));
         }
+        if !self.map16.is_empty() {
+            out += "\n[map16]\n";
+            for (page, path) in &self.map16 {
+                out += &format!("0x{page:02X} = \"{}\"\n", slashes(path));
+            }
+        }
         out += "\n[levels]\n";
         for (level, path) in &self.levels {
             out += &format!("0x{level:03X} = \"{}\"\n", slashes(path));
@@ -89,7 +101,11 @@ impl Manifest {
     pub fn from_toml(text: &str) -> Result<Self, SourceError> {
         let doc: DocumentMut = text.parse()?;
         for (key, _) in doc.iter() {
-            if !["format", "rom", "patches", "music", "uberasm", "levels"].contains(&key) {
+            if ![
+                "format", "rom", "patches", "music", "uberasm", "map16", "levels",
+            ]
+            .contains(&key)
+            {
                 return Err(invalid(MANIFEST, format!("unknown key `{key}`")));
             }
         }
@@ -182,6 +198,25 @@ impl Manifest {
                 }
             }
         }
+        if let Some(pages) = doc.get("map16") {
+            let pages = pages
+                .as_table()
+                .ok_or_else(|| invalid("map16", "must be a table"))?;
+            for (key, item) in pages.iter() {
+                let at = format!("map16.{key}");
+                let page = key
+                    .strip_prefix("0x")
+                    .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+                    .filter(|n| map16::PAGES.contains(n))
+                    .ok_or_else(|| invalid(&at, "a Map16 page is 0x02 to 0x7F"))?;
+                let path = item
+                    .as_str()
+                    .ok_or_else(|| invalid(&at, "must be a file path"))?;
+                if manifest.map16.insert(page, PathBuf::from(path)).is_some() {
+                    return Err(invalid(&at, "is listed twice"));
+                }
+            }
+        }
         if let Some(levels) = doc.get("levels") {
             let levels = levels
                 .as_table()
@@ -242,6 +277,7 @@ mod tests {
             late_patches: vec![PathBuf::from("asm/a.asm"), PathBuf::from("asm/b.asm")],
             music: Some(PathBuf::from("music")),
             uberasm: Some(PathBuf::from("uberasm")),
+            map16: BTreeMap::from([(0x10, PathBuf::from("map16/10.toml"))]),
             levels: BTreeMap::from([
                 (0x105, PathBuf::from("world1/yoshis-island-1.toml")),
                 (0x0C7, PathBuf::from("title.toml")),
@@ -252,7 +288,8 @@ mod tests {
             text,
             "format = 1\n\n[rom]\nsize = \"1536K\"\nsa1 = true\n\n[patches]\n\
              early = [\"asm/fastrom.asm\"]\nlate = [\"asm/a.asm\", \"asm/b.asm\"]\n\n\
-             [music]\ndir = \"music\"\n\n[uberasm]\ndir = \"uberasm\"\n\n[levels]\n\
+             [music]\ndir = \"music\"\n\n[uberasm]\ndir = \"uberasm\"\n\n\
+             [map16]\n0x10 = \"map16/10.toml\"\n\n[levels]\n\
              0x0C7 = \"title.toml\"\n0x105 = \"world1/yoshis-island-1.toml\"\n"
         );
         assert_eq!(Manifest::from_toml(&text).unwrap(), manifest);
@@ -267,6 +304,8 @@ mod tests {
         assert!(bad("format = 1\n[levels]\n105 = \"a.toml\"\n"));
         assert!(bad("format = 1\nextra = 1\n"));
         assert!(bad("format = 1\n[rom]\nsize = \"big\"\n"));
+        assert!(bad("format = 1\n[map16]\n0x01 = \"a.toml\"\n"));
+        assert!(bad("format = 1\n[map16]\n0x80 = \"a.toml\"\n"));
         assert!(!bad("format = 1\n"));
     }
 }

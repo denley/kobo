@@ -140,9 +140,13 @@ Early stage: roadmap step 1 is complete; step 2 is next, planned in `docs/step-2
   positions and drops screen jumps, `encode` chooses its own. `level::read_objects`,
   `read_background`, and `sprite_ptr` find a level's data from the ROM's tables, vanilla or
   Lunar Magic (`LevelFormat`); do not run the loader to find it.
-- `kobo_core::source` is the project's text formats (`kobo.toml`, level files); `import`
-  reads a ROM into them and `build` writes them onto the clean ROM. Kobo owns their
-  formatting: `Level::to_toml` of `from_toml` must give the same text back.
+- `kobo_core::source` is the project's text formats (`kobo.toml`, level files, Map16 page
+  files); `import` reads a ROM into them and `build` writes them onto the clean ROM. Kobo
+  owns their formatting: `Level::to_toml` of `from_toml` must give the same text back.
+- `kobo_core::map16::pages` is the one place that knows Lunar Magic's tables for Map16
+  pages past 1 and the acts-like tables; import reads and build writes through it. A
+  build that writes anything only Lunar Magic's layout holds installs Kobo's code for it
+  first (`build::Stage::Install`, `kobo_core::install`).
 - `kobo_core::names` holds the names Kobo writes after ids (objects by object set, extended
   objects, sprites, tilesets, music) as data in `names.toml`; `LevelMode::name` names level
   modes. Take names from there; do not write lists of them elsewhere.

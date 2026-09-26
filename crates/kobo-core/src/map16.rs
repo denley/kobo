@@ -198,6 +198,114 @@ pub fn vanilla_map16(
     Ok(Map16Table { tileset, tiles })
 }
 
+/// Lunar Magic's tables for foreground pages 2 to `$7F` and for what every
+/// tile acts like, at the fixed addresses its layout keeps their pointers
+/// (docs/lunar-magic-install.md). Kobo's Map16 routine and acts-like chain
+/// (`asm/lunar-magic/`) read the same tables.
+pub mod pages {
+    use crate::addr::SnesAddr;
+    use crate::rom::{Rom, RomError};
+
+    /// Not `$FF` once the Map16 routine and the acts-like chain are
+    /// installed, Lunar Magic's or Kobo's.
+    pub const INSTALLED: SnesAddr = SnesAddr::new(0x06F600);
+    /// 24-bit pointer to what tiles `$0000`-`$3FFF` act like, 2 bytes a tile.
+    pub const ACTS_LIKE: SnesAddr = SnesAddr::new(0x06F624);
+    /// 24-bit pointer, less `$8000`, to what tiles `$4000`-`$7FFF` act like;
+    /// bank `$FF` for none.
+    pub const ACTS_LIKE_UPPER: SnesAddr = SnesAddr::new(0x06F63A);
+
+    /// 16 pages that share a table: tile `n`'s definition is at the table's
+    /// pointer (plus 1 if kept less one) plus `n * 8` in 16 bits, in the
+    /// pointer's bank.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct PageGroup {
+        pub first_page: u8,
+        pub pointer: SnesAddr,
+        pub bank: SnesAddr,
+        pub less_one: bool,
+    }
+
+    pub const PAGE_GROUPS: [PageGroup; 8] = {
+        const fn g(first_page: u8, pointer: u32, bank: u32, less_one: bool) -> PageGroup {
+            PageGroup {
+                first_page,
+                pointer: SnesAddr::new(pointer),
+                bank: SnesAddr::new(bank),
+                less_one,
+            }
+        }
+        [
+            g(0x00, 0x06F553, 0x06F557, false),
+            g(0x10, 0x06F55C, 0x06F560, false),
+            g(0x20, 0x06F567, 0x06F56B, true),
+            g(0x30, 0x06F570, 0x06F574, true),
+            g(0x40, 0x06F594, 0x06F598, false),
+            g(0x50, 0x06F59D, 0x06F5A1, false),
+            g(0x60, 0x06F5A8, 0x06F5AC, true),
+            g(0x70, 0x06F5B1, 0x06F5B5, true),
+        ]
+    };
+
+    impl PageGroup {
+        /// The group page `page` (below `$80`) is in.
+        pub fn of(page: u8) -> &'static PageGroup {
+            &PAGE_GROUPS[(page as usize >> 4) & 7]
+        }
+
+        /// The group's pages past 1.
+        pub fn pages(&self) -> std::ops::RangeInclusive<u8> {
+            self.first_page.max(2)..=self.first_page + 15
+        }
+
+        /// Where the group's table has tile `first`, given the table's
+        /// address, as the pointer and bank to store.
+        pub fn stored_for(&self, first: u16, at: SnesAddr) -> (u16, u8) {
+            let pointer = at
+                .offset()
+                .wrapping_sub(first.wrapping_mul(8))
+                .wrapping_sub(self.less_one as u16);
+            (pointer, at.bank())
+        }
+
+        /// The address of tile `tile`'s definition, or `None` if the
+        /// group has no table (bank `$00`, as a fresh install leaves it).
+        pub fn definition(&self, rom: &Rom, tile: u16) -> Result<Option<SnesAddr>, RomError> {
+            let bank = rom.read_u8(self.bank)?;
+            if bank == 0 {
+                return Ok(None);
+            }
+            let pointer = rom.read_u16(self.pointer)?;
+            let offset = pointer
+                .wrapping_add(self.less_one as u16)
+                .wrapping_add(tile.wrapping_mul(8));
+            Ok(Some(SnesAddr::from_bank_offset(bank, offset)))
+        }
+    }
+
+    /// Whether the ROM has Lunar Magic's layout for pages past 1.
+    pub fn installed(rom: &Rom) -> bool {
+        rom.read_u8(INSTALLED).is_ok_and(|b| b != 0xFF)
+    }
+
+    /// What tile `tile` acts like, from the tables, or `None` where there
+    /// is no table.
+    pub fn acts_like(rom: &Rom, tile: u16) -> Result<Option<u16>, RomError> {
+        let at = if tile < 0x4000 {
+            SnesAddr::new(rom.read_u24(ACTS_LIKE)?)
+        } else {
+            let pointer = rom.read_u24(ACTS_LIKE_UPPER)?;
+            if pointer >> 16 == 0xFF {
+                return Ok(None);
+            }
+            SnesAddr::new(pointer)
+        };
+        Ok(Some(rom.read_u16(SnesAddr::new(
+            (at.raw() + 2 * tile as u32) & 0xFF_FFFF,
+        ))?))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -88,6 +88,11 @@ on the built ROM.
   per line, rows labelled by generated comments.
 - Graphics are indexed PNG: the pixel index is the colour index, the PNG's palette is only
   a preview. `.bin` is import and export.
+- Map16 pages past 1 are one file per page, listed in the manifest's `[map16]` table like
+  levels, one tile per line keyed by its number: what it acts like, and its four 8x8
+  tiles in reading order as `"TTT P xyp"` (`source::map16`). A tile a file does not list
+  is empty and acts like `$130`, as a fresh Lunar Magic install has it. Import writes
+  every tile of a page, since Lunar Magic fills unused tiles with no one value.
 - Round-trip fidelity is semantic: decoding, encoding, and decoding again gives the same
   objects in the same order, and the level renders the same. Kobo's encoder chooses its own
   new-screen bits and screen jumps.
@@ -100,7 +105,7 @@ on the built ROM.
   1. Check the clean ROM's hash. For SA-1, apply SA-1 Pack (with `$0FFFEB` set first for
      LC_LZ3), then its 6 or 8 MiB patch. Expand to the manifest's size, filled with `$00`.
   2. Kobo's ROM-side patches, none of it in AddmusicK's ranges (`$0E8000`-`$0EF0FF`,
-     `$0F8000`-`$0FF050`).
+     `$0F8000`-`$0FF050`), when the project uses Lunar Magic's layout.
   3. User Asar patches, early group.
   4. AddmusicK: it needs `$0E8000` untouched and everything before it RATS-tagged.
   5. Graphics and ExGFX, palettes, Map16 and the acts-like table: GPS rewrites that table,
@@ -292,6 +297,14 @@ on the built ROM.
   `$06F624` is part of it, and GPS also patches the code around it (the entry slots from
   `$06F690`, the compare chain at `$06F67B` and `$06F717`, the exit at `$06F602`), so
   Kobo's code there has the shape GPS expects.
+- 2b progress, Map16 pages 2 to `$7F`: page files, import from a ROM (every page of each
+  group Lunar Magic allocated, pages 0 and 1's changed acts-like values reported), and a
+  build that installs Kobo's bank `$06` code (`Stage::Install`) and writes the pages in
+  whole groups, as Lunar Magic does, and the acts-like tables (`Stage::Map16`, after
+  AddmusicK). Kaizo Kindergarten's 94 pages import, build, and import again as the same
+  text, and Lunar Magic saves the build keeping all of them (2026-09-26). The levels that
+  place those tiles use Lunar Magic's objects, which builds still refuse: they come next.
+  Pages 0 and 1, page 2 per tileset (`$06F547`), and BG Map16 are not in yet.
 - 2b then takes Lunar Magic-layout features one at a time, each through its source format,
   import from MWL and ROM, build, the Lunar Magic check, and the corpus check together, so
   neither direction anchors the format: Map16 pages 2 and up and background Map16, custom
