@@ -45,6 +45,9 @@ pub struct Manifest {
     /// A folder of UberASM Tool's input files (`list.txt`, `level/`, ...),
     /// laid over the user's UberASM Tool folder.
     pub uberasm: Option<PathBuf>,
+    /// A folder of GPS's input files (`list.txt`, `blocks/`, `routines/`),
+    /// laid over the user's GPS folder.
+    pub gps: Option<PathBuf>,
     /// A folder of AddmusicK's input files (`Addmusic_list.txt`, `music/`,
     /// `samples/`, ...), laid over the user's AddmusicK folder.
     pub music: Option<PathBuf>,
@@ -90,6 +93,9 @@ impl Manifest {
         if let Some(uberasm) = &self.uberasm {
             out += &format!("\n[uberasm]\ndir = \"{}\"\n", slashes(uberasm));
         }
+        if let Some(gps) = &self.gps {
+            out += &format!("\n[gps]\ndir = \"{}\"\n", slashes(gps));
+        }
         for (name, pages) in [
             ("gfx", &self.gfx),
             ("map16", &self.map16),
@@ -113,7 +119,7 @@ impl Manifest {
         let doc: DocumentMut = text.parse()?;
         for (key, _) in doc.iter() {
             if ![
-                "format", "rom", "patches", "music", "uberasm", "gfx", "map16", "map16_bg",
+                "format", "rom", "patches", "music", "uberasm", "gps", "gfx", "map16", "map16_bg",
                 "levels",
             ]
             .contains(&key)
@@ -207,6 +213,22 @@ impl Manifest {
                         manifest.uberasm = Some(PathBuf::from(dir));
                     }
                     _ => return Err(invalid("uberasm", format!("unknown key `{key}`"))),
+                }
+            }
+        }
+        if let Some(gps) = doc.get("gps") {
+            let gps = gps
+                .as_table()
+                .ok_or_else(|| invalid("gps", "must be a table"))?;
+            for (key, item) in gps.iter() {
+                match key {
+                    "dir" => {
+                        let dir = item
+                            .as_str()
+                            .ok_or_else(|| invalid("gps.dir", "must be a folder path"))?;
+                        manifest.gps = Some(PathBuf::from(dir));
+                    }
+                    _ => return Err(invalid("gps", format!("unknown key `{key}`"))),
                 }
             }
         }
@@ -308,6 +330,7 @@ mod tests {
             late_patches: vec![PathBuf::from("asm/a.asm"), PathBuf::from("asm/b.asm")],
             music: Some(PathBuf::from("music")),
             uberasm: Some(PathBuf::from("uberasm")),
+            gps: Some(PathBuf::from("blocks")),
             gfx: BTreeMap::from([(0x00, PathBuf::from("graphics/GFX00.png"))]),
             map16: BTreeMap::from([(0x10, PathBuf::from("map16/10.toml"))]),
             map16_bg: BTreeMap::from([(0x01, PathBuf::from("map16/bg-01.toml"))]),
@@ -321,7 +344,7 @@ mod tests {
             text,
             "format = 1\n\n[rom]\nsize = \"1536K\"\nsa1 = true\n\n[patches]\n\
              early = [\"asm/fastrom.asm\"]\nlate = [\"asm/a.asm\", \"asm/b.asm\"]\n\n\
-             [music]\ndir = \"music\"\n\n[uberasm]\ndir = \"uberasm\"\n\n\
+             [music]\ndir = \"music\"\n\n[uberasm]\ndir = \"uberasm\"\n\n[gps]\ndir = \"blocks\"\n\n\
              [gfx]\n0x00 = \"graphics/GFX00.png\"\n\n[map16]\n0x10 = \"map16/10.toml\"\n\n[map16_bg]\n0x01 = \"map16/bg-01.toml\"\n\n\
              [levels]\n\
              0x0C7 = \"title.toml\"\n0x105 = \"world1/yoshis-island-1.toml\"\n"

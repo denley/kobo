@@ -206,3 +206,62 @@ fn uberasm_inserts_level_code() {
     assert_eq!(build::build(&clean, &project).unwrap().data(), built.data());
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// With GPS (`KOBO_GPS`, a folder with the program built for the platform
+/// and its files), the blocks stage inserts a block into Kobo's acts-like
+/// chain: tile `$200` acts like `$025`, and its entries are GPS's.
+#[test]
+fn gps_inserts_blocks() {
+    if std::env::var_os("KOBO_GPS").is_none() {
+        eprintln!("skipping: KOBO_GPS is not set");
+        return;
+    }
+    let Some(clean) = common::vanilla() else {
+        return;
+    };
+    if common::asar().is_none() {
+        return;
+    }
+    let dir = temp_dir("gps");
+    write(&dir, "blocks/list.txt", "200:0025 test.asm\n");
+    write(
+        &dir,
+        "blocks/blocks/test.asm",
+        "db $42\nJMP Done : JMP Done : JMP Done : JMP Done : JMP Done : JMP Done\n\
+         JMP Done : JMP Done : JMP Done : JMP Done\nDone:\n    RTL\n",
+    );
+    let project = Project {
+        root: dir.clone(),
+        manifest: Manifest {
+            gps: Some(PathBuf::from("blocks")),
+            ..Manifest::default()
+        },
+        levels: Vec::new(),
+        map16: Vec::new(),
+        map16_bg: Vec::new(),
+        gfx: Vec::new(),
+    };
+    let built = build::build(&clean, &project).unwrap();
+    assert_eq!(
+        kobo_core::map16::pages::acts_like(&built, 0x200).unwrap(),
+        Some(0x025)
+    );
+    // GPS's own entry for a block touched from below.
+    let installed = build::build_on(
+        &clean,
+        &Project {
+            manifest: Manifest::default(),
+            map16: vec![(0x02, Default::default())],
+            ..project.clone()
+        },
+        None,
+    )
+    .unwrap();
+    let entry = kobo_core::SnesAddr::new(0x06F690);
+    assert_ne!(
+        built.read(entry, 16).unwrap(),
+        installed.read(entry, 16).unwrap()
+    );
+    assert_eq!(build::build(&clean, &project).unwrap().data(), built.data());
+    let _ = fs::remove_dir_all(&dir);
+}

@@ -342,6 +342,11 @@ on the built ROM.
   sprites, PIXI extension bytes), secondary entrances and exits. Each is checked with Lunar
   Magic saving the build, and with a hack's content transferred by Lunar Magic's command
   line into a Lunar Magic ROM with Kobo's pieces swapped in (`tools/lunar-magic/with-kobo`).
+- 2c progress, GPS: `[gps] dir` (its `list.txt`, `blocks/`, `routines/`), laid over the
+  user's GPS folder (`tools.gps` or `KOBO_GPS`, never bundled), runs as the blocks stage
+  after Map16, on Kobo's bank `$06` code, which it patches unchanged. PIXI waits for a
+  VRAM patch: it refuses a ROM without Lunar Magic's (`$00F6E4` a `JML`), and says many
+  of its features misbehave without it, so Kobo needs its own first.
 - 2c: running the tools (user Asar patches, PIXI, GPS, UberASM Tool, AddmusicK), the
   companion build repository, and SA-1 builds with SA-1 Pack. PIXI and GPS need the
   acts-like chain, which is done, and PIXI Lunar Magic's VRAM patch at `$00F6E4`, a hook
