@@ -18,6 +18,79 @@ pub enum ImageError {
     },
     #[error("PNG encoding failed: {0}")]
     Png(#[from] png::EncodingError),
+    #[error("PNG decoding failed: {0}")]
+    PngDecode(#[from] png::DecodingError),
+    #[error("{0}")]
+    Format(String),
+}
+
+/// An image of palette indices, row-major, top-left origin, with the
+/// palette it previews with. Graphics files are these: the pixel is the
+/// colour index, the palette only a preview.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct IndexedImage {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+    pub palette: Vec<[u8; 3]>,
+}
+
+impl IndexedImage {
+    /// The image as an 8-bit indexed PNG, the same bytes for the same image.
+    pub fn to_png(&self) -> Result<Vec<u8>, ImageError> {
+        let mut out = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut out, self.width, self.height);
+            encoder.set_color(png::ColorType::Indexed);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.set_palette(self.palette.iter().flatten().copied().collect::<Vec<u8>>());
+            let mut writer = encoder.write_header()?;
+            writer.write_image_data(&self.pixels)?;
+        }
+        Ok(out)
+    }
+
+    /// Reads an indexed or grayscale PNG of 8 bits or fewer per pixel as
+    /// palette indices (a grayscale value is its index).
+    pub fn from_png(bytes: &[u8]) -> Result<Self, ImageError> {
+        let mut decoder = png::Decoder::new(io::Cursor::new(bytes));
+        decoder.set_transformations(png::Transformations::IDENTITY);
+        let mut reader = decoder.read_info()?;
+        let info = reader.info().clone();
+        if !matches!(
+            info.color_type,
+            png::ColorType::Indexed | png::ColorType::Grayscale
+        ) || info.bit_depth == png::BitDepth::Sixteen
+        {
+            return Err(ImageError::Format(
+                "a graphics file is an indexed PNG, whose pixels are colour indices".into(),
+            ));
+        }
+        let palette = info
+            .palette
+            .as_deref()
+            .map(|p| p.chunks(3).map(|c| [c[0], c[1], c[2]]).collect())
+            .unwrap_or_default();
+        let mut buf = vec![0; reader.output_buffer_size()];
+        let frame = reader.next_frame(&mut buf)?;
+        let bits = info.bit_depth as usize;
+        let (width, height) = (info.width, info.height);
+        let mut pixels = Vec::with_capacity((width * height) as usize);
+        for row in buf[..frame.buffer_size()].chunks(frame.line_size) {
+            for x in 0..width as usize {
+                let bit = x * bits;
+                let byte = row[bit / 8];
+                let shift = 8 - bits - bit % 8;
+                pixels.push((byte >> shift) & ((1u16 << bits) - 1) as u8);
+            }
+        }
+        Ok(Self {
+            width,
+            height,
+            pixels,
+            palette,
+        })
+    }
 }
 
 /// An 8-bit RGB image, row-major, top-left origin.

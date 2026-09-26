@@ -54,6 +54,7 @@ fn project() -> Project {
         levels: Vec::new(),
         map16,
         map16_bg: Vec::new(),
+        gfx: Vec::new(),
     }
 }
 
@@ -149,6 +150,7 @@ fn bg_pages_build_and_read_back() {
         levels: Vec::new(),
         map16: Vec::new(),
         map16_bg,
+        gfx: Vec::new(),
     };
     let built = build::build_on(&base, &project, None).unwrap();
     let (read, _) = import::read_map16_bg(&built, &base).unwrap();

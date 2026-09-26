@@ -141,7 +141,7 @@ Early stage: roadmap step 1 is complete; step 2 is next, planned in `docs/step-2
   `read_background`, and `sprite_ptr` find a level's data from the ROM's tables, vanilla or
   Lunar Magic (`LevelFormat`); do not run the loader to find it.
 - `kobo_core::source` is the project's text formats (`kobo.toml`, level files, Map16 page
-  files); `import` reads a ROM into them and `build` writes them onto the clean ROM. Kobo
+  files; graphics are indexed PNGs through `image::IndexedImage` and `gfx::tiles_to_image`); `import` reads a ROM into them and `build` writes them onto the clean ROM. Kobo
   owns their formatting: `Level::to_toml` of `from_toml` must give the same text back.
 - `kobo_core::map16::pages` is the one place that knows Lunar Magic's tables for Map16
   pages past 1, BG Map16, and the acts-like tables; import reads and build writes through it. A

@@ -29,15 +29,15 @@ const GFX_TABLE_FILES: u8 = 0x32;
 
 /// The three vanilla pointer tables, one byte of each pointer per table.
 /// Lunar Magic keeps these tables in place and rewrites the entries.
-const GFX_PTR_LO: SnesAddr = SnesAddr::new(0x00B992);
-const GFX_PTR_HI: SnesAddr = SnesAddr::new(0x00B9C4);
-const GFX_PTR_BANK: SnesAddr = SnesAddr::new(0x00B9F6);
+pub const GFX_PTR_LO: SnesAddr = SnesAddr::new(0x00B992);
+pub const GFX_PTR_HI: SnesAddr = SnesAddr::new(0x00B9C4);
+pub const GFX_PTR_BANK: SnesAddr = SnesAddr::new(0x00B9F6);
 
 /// Operands in `CODE_00B888`: `LDY #GFX33`, the `LDA #bank` after it, and
 /// `LDA #GFX32` at `CODE_00B8D7`. The bank is set once, for both files.
-const GFX33_PTR: SnesAddr = SnesAddr::new(0x00B88B);
-const GFX32_33_BANK: SnesAddr = SnesAddr::new(0x00B890);
-const GFX32_PTR: SnesAddr = SnesAddr::new(0x00B8D8);
+pub const GFX33_PTR: SnesAddr = SnesAddr::new(0x00B88B);
+pub const GFX32_33_BANK: SnesAddr = SnesAddr::new(0x00B890);
+pub const GFX32_PTR: SnesAddr = SnesAddr::new(0x00B8D8);
 
 /// `CODE_00B8DE`: the decompression routine, which every GFX file goes
 /// through with its pointer in `$8A`-`$8C`.
@@ -183,6 +183,95 @@ pub fn decode_packed3_tiles(data: &[u8]) -> Vec<Tile8> {
         .collect()
 }
 
+/// Encodes tiles as [`GfxFormat::Packed3`] data: each row 24 bits, the
+/// leftmost pixel in the top three.
+pub fn encode_packed3_tiles(tiles: &[Tile8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(tiles.len() * PACKED3_BYTES_PER_TILE);
+    for tile in tiles {
+        for row in &tile.pixels {
+            let bits = row.iter().enumerate().fold(0u32, |acc, (x, &px)| {
+                acc | ((px as u32 & 7) << (21 - 3 * x))
+            });
+            out.extend(&bits.to_be_bytes()[1..]);
+        }
+    }
+    out
+}
+
+impl GfxFormat {
+    /// Tiles in this format.
+    pub fn encode(self, tiles: &[Tile8]) -> Vec<u8> {
+        match self {
+            Self::Planar(bpp) => tiles.iter().flat_map(|t| t.encode(bpp)).collect(),
+            Self::Packed3 => encode_packed3_tiles(tiles),
+        }
+    }
+
+    /// Colours a pixel can be.
+    pub fn colors(self) -> usize {
+        match self {
+            Self::Planar(bpp) => bpp.colors(),
+            Self::Packed3 => 8,
+        }
+    }
+}
+
+/// Tiles as an indexed image, 16 to a row, previewed in grays.
+pub fn tiles_to_image(tiles: &[Tile8], colors: usize) -> crate::image::IndexedImage {
+    let rows = tiles.len().div_ceil(16);
+    let (width, height) = (128, rows as u32 * 8);
+    let mut pixels = vec![0; (width * height) as usize];
+    for (i, tile) in tiles.iter().enumerate() {
+        let (ox, oy) = (i % 16 * 8, i / 16 * 8);
+        for (y, row) in tile.pixels.iter().enumerate() {
+            for (x, &px) in row.iter().enumerate() {
+                pixels[(oy + y) * width as usize + ox + x] = px;
+            }
+        }
+    }
+    crate::image::IndexedImage {
+        width,
+        height,
+        pixels,
+        palette: crate::image::grayscale(colors),
+    }
+}
+
+/// The tiles of an image laid out as [`tiles_to_image`] lays them, `count`
+/// of them, every pixel below `colors`.
+pub fn image_to_tiles(
+    image: &crate::image::IndexedImage,
+    count: usize,
+    colors: usize,
+) -> Result<Vec<Tile8>, String> {
+    let rows = count.div_ceil(16) as u32;
+    if image.width != 128 || image.height != rows * 8 {
+        return Err(format!(
+            "is {}x{}, not 128x{} ({count} tiles, 16 to a row)",
+            image.width,
+            image.height,
+            rows * 8
+        ));
+    }
+    if let Some(px) = image.pixels.iter().find(|&&p| p as usize >= colors) {
+        return Err(format!(
+            "has colour index {px}, past the {colors} this file can hold"
+        ));
+    }
+    Ok((0..count)
+        .map(|i| {
+            let (ox, oy) = (i % 16 * 8, i / 16 * 8);
+            let mut pixels = [[0; 8]; 8];
+            for (y, row) in pixels.iter_mut().enumerate() {
+                for (x, px) in row.iter_mut().enumerate() {
+                    *px = image.pixels[(oy + y) * 128 + ox + x];
+                }
+            }
+            Tile8 { pixels }
+        })
+        .collect())
+}
+
 /// Re-lays 3bpp tile data out as 4bpp with an empty fourth plane. This is
 /// the form Lunar Magic exports 3bpp files in.
 pub fn convert_3bpp_to_4bpp(data: &[u8]) -> Vec<u8> {
@@ -298,6 +387,7 @@ pub fn gfx_file_ptr(rom: &Rom, index: u8) -> Result<SnesAddr, GfxError> {
     }
     if index >= GFX_TABLE_FILES {
         let ptr = if index == 0x32 { GFX32_PTR } else { GFX33_PTR };
+        // `LDA #` and `LDY #` operands: the address's low word.
         let bank = rom.read_u8(GFX32_33_BANK)?;
         return Ok(SnesAddr::new(
             ((bank as u32) << 16) | rom.read_u16(ptr)? as u32,
@@ -569,6 +659,34 @@ mod tests {
         bytes[2 * 7] = 0x01; // plane 0
         let t = Tile8::decode(Bpp::Four, &bytes);
         assert_eq!(t.pixels[7][7], 0b1101);
+    }
+
+    #[test]
+    fn tiles_encode_and_image_round_trip() {
+        let mut tiles = Vec::new();
+        for n in 0..20u8 {
+            let mut t = Tile8::default();
+            for y in 0..8 {
+                for x in 0..8 {
+                    t.pixels[y][x] = (n + y as u8 * 3 + x as u8) % 8;
+                }
+            }
+            tiles.push(t);
+        }
+        for format in [GfxFormat::Planar(Bpp::Three), GfxFormat::Packed3] {
+            let bytes = format.encode(&tiles);
+            let back = match format {
+                GfxFormat::Planar(bpp) => decode_tiles(bpp, &bytes),
+                GfxFormat::Packed3 => decode_packed3_tiles(&bytes),
+            };
+            assert_eq!(back, tiles, "{format:?}");
+        }
+        let image = tiles_to_image(&tiles, 8);
+        let png = image.to_png().unwrap();
+        let read = crate::image::IndexedImage::from_png(&png).unwrap();
+        assert_eq!(read, image);
+        assert_eq!(image_to_tiles(&read, 20, 8).unwrap(), tiles);
+        assert!(image_to_tiles(&read, 20, 4).is_err());
     }
 
     #[test]

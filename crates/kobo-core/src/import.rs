@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::addr::{PcAddr, SnesAddr};
+use crate::gfx;
+use crate::image::IndexedImage;
 use crate::level::objects::Object;
 use crate::level::{self, LEVEL_COUNT, LevelError, LevelFormat, tables};
 use crate::map16::Map16Tile;
@@ -37,6 +39,8 @@ pub enum ImportError {
     Sprites(#[from] SpriteError),
     #[error(transparent)]
     Rom(#[from] crate::rom::RomError),
+    #[error("graphics: {0}")]
+    Gfx(String),
     #[error("failed to write {path}: {source}")]
     Io {
         path: PathBuf,
@@ -182,6 +186,23 @@ pub fn import_rom(rom: &Rom, base: &Rom, dir: &Path, all: bool) -> Result<Report
                 .map(|n| format!("level {number:03X}: {n}")),
         );
     }
+    let (files, notes) = read_gfx(rom, base)?;
+    report.notes.extend(notes);
+    for (index, image) in files {
+        let file = PathBuf::from("graphics").join(format!("GFX{index:02X}.png"));
+        let png = image
+            .to_png()
+            .map_err(|e| ImportError::Gfx(e.to_string()))?;
+        let path = dir.join(&file);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|source| ImportError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        fs::write(&path, png).map_err(|source| ImportError::Io { path, source })?;
+        manifest.gfx.insert(index, file);
+    }
     let (pages, notes) = read_map16_bg(rom, base)?;
     report.notes.extend(notes);
     for (page, tiles) in pages {
@@ -264,6 +285,46 @@ fn background_tiles(bg: &level::Background) -> Option<BackgroundTiles> {
         _ => return None,
     };
     Some(BackgroundTiles { table, rows, tiles })
+}
+
+/// GFX files by number, as images, and notes on what was left out.
+pub type GfxImport = (Vec<(u8, IndexedImage)>, Vec<String>);
+
+/// GFX files `00` to `33` that differ from `base`'s, as images, and notes on
+/// those left out: all of a locked ROM's, and any stored in another format
+/// than `base`'s (Lunar Magic can store some as 4bpp, with code of its own).
+pub fn read_gfx(rom: &Rom, base: &Rom) -> Result<GfxImport, ImportError> {
+    let (mut out, mut notes) = (Vec::new(), Vec::new());
+    let reader = match gfx::GfxReader::new(rom) {
+        Ok(reader) => reader,
+        Err(gfx::GfxError::Locked) => {
+            notes.push("the ROM is locked, so its GFX files are not imported".into());
+            return Ok((out, notes));
+        }
+        Err(e) => return Err(ImportError::Gfx(e.to_string())),
+    };
+    let clean = gfx::GfxReader::new(base).map_err(|e| ImportError::Gfx(e.to_string()))?;
+    for index in 0..gfx::GFX_FILE_COUNT {
+        let theirs = match reader.read(index) {
+            Ok(file) => file,
+            Err(e) => {
+                notes.push(format!("GFX{index:02X}: {e}; not imported"));
+                continue;
+            }
+        };
+        let ours = clean
+            .read(index)
+            .map_err(|e| ImportError::Gfx(e.to_string()))?;
+        if theirs.format != ours.format {
+            notes.push(format!(
+                "GFX{index:02X} is stored as {:?}, where the game has {:?}; not imported",
+                theirs.format, ours.format
+            ));
+        } else if theirs.data != ours.data {
+            out.push((index, gfx::tiles_to_image(&theirs.tiles(), theirs.colors())));
+        }
+    }
+    Ok((out, notes))
 }
 
 /// BG Map16 pages from Lunar Magic's tables: the pages of each table that
@@ -459,6 +520,19 @@ fn read_spans(rom: &Rom) -> Result<Vec<Range<usize>>, ImportError> {
         let upper = rom.read_u24(map16_pages::ACTS_LIKE_UPPER)?;
         if upper >> 16 != 0xFF {
             add(SnesAddr::new(upper + 0x8000), 0x8000);
+        }
+    }
+    if let Ok(reader) = gfx::GfxReader::new(rom) {
+        add(gfx::GFX_PTR_LO, 0x32);
+        add(gfx::GFX_PTR_HI, 0x32);
+        add(gfx::GFX_PTR_BANK, 0x32);
+        add(gfx::GFX32_PTR, 2);
+        add(gfx::GFX33_PTR, 2);
+        add(gfx::GFX32_33_BANK, 1);
+        for index in 0..gfx::GFX_FILE_COUNT {
+            if let Ok(file) = reader.read(index) {
+                add(file.addr, file.compressed_len);
+            }
         }
     }
     // The ROM size code, and the checksum and its complement.
