@@ -1,11 +1,13 @@
 # Lunar Magic's one-time install
 
-What Lunar Magic 3.70 writes only on the first save into a ROM whose gate `$06F600` is
-still `$FF`, what each piece replaces in the vanilla game, what it is for, and what it has
-to leave behind. A Kobo build that sets the gate gets none of it from Lunar Magic, so Kobo
-provides all of it ([step-2.md](step-2.md), work order 2b). The rest of Lunar Magic's
-footprint, and the spike that found this set, are in [lunar-magic.md](lunar-magic.md);
-the vanilla code named here is described in [smw.md](smw.md).
+What Lunar Magic 3.70 writes into a ROM only when its install is not there yet, how a
+save decides that piece by piece, what each piece replaces in the vanilla game, what it is
+for, and what it has to leave behind. A piece whose tables a Kobo build writes has to be
+Kobo's, with the check Lunar Magic makes for it met, or a save installs Lunar Magic's
+over it and resets the tables; any other piece a save may install
+([step-2.md](step-2.md), work order 2b). The rest of Lunar Magic's footprint, and the
+spike that found this set, are in [lunar-magic.md](lunar-magic.md); the vanilla code
+named here is described in [smw.md](smw.md).
 
 Confidence, per statement: *documented* (Lunar Magic's help, the community's format
 documentation, or a tool's source), *observed* (a byte diff's addresses, data tables'
@@ -40,7 +42,43 @@ seen, never by what Lunar Magic wrote.
   `~/.local/share/kobo/docs/`), and the sources of PIXI, GPS, UberASM Tool, AddmusicK, and
   SA-1 Pack (not `boost/lz3.asm`).
 
-## What a save does with the gate set
+## How a save decides what to install
+
+Found on Kobo's install (bank `$06` only, `$06F600` set) and on vanilla after one Lunar
+Magic save, by copying one ROM's changed ranges onto the other in halves until a save
+stopped rewriting a watched site or resetting a watched table
+(`tools/lunar-magic/install-gate.py`, which prints addresses only), then trying single
+ranges. A `JSL` counts whatever its target, a `JML` or other bytes do not. Every piece
+not met is installed by the save, over whatever is at its sites, and its tables reset.
+
+| Piece (sites and tables) | Counted as installed when |
+|---|---|
+| Map16 routine, acts-like chain, Yoshi's tongue (`$06F540`-`$06F8DE`, `$02BA9E`, `$01A24D`, `$01F58A`, `$02BAE9`) | `$06F600` is not `$FF` |
+| Per-level tables `$05DE00`, `$06FC00`-`$06FFFF`; midway points (`$05D9C3`, `$05D9E8`, `$00F2DB`); `$05D718`/`$05D728`; `$02ABF3`; `$00A6CC` and `$05DD00` | a `JSL` at `$05DA17` (a hook a save restores) |
+| Sprite data banks `$0EF100` and the `$05D8F5` hook | a `JSL` at `$05D8F5` |
+| BG Map16 pointers `$0EFD50` and the `$058DA4` hook | a `JSL` at `$058DA4` |
+| Taller levels (`$00BDA8` tables, `$00F478` bounds, `$00A2AF` screen shake) | a `JSL` at `$05DA8A` (restored) |
+| The sprite loader (`$02A826`) | the restored group checked at `$02AF3D` |
+| The game loop hook (`$008072`) | the restored group checked at `$00A5A2` |
+| Extended objects (`$0DA10F`) | a `JSL` at `$0583C7` (restored) |
+| The level number hook (`$05D8E2`) | `$0EF550`-`$0EF56B` not all `$FF` |
+| The background hook (`$05803B`) | Lunar Magic's own code at `$0EF510`: zeros there do not count, and which bytes it checks is not looked for, since matching them would copy its code |
+
+- Hooks into the areas a save always rewrites (`$05D7CE` to `$05DC50`, `$05DBC2` to
+  `$03BB00`, `$05DB5B`, `$04E5F1`) are pointed back at Lunar Magic's code by every save.
+  A restored hook is retargeted to Lunar Magic's code too, so its `JSL` protects the
+  piece's tables but not Kobo's code behind the hook.
+- `$0EF310` (flags) and `$06FA00` are written for every level by every save; `$0EF600`
+  (custom palettes) was kept in every trial.
+- `-ImportAllMap16` rewrites the bank `$06` code (`$06F540`-`$06F643` and most of the
+  acts-like code), installs the Yoshi's tongue hooks, and writes `$06F600` = `$EA`, on a
+  ROM with Kobo's code there: a Map16 import is Lunar Magic's own operation on bank
+  `$06`, whatever the check says. It keeps the tables' contents' layout, so Kobo's data
+  reads the same through either code.
+- On a Kobo build with only bank `$06`, `-ImportLevel` and `-ImportMultLevels` install
+  every other piece of the set (all 15 one-time hooks but those in bank `$06`'s piece).
+
+## What a save does with its install there
 
 Found by saving copies of `e0` with parts of the set changed (level `105` re-imported each
 time); the command line reports success in every case.
@@ -216,9 +254,9 @@ call site of `$00F44D` whose return address the chain sees (the low byte GPS com
 
 ### Kobo's set against Lunar Magic's, after a save
 
-The acceptance check for the whole set: Kobo's install, saved by Lunar Magic (which adds
-its restorable hooks), against vanilla saved by Lunar Magic, both with level `105`
-re-imported from its own export; `render_hashes` and `ramdiff.py --summary` over all 512
+The first acceptance check: Kobo's install, saved by Lunar Magic (which, as found later,
+installed every piece outside bank `$06` itself, so this checks bank `$06` alone), against
+vanilla saved by Lunar Magic, both with level `105` re-imported from its own export; `render_hashes` and `ramdiff.py --summary` over all 512
 levels. With `map16.asm` and `actslike.asm` (2026-09-26): every picture and every level's
 data the same; RAM after load differs at `$0B` in 492 levels (the background upload's
 scratch: the `$058DA4` hook is not implemented yet), at `$1693` in the 18 boss arenas, and
