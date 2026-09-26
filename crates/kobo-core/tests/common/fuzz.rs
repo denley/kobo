@@ -1,9 +1,10 @@
 //! Dependency-free mutation smoke fuzzing shared by CI and the longer driver.
+//! BPS patches are among the inputs.
 //! Reproduce a case with its seed; this is not coverage-guided fuzzing.
 
 use kobo_core::level::objects::{self, Jumps, Layout};
 use kobo_core::mwl::{Layer2Data, Mwl, MwlFile};
-use kobo_core::{Rom, SnesAddr, compress, gfx, sprites};
+use kobo_core::{Rom, SnesAddr, bps, compress, gfx, sprites};
 
 /// A small MWL file in Lunar Magic's layout: objects on both layers
 /// (mode 1), two sprites, one entrance, some ExAnimation bytes.
@@ -165,4 +166,29 @@ pub fn case(mut seed: u64) {
     let _ = gfx::read_gfx_file(&rom, next() as u8);
     let _ = sprites::read_sprites_at(&rom, SnesAddr::new(0x008000));
     let _ = sprites::read_sprites_at(&rom, addr);
+
+    // A BPS patch between two overlapping, edited halves of the input
+    // round trips. Mutated, with its own CRC fixed up so the actions are
+    // reached, or truncated, it is an error or some target, never a panic.
+    let source = &input[..input.len() / 2];
+    let mut target = input[input.len() / 4..].to_vec();
+    for _ in 0..next() % 8 {
+        if !target.is_empty() {
+            let i = next() as usize % target.len();
+            target[i] = next() as u8;
+        }
+    }
+    let patch = bps::create(source, &target);
+    assert_eq!(bps::apply(&patch, source).as_deref(), Ok(&target[..]));
+    let mut mutated = patch.clone();
+    for _ in 0..=next() % 4 {
+        let i = next() as usize % mutated.len();
+        mutated[i] = next() as u8;
+    }
+    let _ = bps::apply(&mutated, source);
+    let n = mutated.len();
+    let crc = bps::crc32(&mutated[..n - 4]);
+    mutated[n - 4..].copy_from_slice(&crc.to_le_bytes());
+    let _ = bps::apply(&mutated, source);
+    let _ = bps::apply(&patch[..next() as usize % patch.len()], source);
 }

@@ -5,6 +5,7 @@
 
 pub mod addr;
 pub mod asar;
+pub mod bps;
 pub mod build;
 pub mod compress;
 pub mod config;

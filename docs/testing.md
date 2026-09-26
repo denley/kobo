@@ -133,7 +133,7 @@ how each oracle is produced, where its data lives, and what is known not to matc
   (`expand::decompress_gfx_file`, the game's `PrepareGraphicsFile` with whatever routine a
   hack put behind it); the two must agree. It runs on the vanilla ROM and on `KOBO_LM_ROMS`,
   skipping locked ROMs. QLDC 2021 `34_idol` (a BPS patch) is the one LC_LZ3 hack in the
-  corpus, so list it to exercise that decoder; all 50 of its files agree, as do those of
+  corpus, so list its `.bps` to exercise that decoder; all 50 of its files agree, as do those of
   LC_LZ2 hacks on LoROM, SA-1, and a 6 MiB SA-1 image. Lunar Magic's `-ExportGFX` of it
   agrees on all 52 files as well (`fixtures/lunar_magic_gfx_export.txt`, by ROM hash).
   Lunar Magic asks before it touches a headerless ROM, which a headless run never gets
@@ -163,7 +163,26 @@ how each oracle is produced, where its data lives, and what is known not to matc
   3.51, among them the corpus's first 3.40 and 3.51 saves). `apply_bps.py` in that
   directory writes each patch's ROM next to it, headered, after checking every CRC the patch
   carries; `~/.config/kobo/env.sh` puts the loose ROMs and `corpus_more`'s in
-  `KOBO_LM_ROMS`. All 512 levels of each `corpus_more` hack render without a fatal error
+  `KOBO_LM_ROMS`. The variable also takes a `.bps` entry, which the tests apply to the
+  vanilla ROM in memory (`bps::apply_to_rom`), so the QLDC patches are listed as they are
+  distributed; `tests/bps.rs` also rebuilds every listed hack from a patch `bps::create`
+  made against the vanilla ROM. A 2026-09-26 run of every `KOBO_LM_ROMS` test on env.sh's
+  list and the 128 QLDC patches (175 entries, each test restarted after a failing hack, so
+  a hack's first failure only): every loose and `corpus_more` hack passes; of the QLDC
+  entries, all rebuild from a patch, and what fails is
+  - `layer2_background`: 2021 `34_idol`'s nine levels and `76_Bench-kun`'s eighteen
+    (hack defects, [known-gaps.md](known-gaps.md)), and `76_Bench-kun` level `114`, whose
+    background is missing entirely (2048 of 2048 words; it renders black, with SA-1
+    `$002FFF` and `$420B`, `$2130` reads reported unmodelled);
+  - `gfx_decompression`: 2021 `70_DPBOX`, whose `GFX03` decompresses to 4095 bytes, so
+    `GfxReader` refuses it (the ROM's own routine gives the same 4095);
+  - `level_data`: 2021 `34_idol` level `012`, one of its nine, whose sprite list at
+    `$E38008` parses past its 206-byte RATS block;
+  - `sprite_lists`: 2021 `32_theunkaizoing` and `62_Rykon-V73` level `012`, vanilla's
+    empty list at `$07E76D` with a RATS tag in front that claims the rest of bank `$07`;
+    2021 `69_bebn legg+E-man38` level `1CB` (13 bytes, block 14) and `77_NerDose` level
+    `136` (407, block 408), a block one byte longer than the list; and 2022 `09_idol`
+    level `105`, 32 screens of 64 rows, more than the planes hold. All 512 levels of each `corpus_more` hack render without a fatal error
   (2026-09-25); none has Lunar Magic export hashes in the fixtures yet. Hacks whose
   headerless SHA-1 is in `fixtures/lunar_magic_map16_bg_export.txt` also have their BG table
   hashed against Lunar Magic's `-ExportAllMap16` output (file tile index `8000`-`81FF`).
@@ -284,7 +303,8 @@ how each oracle is produced, where its data lives, and what is known not to matc
   check: the marker column must match on every level but the three boss arenas, and the
   differences in the drawn column are SA-1 Pack's own ([sa1.md](sa1.md)). The corpus has
   40 SA-1 hacks: `Super Diagonal Mario 2`, `corpus_more`'s `Extended Interactions`, and 38
-  QLDC 2021 and 2022 entries, which are BPS patches and have to be applied first. `render_hashes` on each says whether the code ran,
+  QLDC 2021 and 2022 entries, which are BPS patches: `KOBO_LM_ROMS` takes them as they are,
+  while `render_hashes` and the CLI need `kobo bps apply` first. `render_hashes` on each says whether the code ran,
   not whether the pictures are right; what fails is in [known-gaps.md](known-gaps.md).
 - **Picture hashes**: `cargo run --release --example render_hashes -- rom.smc` prints a SHA-1
   of every level's picture, with sprites drawn and again as markers without the player. A
@@ -313,7 +333,7 @@ The local, uncommitted output is `~/Pictures/Kobo-level-renders/2026-09-22/`:
 
 - `manifest.json`: source paths, headerless ROM hashes, duplicate aliases, exclusions,
   and the renderer revision. Temporary patched-ROM paths no longer exist; reapply the
-  source BPS patch when reproducing one of those entries.
+  source BPS patch (`kobo bps apply`) when reproducing one of those entries.
 - `results.jsonl`: every attempted slot's status and complete CLI diagnostics.
 - `run-report.md`, `diagnostics.tsv`: per-hack totals and the failures and warnings.
 - `index.html`: the PNG gallery, with diagnostic filters and optional filters for

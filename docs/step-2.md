@@ -187,7 +187,12 @@ on the built ROM.
    and `read_background` find a level's data from the ROM's tables alone, vanilla or Lunar
    Magic ([lunar-magic.md](lunar-magic.md)). Locked ROMs are out of scope. Interpreting
    Lunar Magic's Map16 objects and custom backgrounds as tiles comes with their 2b features.
-6. BPS reading and writing. It also brings the QLDC entries into `KOBO_LM_ROMS`.
+6. BPS reading and writing. Done: `kobo_core::bps` applies a patch with every CRC and
+   bound checked (`apply_to_rom` takes one made against the headerless or the
+   copier-headered image and returns the headerless target) and creates one
+   deterministically, smaller than the distributed patch for every corpus hack it was
+   tried on; `kobo bps apply|create` on the CLI. `KOBO_LM_ROMS` takes `.bps` entries, so
+   the QLDC entries are listed as they are distributed ([testing.md](testing.md)).
 7. An LC_LZ2 compressor that always produces the same output. Done:
    `compress::lz2::compress`, an optimal parse over commands 0-4 (dynamic programming,
    longest matches from a suffix array) with a fixed tie-break. It writes only what the
@@ -227,8 +232,9 @@ on the built ROM.
   Mario: 148 ranges, 137 KB, Lunar Magic's install among them). `kobo import` takes an
   MWL file too, adding the level to a project: all 512 vanilla exports imported and built
   differ from vanilla only where Lunar Magic changed them on export. Level files carry
-  Kobo's names (`kobo_core::names`) as trailing comments. Still to do in 2a: BPS output,
-  and Asar for Kobo's own patches, which have none until 2b.
+  Kobo's names (`kobo_core::names`) as trailing comments. `kobo build --bps` also writes
+  the build as a BPS patch against the clean ROM. Still to do in 2a: builds applying
+  Kobo's own patches (`kobo_core::install`), which wait for the first 2b feature.
 - SA-1 builds: `[rom] sa1 = true` has the base stage apply SA-1 Pack (`tools.sa1pack` or
   `KOBO_SA1PACK`, run through Asar, never bundled) and its 6 or 8 MiB patch for a larger
   image. An empty SA-1 project builds byte for byte what `asar sa1.asm` makes of vanilla;
