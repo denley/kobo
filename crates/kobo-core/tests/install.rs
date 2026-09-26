@@ -79,7 +79,8 @@ fn pages_past_1_come_from_the_page_tables() {
     };
     let mut space = FreeSpace::scan(&rom);
     // Each group's table pointer and bank, where Lunar Magic's layout has
-    // them, and whether the pointer is kept less one.
+    // them, and whether the pointer is kept less one. A tile is at the
+    // pointer plus its number times 8, kept to 16 bits.
     let groups: [(u16, u32, u32, bool); 5] = [
         (0x0200, 0x06F553, 0x06F557, false),
         (0x1000, 0x06F55C, 0x06F560, false),
@@ -97,7 +98,8 @@ fn pages_past_1_come_from_the_page_tables() {
             rom.write(at, &definition(tile)).unwrap();
             expected.push((tile, definition(tile)));
         }
-        let stored = table.offset().wrapping_sub(less_one as u16);
+        let index = first.wrapping_mul(8);
+        let stored = table.offset().wrapping_sub(index + less_one as u16);
         rom.write_u16(SnesAddr::new(pointer), stored).unwrap();
         rom.write_u8(SnesAddr::new(bank), table.bank()).unwrap();
     }

@@ -213,7 +213,17 @@ how each oracle is produced, where its data lives, and what is known not to matc
   `~/.local/share/kobo/tools/gps-1.4.4` here), and `cargo run --release --example
   contact_probe -- run out/probe.sfc` plays the level with the player placed against the
   block in each scenario and prints the actions that ran. The same run on a Kobo build with
-  the same block must print the same.
+  the same block must print the same. `contact_probe -- stand rom level x y tile...
+  [addr=value...]` drops the player onto each tile and prints whether they landed and
+  `$1693`, in any ROM.
+- **A hack's content through Kobo's code**: transfer a hack into a Lunar Magic-saved
+  vanilla ROM with Lunar Magic's command line (`-ImportMultLevels` of its MWL exports,
+  `-ImportAllMap16`, `-ImportAllGraphics` of its `-ExportGFX`/`-ExportExGFX`,
+  `-ImportSharedPalette`, `-TransferLevelGlobalExAnim`), then `tools/lunar-magic/with-kobo`
+  swaps Kobo's bank `$06` code in, keeping the tables, and `render_hashes` and
+  `ramdiff.py --summary` compare the two over all 512 levels. Do not import into a Kobo
+  install instead: Lunar Magic's save then installs most of its own code over it
+  ([lunar-magic-install.md](lunar-magic-install.md)). Kaizo Kindergarten passes.
 - **Tool stages**: `tests/tool_stages.rs` builds two Asar patches, early and late, one
   including a file, onto the synthetic base when Asar's library is configured (no ROM):
   they apply in order, the output repeats, and changing the included file changes the

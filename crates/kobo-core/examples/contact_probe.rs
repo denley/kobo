@@ -10,6 +10,12 @@
 //! scenario, for small and big Mario, and prints
 //! the actions the probe block (`tools/lunar-magic/block-probe/probe.asm`)
 //! logged, with where the game sampled, relative to the player.
+//! `contact_probe stand rom.sfc level x y tile...` drops the player onto
+//! each tile in turn, written into the grid at (x, y) of a horizontal level
+//! (or of a vertical level's first screen), and prints whether they landed
+//! and the low byte of the tile the game was told it acts like (`$1693`),
+//! and, on a probe ROM, the actions the probe block logged. An argument
+//! `addr=value` (hex) instead of a tile writes that RAM byte on every frame.
 
 use kobo_core::level::objects::Object;
 use kobo_core::mwl::MwlFile;
@@ -44,7 +50,30 @@ fn main() {
             let at = |i: usize, default| args.get(i).map_or(default, |s| s.parse().unwrap());
             run(&args[1], at(2, 6), at(3, 20))
         }
-        _ => eprintln!("usage: contact_probe place in.mwl out.mwl x y | run rom.sfc [x y]"),
+        Some("stand") => {
+            let n = |i: usize| u16::from_str_radix(&args[i], 16).unwrap();
+            let (pokes, tiles): (Vec<_>, Vec<_>) = args[5..].iter().partition(|a| a.contains('='));
+            let tiles: Vec<u16> = tiles
+                .iter()
+                .map(|t| u16::from_str_radix(t, 16).unwrap())
+                .collect();
+            let pokes: Vec<(u32, u8)> = pokes
+                .iter()
+                .map(|p| {
+                    let (a, v) = p.split_once('=').unwrap();
+                    (
+                        u32::from_str_radix(a, 16).unwrap(),
+                        u8::from_str_radix(v, 16).unwrap(),
+                    )
+                })
+                .collect();
+            let (x, y) = (args[3].parse().unwrap(), args[4].parse().unwrap());
+            stand(&args[1], n(2), x, y, &tiles, &pokes)
+        }
+        _ => eprintln!(
+            "usage: contact_probe place in.mwl out.mwl x y | run rom.sfc [x y] \
+             | stand rom.sfc level x y tile..."
+        ),
     }
 }
 
@@ -172,6 +201,44 @@ fn run(path: &str, tile_x: i32, tile_y: i32) {
         })
         .unwrap();
         println!("fire   {name:22} {}", log(&ram).join(" "));
+    }
+}
+
+fn stand(path: &str, level: u16, tile_x: i32, tile_y: i32, tiles: &[u16], pokes: &[(u32, u8)]) {
+    let rom = Rom::load(path).unwrap();
+    let vertical = kobo_core::level::read_primary_header(&rom, level)
+        .unwrap()
+        .level_mode
+        .layer1_vertical();
+    let index = if vertical {
+        (tile_y * 16 + tile_x) as u32
+    } else {
+        (tile_x / 16 * 0x1B0 + tile_y * 16 + tile_x % 16) as u32
+    };
+    for &tile in tiles {
+        let ram = expand::play_level(&rom, level, 16, |frame, ram| {
+            if frame == 0 {
+                let [low, high] = tile.to_le_bytes();
+                ram.set_u8(ram::RamAddr::new(0x7E_C800 + index), low);
+                ram.set_u8(ram::RamAddr::new(0x7F_C800 + index), high);
+                ram.set_u16(ram::PLAYER_X, (tile_x * 16) as u16);
+                ram.set_u16(ram::PLAYER_Y, (tile_y * 16 - 40) as u16);
+                ram.set_u8(ram::PLAYER_Y_SPEED, 0x30);
+                ram.set_u8(ram::RamAddr::new(LOG), 0);
+            }
+            for &(addr, value) in pokes {
+                ram.set_u8(ram::RamAddr::new(addr), value);
+            }
+        })
+        .unwrap();
+        let on_ground = ram.u8(ram::RamAddr::new(0x7E_13EF)) != 0;
+        let y = ram.u16(ram::PLAYER_Y) as i32 - (tile_y * 16 - 32);
+        println!(
+            "{tile:04X}: {} (y {y:+}), $1693 = {:02X} {}",
+            if on_ground { "landed" } else { "in the air" },
+            ram.u8(ram::RamAddr::new(0x7E_1693)),
+            log(&ram).join(" ")
+        );
     }
 }
 

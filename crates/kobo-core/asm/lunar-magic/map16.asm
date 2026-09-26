@@ -9,8 +9,11 @@
 lorom
 
 ; The page tables' pointers, as a fresh Lunar Magic install writes them
-; before any page has data: bank $00, which Lunar Magic takes for none. The
-; groups of pages $20-$3F and $60-$7F keep their pointer less one.
+; before any page has data: bank $00, which Lunar Magic takes for none. A
+; tile's definition is at its group's pointer plus the tile number times 8,
+; kept to 16 bits: pages $02-$0F start $1000 bytes past their pointer, pages
+; $10-$1F $8000, and a pointer outside $8000-$FFFF is usual. The groups of
+; pages $20-$3F and $60-$7F keep their pointer less one.
 org $06F553 : dw $F000
 org $06F557 : db $00          ; pages $02-$0F
 org $06F55C : dw $8000
@@ -124,16 +127,14 @@ map16_find:
     LSR A
     LSR A
     TAX                       ; X = its group of 16 pages, times 2
-    LDA 1,s
-    SEC
-    SBC.l .first,x
+    LDA 1,s                   ; its offset from the pointer, 16 bits
     ASL A
     ASL A
     ASL A
     STA 1,s
     CPX #$0000
     BNE .table
-    CMP #$0800                ; page 2, with tables per tileset?
+    CMP #$1800                ; page 2, with tables per tileset?
     BCS .table
     LDA $F547
     AND #$00FF
@@ -145,10 +146,8 @@ map16_find:
     ASL A
     ASL A
     CLC
-    ADC #$1000
-    CLC
-    ADC 1,s
-    CLC
+    ADC 1,s                   ; $1000 past the pointer, as in the group's
+    CLC                       ; table, then $800 bytes a tileset
     ADC $F586
     STA 1,s
     LDA $F58A
@@ -174,10 +173,8 @@ map16_find:
     PLX
     RTS
 
-; Each group's first tile, and where its table's pointer and bank are.
-; Pages $20-$3F and $60-$7F keep the pointer less one.
-.first:
-    dw $0200, $1000, $2000, $3000, $4000, $5000, $6000, $7000
+; Where each group's table pointer and bank are. Pages $20-$3F and $60-$7F
+; keep the pointer less one.
 .pointer:
     dw $F553, $F55C, $F567, $F570, $F594, $F59D, $F5A8, $F5B1
 .bank:
