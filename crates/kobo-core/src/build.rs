@@ -25,8 +25,11 @@ use thiserror::Error;
 
 use crate::addr::SnesAddr;
 use crate::asar::{Asar, AsarError, Patch};
+use crate::compress::lz2;
 use crate::compress::rle1;
 use crate::config::{self, ConfigError};
+use crate::gfx;
+use crate::image::IndexedImage;
 use crate::install;
 use crate::level::objects::{self, Jumps, Layout, Object, ObjectError};
 use crate::level::{self, LevelError, tables};
@@ -91,6 +94,8 @@ pub enum BuildError {
     Tool(#[from] ToolError),
     #[error(transparent)]
     Config(#[from] ConfigError),
+    #[error("{path}: {message}")]
+    Gfx { path: PathBuf, message: String },
     #[error("the build cache at {path}: {source}")]
     Cache {
         path: PathBuf,
@@ -117,6 +122,8 @@ pub struct Project {
     pub map16: Vec<(u8, Map16Page)>,
     /// BG Map16 pages, `$00` to `$FF` (table * 16 + page).
     pub map16_bg: Vec<(u8, Map16Page)>,
+    /// GFX files `00` to `33`, as images of colour indices.
+    pub gfx: Vec<(u8, IndexedImage)>,
 }
 
 impl Project {
@@ -148,6 +155,19 @@ impl Project {
             }
             Ok::<_, BuildError>(out)
         };
+        let mut gfx = Vec::new();
+        for (&index, file) in &manifest.gfx {
+            let path = dir.join(file);
+            let bytes = fs::read(&path).map_err(|source| BuildError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            let image = IndexedImage::from_png(&bytes).map_err(|e| BuildError::Gfx {
+                path: path.clone(),
+                message: e.to_string(),
+            })?;
+            gfx.push((index, image));
+        }
         let map16 = pages(&manifest.map16, PageKind::Foreground)?;
         let map16_bg = pages(&manifest.map16_bg, PageKind::Background)?;
         Ok(Self {
@@ -156,6 +176,7 @@ impl Project {
             levels,
             map16,
             map16_bg,
+            gfx,
         })
     }
 
@@ -186,6 +207,8 @@ pub enum Stage {
     EarlyPatches,
     /// AddmusicK, with the project's music.
     Music,
+    /// GFX files `00` to `33`.
+    Graphics,
     /// Map16 pages past 1 and the acts-like tables. GPS, which will run
     /// after it, rewrites the acts-like table.
     Map16,
@@ -199,11 +222,12 @@ pub enum Stage {
 }
 
 impl Stage {
-    pub const ALL: [Stage; 8] = [
+    pub const ALL: [Stage; 9] = [
         Stage::Base,
         Stage::Install,
         Stage::EarlyPatches,
         Stage::Music,
+        Stage::Graphics,
         Stage::Map16,
         Stage::UberAsm,
         Stage::LatePatches,
@@ -216,6 +240,7 @@ impl Stage {
             Stage::Install => "install",
             Stage::EarlyPatches => "early patches",
             Stage::Music => "music",
+            Stage::Graphics => "graphics",
             Stage::Map16 => "map16",
             Stage::UberAsm => "uberasm",
             Stage::LatePatches => "late patches",
@@ -264,6 +289,19 @@ impl Stage {
                     hash.update(source.as_bytes());
                 }
                 hash.finalize().to_vec()
+            }
+            Stage::Graphics => {
+                let mut bytes = Vec::new();
+                for (index, image) in &project.gfx {
+                    bytes.push(*index);
+                    let png = image.to_png().map_err(|e| BuildError::Gfx {
+                        path: PathBuf::from(format!("GFX{index:02X}")),
+                        message: e.to_string(),
+                    })?;
+                    bytes.extend((png.len() as u64).to_le_bytes());
+                    bytes.extend(png);
+                }
+                bytes
             }
             Stage::Map16 => {
                 let mut bytes = Vec::new();
@@ -350,6 +388,7 @@ impl Stage {
                         .map_err(|e| BuildError::Asar(Box::new(e)))?;
                 }
             }
+            Stage::Graphics => write_gfx(rom, clean, project)?,
             Stage::Map16 => {
                 write_map16(rom, project)?;
                 write_map16_bg(rom, clean, project)?;
@@ -432,6 +471,7 @@ fn apply_sa1pack(rom: &Rom, size: usize) -> Result<Rom, BuildError> {
 fn rom_size(clean: &Rom, project: &Project) -> usize {
     let m = &project.manifest;
     let writes = !project.levels.is_empty()
+        || !project.gfx.is_empty()
         || project.lunar_magic_layout()
         || m.sa1
         || !m.early_patches.is_empty()
@@ -516,6 +556,7 @@ pub fn base_image(clean: &Rom, manifest: &Manifest) -> Result<Rom, BuildError> {
         levels: Vec::new(),
         map16: Vec::new(),
         map16_bg: Vec::new(),
+        gfx: Vec::new(),
     };
     let mut rom = Rom::from_bytes(clean.data().to_vec())?;
     Stage::Base.run(&mut rom, clean, &project)?;
@@ -623,6 +664,62 @@ fn write_map16(rom: &mut Rom, project: &Project) -> Result<(), BuildError> {
         rom.write_u8(group.bank, bank)?;
     }
     Ok(())
+}
+
+/// Writes the project's GFX files, each in the format the clean ROM has
+/// it in, LC_LZ2, and points the game's tables at them. `GFX32` and `GFX33`
+/// share a bank, so a project that has either writes both into one block.
+fn write_gfx(rom: &mut Rom, clean: &Rom, project: &Project) -> Result<(), BuildError> {
+    if project.gfx.is_empty() {
+        return Ok(());
+    }
+    let reader = gfx::GfxReader::new(clean).map_err(|e| gfx_error("the clean ROM", &e))?;
+    let mut space = FreeSpace::scan(rom);
+    let mut files = std::collections::BTreeMap::new();
+    for (index, image) in &project.gfx {
+        let name = format!("GFX{index:02X}");
+        let vanilla = reader.read(*index).map_err(|e| gfx_error(&name, &e))?;
+        let tiles = gfx::image_to_tiles(image, vanilla.tile_count(), vanilla.format.colors())
+            .map_err(|e| gfx_error(&name, &e))?;
+        let data = vanilla.format.encode(&tiles);
+        files.insert(
+            *index,
+            lz2::compress(&data).map_err(|e| gfx_error(&name, &e))?,
+        );
+    }
+    for (&index, stream) in files.iter().filter(|(i, _)| **i < 0x32) {
+        let at = place(rom, &mut space, stream)?;
+        let i = index as u32;
+        rom.write_u8(gfx::GFX_PTR_LO.add(i), at.offset() as u8)?;
+        rom.write_u8(gfx::GFX_PTR_HI.add(i), (at.offset() >> 8) as u8)?;
+        rom.write_u8(gfx::GFX_PTR_BANK.add(i), at.bank())?;
+    }
+    if files.contains_key(&0x32) || files.contains_key(&0x33) {
+        let stream = |index: u8| -> Result<Vec<u8>, BuildError> {
+            match files.get(&index) {
+                Some(s) => Ok(s.clone()),
+                None => {
+                    let f = reader
+                        .read(index)
+                        .map_err(|e| gfx_error("the clean ROM", &e))?;
+                    Ok(clean.read(f.addr, f.compressed_len)?.to_vec())
+                }
+            }
+        };
+        let (a, b) = (stream(0x32)?, stream(0x33)?);
+        let at = place(rom, &mut space, &[a.as_slice(), b.as_slice()].concat())?;
+        rom.write_u16(gfx::GFX32_PTR, at.offset())?;
+        rom.write_u16(gfx::GFX33_PTR, at.add(a.len() as u32).offset())?;
+        rom.write_u8(gfx::GFX32_33_BANK, at.bank())?;
+    }
+    Ok(())
+}
+
+fn gfx_error(name: &str, e: &dyn std::fmt::Display) -> BuildError {
+    BuildError::Gfx {
+        path: PathBuf::from(name),
+        message: e.to_string(),
+    }
 }
 
 /// Writes the project's BG Map16 pages into a table of their own, all 16

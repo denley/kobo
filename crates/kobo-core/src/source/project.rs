@@ -48,6 +48,9 @@ pub struct Manifest {
     /// A folder of AddmusicK's input files (`Addmusic_list.txt`, `music/`,
     /// `samples/`, ...), laid over the user's AddmusicK folder.
     pub music: Option<PathBuf>,
+    /// GFX file (`00` to `33`) to indexed PNG, relative to the project
+    /// directory.
+    pub gfx: BTreeMap<u8, PathBuf>,
     /// Map16 page to file, relative to the project directory.
     pub map16: BTreeMap<u8, PathBuf>,
     /// BG Map16 page (table * 16 + page) to file.
@@ -87,7 +90,11 @@ impl Manifest {
         if let Some(uberasm) = &self.uberasm {
             out += &format!("\n[uberasm]\ndir = \"{}\"\n", slashes(uberasm));
         }
-        for (name, pages) in [("map16", &self.map16), ("map16_bg", &self.map16_bg)] {
+        for (name, pages) in [
+            ("gfx", &self.gfx),
+            ("map16", &self.map16),
+            ("map16_bg", &self.map16_bg),
+        ] {
             if !pages.is_empty() {
                 out += &format!("\n[{name}]\n");
                 for (page, path) in pages {
@@ -106,7 +113,8 @@ impl Manifest {
         let doc: DocumentMut = text.parse()?;
         for (key, _) in doc.iter() {
             if ![
-                "format", "rom", "patches", "music", "uberasm", "map16", "map16_bg", "levels",
+                "format", "rom", "patches", "music", "uberasm", "gfx", "map16", "map16_bg",
+                "levels",
             ]
             .contains(&key)
             {
@@ -202,7 +210,11 @@ impl Manifest {
                 }
             }
         }
-        for (name, range) in [("map16", map16::PAGES), ("map16_bg", 0x00..=0xFF)] {
+        for (name, range) in [
+            ("gfx", 0x00..=0x33),
+            ("map16", map16::PAGES),
+            ("map16_bg", 0x00..=0xFF),
+        ] {
             let Some(pages) = doc.get(name) else { continue };
             let pages = pages
                 .as_table()
@@ -226,10 +238,10 @@ impl Manifest {
                 let path = item
                     .as_str()
                     .ok_or_else(|| invalid(&at, "must be a file path"))?;
-                let list = if name == "map16" {
-                    &mut manifest.map16
-                } else {
-                    &mut manifest.map16_bg
+                let list = match name {
+                    "gfx" => &mut manifest.gfx,
+                    "map16" => &mut manifest.map16,
+                    _ => &mut manifest.map16_bg,
                 };
                 if list.insert(page, PathBuf::from(path)).is_some() {
                     return Err(invalid(&at, "is listed twice"));
@@ -296,6 +308,7 @@ mod tests {
             late_patches: vec![PathBuf::from("asm/a.asm"), PathBuf::from("asm/b.asm")],
             music: Some(PathBuf::from("music")),
             uberasm: Some(PathBuf::from("uberasm")),
+            gfx: BTreeMap::from([(0x00, PathBuf::from("graphics/GFX00.png"))]),
             map16: BTreeMap::from([(0x10, PathBuf::from("map16/10.toml"))]),
             map16_bg: BTreeMap::from([(0x01, PathBuf::from("map16/bg-01.toml"))]),
             levels: BTreeMap::from([
@@ -309,7 +322,7 @@ mod tests {
             "format = 1\n\n[rom]\nsize = \"1536K\"\nsa1 = true\n\n[patches]\n\
              early = [\"asm/fastrom.asm\"]\nlate = [\"asm/a.asm\", \"asm/b.asm\"]\n\n\
              [music]\ndir = \"music\"\n\n[uberasm]\ndir = \"uberasm\"\n\n\
-             [map16]\n0x10 = \"map16/10.toml\"\n\n[map16_bg]\n0x01 = \"map16/bg-01.toml\"\n\n\
+             [gfx]\n0x00 = \"graphics/GFX00.png\"\n\n[map16]\n0x10 = \"map16/10.toml\"\n\n[map16_bg]\n0x01 = \"map16/bg-01.toml\"\n\n\
              [levels]\n\
              0x0C7 = \"title.toml\"\n0x105 = \"world1/yoshis-island-1.toml\"\n"
         );

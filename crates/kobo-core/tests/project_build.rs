@@ -113,6 +113,7 @@ fn an_empty_project_builds_the_clean_rom() {
         levels: Vec::new(),
         map16: Vec::new(),
         map16_bg: Vec::new(),
+        gfx: Vec::new(),
     };
     assert_eq!(build::build(&clean, &project).unwrap().data(), clean.data());
 }
@@ -133,6 +134,7 @@ fn edits_reach_the_rom() {
         levels: vec![(0x105, level.clone())],
         map16: Vec::new(),
         map16_bg: Vec::new(),
+        gfx: Vec::new(),
     };
     let built = build::build(&clean, &project).unwrap();
     assert_eq!(import::read_level(&built, 0x105).unwrap().0, level);
@@ -182,6 +184,7 @@ fn lunar_magic_objects_build() {
         levels: vec![(0x105, level.clone())],
         map16: Vec::new(),
         map16_bg: Vec::new(),
+        gfx: Vec::new(),
     };
     let built = build::build(&clean, &project).unwrap();
     assert_eq!(import::read_level(&built, 0x105).unwrap().0, level);
@@ -253,6 +256,7 @@ fn lunar_magic_backgrounds_build() {
             levels: vec![(0x105, level.clone())],
             map16: Vec::new(),
             map16_bg: Vec::new(),
+            gfx: Vec::new(),
         };
         let built = build::build(&clean, &project).unwrap();
         assert_eq!(
@@ -309,6 +313,7 @@ fn custom_palettes_build() {
         levels: vec![(0x105, level.clone())],
         map16: Vec::new(),
         map16_bg: Vec::new(),
+        gfx: Vec::new(),
     };
     let built = build::build(&clean, &project).unwrap();
     assert_eq!(import::read_level(&built, 0x105).unwrap().0, level);
@@ -321,6 +326,49 @@ fn custom_palettes_build() {
         })
         .count();
     assert!(same > 240, "{same} of 256 colours are the level's");
+}
+
+#[test]
+fn gfx_files_build() {
+    let Some(clean) = common::vanilla() else {
+        return;
+    };
+    use kobo_core::gfx;
+    let reader = gfx::GfxReader::new(&clean).unwrap();
+    // A 3bpp file, the packed Mode 7 one, and one of the pair sharing a bank.
+    let mut images = Vec::new();
+    for index in [0x01u8, 0x27, 0x32] {
+        let file = reader.read(index).unwrap();
+        let mut tiles = file.tiles();
+        for (i, tile) in tiles.iter_mut().enumerate() {
+            tile.pixels[i % 8][(i / 8) % 8] = (i % file.colors()) as u8;
+        }
+        images.push((index, gfx::tiles_to_image(&tiles, file.colors()), tiles));
+    }
+    let project = Project {
+        root: std::path::PathBuf::from("."),
+        manifest: Default::default(),
+        levels: Vec::new(),
+        map16: Vec::new(),
+        map16_bg: Vec::new(),
+        gfx: images
+            .iter()
+            .map(|(i, image, _)| (*i, image.clone()))
+            .collect(),
+    };
+    let built = build::build(&clean, &project).unwrap();
+    let back = gfx::GfxReader::new(&built).unwrap();
+    for (index, _, tiles) in &images {
+        assert_eq!(&back.read(*index).unwrap().tiles(), tiles, "GFX{index:02X}");
+    }
+    // GFX33 keeps its tiles, moved along with GFX32.
+    assert_eq!(
+        back.read(0x33).unwrap().data,
+        reader.read(0x33).unwrap().data
+    );
+    let (read, notes) = import::read_gfx(&built, &clean).unwrap();
+    assert!(notes.is_empty(), "{notes:?}");
+    assert_eq!(read.len(), 3);
 }
 
 #[test]
@@ -337,6 +385,7 @@ fn cached_builds_equal_clean_ones() {
         levels: vec![(0x105, level)],
         map16: Vec::new(),
         map16_bg: Vec::new(),
+        gfx: Vec::new(),
     };
     let uncached = build::build(&clean, &project).unwrap();
     let cold = build::build_cached(&clean, &project, Some(&cache)).unwrap();
@@ -376,6 +425,7 @@ fn a_synthetic_build_is_the_same_everywhere() {
         levels: vec![(0x105, level.clone()), (0x0C7, level)],
         map16: Vec::new(),
         map16_bg: Vec::new(),
+        gfx: Vec::new(),
     };
     let built = build::build_on(&base, &project, None).unwrap();
     assert_eq!(

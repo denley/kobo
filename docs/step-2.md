@@ -328,6 +328,13 @@ on the built ROM.
   colours), from ROMs and MWL files, built with Kobo's palette hook. Kaizo Kindergarten's
   334 palettes build to the hack's CGRAM but where ExAnimation changes colours, and survive
   Lunar Magic's save.
+- GFX files `00`-`33` in the game's own formats: the manifest's `[gfx]` table of indexed
+  PNGs (16 tiles to a row, the pixel the colour index), imported where a ROM's differ
+  from the base, built as LC_LZ2 with the game's pointer tables repointed (`GFX32` and
+  `GFX33` share a bank and move together). Most Lunar Magic 3 hacks store their files as
+  4bpp, which only Lunar Magic's graphics loader reads; those, ExGFX, and per-level
+  graphics lists come with that loader, the next piece (Kaizo Kindergarten: 2 of its
+  files are in the game's formats, 47 are not).
 - 2b then takes Lunar Magic-layout features one at a time, each through its source format,
   import from MWL and ROM, build, the Lunar Magic check, and the corpus check together, so
   neither direction anchors the format: Map16 pages 2 and up and background Map16, custom
