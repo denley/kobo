@@ -427,6 +427,34 @@ the hook's outputs as the ROM's code leaves them) and implemented by Kobo
   change colours across Lunar Magic's first save of a build, which carries no ExAnimation
   yet; the others keep every colour.
 
+### Graphics: GFX files, ExGFX, per-level lists, and the VRAM patch
+
+Found by importing an MWL with one graphics slot changed into copies of a Lunar
+Magic-saved ROM and diffing (data only), and by following pointers to what changed.
+
+- Per-level graphics lists: the 3-byte pointer at `$0FF7FF` leads to level `000`'s list,
+  then one list of 16 words per level, in the MWL file's slot order (AN2, LT3, BG3, BG2,
+  FG3, BG1, FG2, FG1, SP4, SP3, SP2, SP1, LG4, LG3, LG2, LG1); `$007F` for a slot that
+  keeps the tileset's file, `$FFFF` for none. In Kaizo Kindergarten the lists sit
+  `$2D00` bytes into a `$6E00`-byte RATS block (`$128000`), all `$FF` before level `000`,
+  and 519 are filled, 7 more than there are levels. `$0FF873` and `$0FF937` hold the
+  block's start. A list naming files a ROM does not have (vanilla, with ExGFX `80`) is not
+  stored at all.
+- ExGFX `80`-`FF`: 3-byte pointers at `$0FF600`, 128 of them, each to a RATS-tagged file.
+- GFX files `00`-`33` stay in the game's pointer tables; a hack's are often 4bpp
+  (Kaizo Kindergarten: 47 of 52), which only Lunar Magic's loader reads.
+- The loader belongs to the group a save checks at `$00A5A2` (docs above): Lunar Magic's
+  VRAM patch. Its sites cover the level setup (`STZ UploadMarioStart : JSR SetUpScreen` at
+  `$00A5A2`), the NMI's special-level branch (`$0081E2`), `JSL UploadOneMap16Strip`
+  (`$008209`), the stripe image upload (`$0085D2`), the camera's left edge (`$00F6E4`, the
+  byte PIXI checks), the level load's tile buffers (`$0580A9`, `$0580C0`, `$0586F7`), and the
+  game loop's `$00BA56`. The sprite files' `JSL PrepareGraphicsFile` at `$00A873` is
+  retargeted too. PIXI refuses a ROM without `$00F6E4` = `JML`, and its sprites assume the
+  patch's VRAM layout, so PIXI waits for Kobo's own version of this group.
+- Still to find: where ExGFX `100`-`FFF` are, how a list's slots map to VRAM, which of the
+  group's sites a save treats as the check and what it then keeps (the lists' pointer
+  lives in code a save rewrites), and the VRAM layout the patch sets up.
+
 ### Entrances, exits, and midway points
 
 - Secondary entrances (data): exits `0CE`, `0CF`, `0D0`, `0D9`, `0DB`, `0DE`, `0E1`,
